@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Geotracker</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand"><span class="brand-mark" aria-hidden="true"></span><strong>Geotracker</strong></div>
+      <nav aria-label="Main navigation">
+        <button class="nav active" data-view="explore">History</button>
+        <button class="nav" data-view="places">Places</button>
+        <button class="nav" data-view="reminders">Reminders <span id="event-count" class="pill" hidden>0</span></button>
+      </nav>
+      <div class="top-actions"><span id="connection" class="connection">Connecting…</span><button id="auth-button" class="text-button" type="button">Account</button></div>
+    </div>
+  </header>
+
+  <main>
+    <section id="explore-view" class="view active">
+      <div class="page-head"><h1 id="history-title">Today</h1><button id="export" class="outline-button" hidden>Export GeoJSON</button></div>
+      <div id="history-filters" class="daybar" aria-label="Choose a day">
+        <div class="day-navigation"><button id="previous-day" class="day-arrow" type="button" aria-label="Previous day">‹</button><label>Day<input id="day-date" type="date" required></label><button id="next-day" class="day-arrow" type="button" aria-label="Next day">›</button><button id="today" class="text-button" type="button">Today</button></div>
+        <label id="source-filter">Source<select id="source"><option value="">All sources</option></select></label>
+      </div>
+
+      <div id="summary" class="metrics" hidden>
+        <div><span>Driving trips</span><strong id="stat-driving">0</strong></div>
+        <div><span>Walking trips</span><strong id="stat-walking">0</strong></div>
+        <div><span>Cycling trips</span><strong id="stat-cycling">0</strong></div>
+        <div><span>Places visited</span><strong id="stat-places">0</strong></div>
+        <div><span>Recorded fixes</span><strong id="stat-points">0</strong></div>
+      </div>
+      <p id="day-context" class="day-context" hidden></p>
+
+      <div id="history-layout" class="history-layout no-data">
+        <section class="map-shell" aria-label="Recorded location map">
+          <div class="map-topline"><span id="map-note">Recorded route</span><button id="locate" class="small-button" hidden>Last fix</button></div>
+          <div class="map-stage"><div id="map" role="application" aria-label="Location map"></div><div id="history-empty" class="map-empty"><strong>No locations recorded for this day</strong><span>Choose another date to explore your history.</span></div></div>
+          <div id="map-footer" class="map-footer" hidden><span><i class="legend path"></i> Recorded segments</span><span>Gaps are not connected</span></div>
+        </section>
+        <aside id="inspector" class="inspector" hidden>
+          <section><h2>Visited places</h2><div id="visited-places" class="list"></div></section>
+          <section id="map-detail-section" hidden><h2>Nearby points</h2><div id="map-detail" class="list"></div></section>
+        </aside>
+      </div>
+
+      <section id="history-details" class="history-details" hidden>
+        <div class="detail-tabs" role="tablist" aria-label="History details">
+          <button class="detail-tab active" data-panel="trips" role="tab" aria-selected="true">Trips</button>
+          <button class="detail-tab" data-panel="stays" role="tab" aria-selected="false">Stays</button>
+          <button class="detail-tab" data-panel="speed" role="tab" aria-selected="false">Speed</button>
+          <button class="detail-tab" data-panel="samples" role="tab" aria-selected="false">Samples</button>
+          <button class="detail-tab" data-panel="patterns" role="tab" aria-selected="false">Patterns</button>
+          <button class="detail-tab" data-panel="coverage" role="tab" aria-selected="false">Coverage</button>
+        </div>
+        <div class="detail-panel active" data-panel-view="trips"><div id="trips" class="list"></div></div>
+        <div class="detail-panel" data-panel-view="stays"><div id="stays" class="list"></div></div>
+        <div class="detail-panel" data-panel-view="speed"><div id="speed-chart" class="chart-wrap"></div></div>
+        <div class="detail-panel" data-panel-view="samples"><p id="sample-count" class="section-note"></p><div class="table-wrap"><table><thead><tr><th>Time</th><th>Source</th><th>Mode</th><th>Speed</th><th>Coordinates</th><th>Accuracy</th></tr></thead><tbody id="points-table"></tbody></table></div></div>
+        <div class="detail-panel" data-panel-view="patterns"><p id="prediction" class="section-note"></p><div id="transitions" class="list"></div></div>
+        <div class="detail-panel" data-panel-view="coverage"><div id="coverage" class="list"></div></div>
+      </section>
+    </section>
+
+    <section id="places-view" class="view">
+      <div class="page-head"><h1>Places</h1></div>
+      <div class="places-layout">
+        <section class="surface"><h2>Saved places</h2><div id="places-list" class="list"></div></section>
+        <div class="places-tools">
+          <section class="surface"><h2>Find an address</h2><form id="search-form" class="search-row"><input id="search" placeholder="Search by name or address" aria-label="Search address"><button class="outline-button">Search</button></form><div id="search-results" class="result-list"></div><p id="geocode-hint" class="section-note"></p></section>
+          <section class="surface"><h2>Place details</h2><form id="place-form" class="form-stack"><input type="hidden" id="place-id"><label>Name<input id="place-name" required maxlength="120" placeholder="e.g. University"></label><div class="form-pair"><label>Latitude<input id="place-lat" type="number" step="any" min="-90" max="90" required></label><label>Longitude<input id="place-lon" type="number" step="any" min="-180" max="180" required></label></div><button type="button" id="reverse" class="text-button align-start">Find address from coordinates</button><label>Arrival radius (m)<input id="place-radius" type="number" min="20" max="5000" value="150" required></label><label>Address<input id="place-address" maxlength="300"></label><button class="primary-button align-start">Save place</button></form></section>
+        </div>
+      </div>
+      <section id="suggestions-panel" class="surface suggestions" hidden><h2>Suggested places</h2><div id="suggestions-list" class="list"></div></section>
+    </section>
+
+    <section id="reminders-view" class="view">
+      <div class="page-head"><h1>Reminders</h1><button id="notifications" class="outline-button">Enable browser alerts</button></div>
+      <div class="reminders-layout"><section class="surface"><h2>New reminder</h2><form id="reminder-form" class="form-stack"><label>Remind me to<input id="reminder-text" required maxlength="500" placeholder="Pick up salt"></label><label>When I arrive at<select id="reminder-place" required></select></label><label class="check"><input id="reminder-repeat" type="checkbox"> Repeat on future visits</label><label id="reminder-cooldown-field" hidden>Repeat cooldown (minutes)<input id="reminder-cooldown" type="number" min="1" max="525600" value="1440"></label><button class="primary-button align-start">Create reminder</button></form></section><section class="surface"><h2>Active and past reminders</h2><div id="reminders-list" class="list"></div></section></div>
+      <section id="arrival-inbox" class="surface arrival-inbox" hidden><h2>Arrival events</h2><div id="events-list" class="list"></div></section>
+    </section>
+  </main>
+
+  <div id="auth-panel" class="auth-backdrop" hidden><form id="auth-form" class="auth-card"><h2>Unlock Geotracker</h2><label>Access token<input id="auth-token" type="password" autocomplete="current-password" required></label><p id="auth-error" class="auth-error" role="alert"></p><div class="auth-actions"><button type="button" id="auth-cancel" class="outline-button">Cancel</button><button class="primary-button">Unlock</button></div></form></div>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  <script src="/app.js" defer></script>
+</body>
+</html>

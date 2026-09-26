@@ -1,0 +1,42 @@
+services:
+  db:
+    image: postgis/postgis:17-3.5
+    platform: linux/amd64
+    environment:
+      POSTGRES_DB: geotracker
+      POSTGRES_USER: geotracker
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U geotracker -d geotracker"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  app:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      GEOTRACKER_DATABASE_URL: postgresql://geotracker@db:5432/geotracker
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      GEOTRACKER_TOKEN: ${GEOTRACKER_TOKEN:?Set GEOTRACKER_TOKEN in .env}
+      GEOTRACKER_TOKEN_FILE: /config/.env
+      GEOAPIFY_API_KEY: ${GEOAPIFY_API_KEY:-}
+      GEOTRACKER_PHOTON_URL: ${GEOTRACKER_PHOTON_URL:-}
+      GEOTRACKER_WEBHOOK_URL: ${GEOTRACKER_WEBHOOK_URL:-}
+      GEOTRACKER_WEBHOOK_TOKEN: ${GEOTRACKER_WEBHOOK_TOKEN:-}
+    ports:
+      - "127.0.0.1:${GEOTRACKER_PUBLISHED_PORT:-8765}:8765"
+    volumes:
+      - ./.env:/config/.env:ro
+    read_only: true
+    tmpfs:
+      - /tmp
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
