@@ -6,7 +6,7 @@ import math
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from .core import metres, parse_time, route_segments_from_points, stats_from_points, trips_from_points
+from .core import address_for_coordinate, metres, parse_time, route_segments_from_points, select_best_timed_fixes, select_unique_fixes, stats_from_points, trips_from_points
 
 
 STOP_RADIUS_M = 50
@@ -216,8 +216,11 @@ def insights(store, limit=50):
     rows = stays(store, limit=None)
     patterns = place_patterns(store, limit=None, rows=rows)
     edges = transitions(store, limit=None, patterns=patterns, rows=rows)
+    unlabeled = [p for p in patterns[0] if p["place_id"] is None][:limit]
+    for place in unlabeled[:12]:
+        place["address"] = address_for_coordinate(store, place["lat"], place["lon"])
     return {"frequent_places": patterns[0][:limit],
-            "unlabeled_places": [p for p in patterns[0] if p["place_id"] is None][:limit],
+            "unlabeled_places": unlabeled,
             "transitions": edges[:limit],
             "prediction": predict_next(store, patterns=patterns, edges=edges),
             "observed_stays": len(rows)}
@@ -248,13 +251,21 @@ def day_summary(store, date, timezone_name="UTC", source=None):
         first = max(datetime.fromisoformat(stay["started_at"]), day_start).isoformat()
         cluster["first_seen"] = min(cluster.get("first_seen", first), first)
     visited_places = sorted(clusters, key=lambda item: item["first_seen"])
-    points = store.points(start, end, source=source, limit=None)
-    chronological = list(reversed(points))
-    trips = trips_from_points(chronological)
+    for place in visited_places:
+        place["address"] = address_for_coordinate(store, place["lat"], place["lon"])
+        if not place["name"] and place["address"]:
+            place["name"] = place["address"]
+    points = store.observations(start, end, source=source, limit=None)
+    raw_chronological = list(reversed(points))
+    chronological = select_unique_fixes(raw_chronological)
+    trips = trips_from_points(select_best_timed_fixes(raw_chronological))
     route_segments = route_segments_from_points(chronological)
-    activity_counts = {mode: sum(trip["mode"] == mode for trip in trips) for mode in ("driving", "walking", "cycling")}
+    activity_counts = {mode: sum(trip["mode"] == mode for trip in trips) for mode in ("driving", "walking", "running_cycling")}
+    stats = stats_from_points(chronological)
+    stats["points"] = len(points)
+    stats["unique_points"] = len(chronological)
     return {"date": date, "timezone": timezone_name, "source": source, "points": len(points), "stays": day_stays,
-            "stats": stats_from_points(chronological), "trips": trips, "route_segments": route_segments, "activity_counts": activity_counts,
+            "unique_points": len(chronological), "stats": stats, "trips": trips, "route_segments": route_segments, "activity_counts": activity_counts,
             "visited_places": visited_places,
             "first_fix": points[-1]["timestamp"] if points else None,
             "last_fix": points[0]["timestamp"] if points else None,

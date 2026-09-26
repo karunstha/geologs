@@ -62,7 +62,7 @@ LIMIT 1;
 
 `$2` is longitude and `$3` latitude. The lookup needs a short cache lifetime, provider identity, and a result type. Buildings/amenities reuse within 15 m; streets within 30 m; city-only responses are exact-point entries because a city bounding box may include unrelated addresses. For real administrative or parcel boundaries, store verified polygons separately and use polygon containment. Never treat a geocoder's bounding rectangle as its true boundary.
 
-The cache is checked before calling the provider. Only explicit reverse lookup calls it today. Raw GPS ingestion remains provider-free. A future enrichment job should have a daily request budget, low rate, and retry queue.
+The cache is checked before calling the provider. Saved places and confirmed visited places now ask for an address when viewed or saved; raw GPS ingestion remains provider-free. A future background enrichment job should have a daily request budget, low rate, and retry queue.
 
 ## Query examples
 

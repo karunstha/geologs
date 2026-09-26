@@ -8,7 +8,7 @@ from email.message import Message
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from geotracker.core import Store, geocode, mode_for, reverse_cache_radius, reverse_geocode, route_segments_from_points
+from geotracker.core import Store, geocode, mode_for, reverse_cache_radius, reverse_geocode, route_segments_from_points, select_unique_fixes
 from geotracker.analysis import day_summary, insights, place_patterns, predict_next, stays, transitions
 from geotracker.imports import import_takeout
 from geotracker.mcp import dispatch
@@ -35,6 +35,7 @@ class StoreTests(unittest.TestCase):
         result = self.store.ingest(inside)
         self.assertEqual(len(result["events"]), 1)
         self.assertEqual(self.store.ingest(inside)["duplicates"], 1)
+        self.assertEqual(len(self.store.observations()), 2)
         self.assertEqual(len(self.store.events()), 1)
         self.assertEqual(self.store.reminders()[0]["active"], 0)
 
@@ -92,7 +93,7 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(len(segments), 1)
         self.assertEqual(len(segments[0]), 2)
 
-    def test_trip_counts_split_when_movement_mode_changes(self):
+    def test_trip_classification_uses_connected_trip_context(self):
         self.store.ingest([
             {"source": "phone", "timestamp": f"2026-09-25T10:{minute:02d}:00Z", "lat": lat, "lon": -87.9, "speed_mps": speed}
             for minute, lat, speed in [(0, 41, 0), (5, 41.01, 10), (10, 41.02, 10),
@@ -100,7 +101,73 @@ class StoreTests(unittest.TestCase):
         ])
         day = day_summary(self.store, "2026-09-25", "UTC")
         self.assertEqual(day["activity_counts"]["driving"], 1)
-        self.assertEqual(day["activity_counts"]["walking"], 1)
+        self.assertEqual(day["activity_counts"]["walking"], 0)
+        self.assertEqual(len(day["trips"]), 1)
+
+    def test_red_light_does_not_split_driving_trip(self):
+        base = datetime(2026, 9, 25, 10, tzinfo=timezone.utc)
+        self.store.ingest([
+            {"source": "phone", "timestamp": (base + timedelta(minutes=minute)).isoformat(),
+             "lat": lat, "lon": -87.9, "speed_mps": speed, "accuracy_m": 10}
+            for minute, lat, speed in [(0, 41.0, 0), (1, 41.001, 4), (2, 41.002, 4),
+                                       (3, 41.002, 0), (4, 41.002, 0), (5, 41.003, 14),
+                                       (6, 41.004, 16)]
+        ])
+        day = day_summary(self.store, "2026-09-25", "UTC")
+        self.assertEqual(len(day["trips"]), 1)
+        self.assertEqual(day["trips"][0]["mode"], "driving")
+        self.assertEqual(day["activity_counts"]["running_cycling"], 0)
+
+    def test_accuracy_selection_preserves_raw_fixes(self):
+        self.store.ingest([
+            {"source": "phone", "timestamp": "2026-09-25T10:00:00Z", "lat": 41, "lon": -87.9, "accuracy_m": 90},
+            {"source": "phone", "timestamp": "2026-09-25T10:00:30Z", "lat": 41.00002, "lon": -87.9, "accuracy_m": 8},
+            {"source": "phone", "timestamp": "2026-09-25T10:04:00Z", "lat": 41.00003, "lon": -87.9, "accuracy_m": 12},
+        ])
+        raw = list(reversed(self.store.points(limit=None)))
+        selected = select_unique_fixes(raw)
+        self.assertEqual(len(raw), 3)
+        self.assertEqual(len(selected), 2)
+        self.assertEqual(selected[0]["accuracy_m"], 8)
+        day = day_summary(self.store, "2026-09-25", "UTC")
+        self.assertEqual((day["unique_points"], day["points"]), (2, 3))
+
+    def test_duplicate_delivery_is_stored_and_better_accuracy_is_selected(self):
+        first = {"source": "phone", "external_id": "ha-1", "timestamp": "2026-09-25T10:00:00Z",
+                 "lat": 41, "lon": -87.9, "accuracy_m": 80}
+        self.store.ingest(first)
+        self.assertEqual(self.store.ingest({**first, "accuracy_m": 5})["duplicates"], 1)
+        self.assertEqual(len(self.store.points()), 1)
+        self.assertEqual(len(self.store.observations()), 2)
+        day = day_summary(self.store, "2026-09-25", "UTC")
+        self.assertEqual((day["unique_points"], day["points"]), (1, 2))
+        self.assertEqual(self.store.latest()["accuracy_m"], 5)
+
+    def test_retry_of_backfilled_legacy_fix_does_not_add_an_observation(self):
+        fix = {"source": "phone", "external_id": "ha-1", "timestamp": "2026-09-25T10:00:00Z",
+               "lat": 41, "lon": -87.9, "accuracy_m": 80}
+        self.store.ingest(fix)
+        point_id = self.store.points()[0]["id"]
+        self.store.db.execute("UPDATE point_observations SET legacy_point_id=?,fingerprint=NULL WHERE point_id=?",
+                              (point_id, point_id))
+        self.store.db.commit()
+        self.assertEqual(self.store.ingest(fix)["duplicates"], 1)
+        self.assertEqual(len(self.store.observations()), 1)
+        self.store.ingest({**fix, "accuracy_m": 5})
+        self.assertEqual(len(self.store.observations()), 2)
+
+    def test_long_stop_separates_driving_and_walking(self):
+        base = datetime(2026, 9, 25, 10, tzinfo=timezone.utc)
+        self.store.ingest([
+            {"source": "phone", "timestamp": (base + timedelta(minutes=minute)).isoformat(),
+             "lat": lat, "lon": -87.9, "speed_mps": speed, "accuracy_m": 10}
+            for minute, lat, speed in [(0, 41.0, 0), (1, 41.001, 15), (2, 41.002, 15),
+                                       (3, 41.002, 0), (4, 41.002, 0), (5, 41.002, 0),
+                                       (6, 41.002, 0), (7, 41.002, 0), (8, 41.0025, 1.5),
+                                       (9, 41.003, 1.5)]
+        ])
+        trips = list(reversed(day_summary(self.store, "2026-09-25", "UTC")["trips"]))
+        self.assertEqual([trip["mode"] for trip in trips], ["driving", "walking"])
 
     def test_csv_import_and_mcp(self):
         csv = "timestamp,lat,lon,accuracy_m,speed_mps\n2026-09-26T10:00:00Z,41,-87.9,,\n"
@@ -140,7 +207,7 @@ class StoreTests(unittest.TestCase):
     def test_mode_thresholds(self):
         self.assertEqual(mode_for(0), "idle")
         self.assertEqual(mode_for(1), "walking")
-        self.assertEqual(mode_for(3), "cycling")
+        self.assertEqual(mode_for(3), "running_cycling")
         self.assertEqual(mode_for(15), "driving")
         self.assertEqual(mode_for(1, 300), "unknown")
 
@@ -170,11 +237,34 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(geocode(self.store, "market")[0]["name"], "Market, Chicago")
             self.assertEqual(request.call_count, 1)
             self.assertEqual(reverse_geocode(self.store, 41, -87.9)["cache"], "provider")
+            exact = reverse_geocode(self.store, 41, -87.9)
+            self.assertEqual(exact["cache"], "region")
+            self.assertFalse(exact["approximate"])
             reused = reverse_geocode(self.store, 41.00005, -87.9)
             self.assertEqual(reused["cache"], "region")
             self.assertTrue(reused["approximate"])
             self.assertEqual(reverse_geocode(self.store, 41.001, -87.9)["cache"], "provider")
             self.assertEqual(request.call_count, 3)
+
+    def test_geocode_bias_uses_latest_fix_and_cache_is_area_specific(self):
+        self.store.ingest({"source": "phone", "timestamp": "2026-09-25T10:00:00Z", "lat": 41, "lon": -87.9})
+        response = {"results": [{"formatted": "Nearby market", "lat": 41.01, "lon": -87.9}]}
+        with patch.dict(os.environ, {"GEOAPIFY_API_KEY": "test", "GEOTRACKER_PHOTON_URL": ""}), patch("geotracker.core.provider_request", return_value=response) as request:
+            self.assertEqual(geocode(self.store, "market")[0]["name"], "Nearby market")
+            self.assertEqual(request.call_args.args[1]["bias"], "proximity:-87.9,41.0")
+            geocode(self.store, "market")
+            self.assertEqual(request.call_count, 1)
+            geocode(self.store, "market", 42, -88)
+            self.assertEqual(request.call_count, 2)
+
+    def test_saved_places_reverse_geocode_once_per_cached_region(self):
+        response = {"results": [{"formatted": "Market Street", "result_type": "building"}]}
+        with patch.dict(os.environ, {"GEOAPIFY_API_KEY": "test", "GEOTRACKER_PHOTON_URL": ""}), patch("geotracker.core.provider_request", return_value=response) as request:
+            first = self.store.save_place({"name": "Shop", "lat": 41, "lon": -87.9})
+            second = self.store.save_place({"name": "Office", "lat": 41.00003, "lon": -87.9})
+            self.assertEqual(first["address"], "Market Street")
+            self.assertEqual(second["address"], "Market Street")
+            self.assertEqual(request.call_count, 1)
 
     def test_reverse_cache_expires_and_coarse_results_have_no_assumed_area(self):
         self.assertEqual(reverse_cache_radius("city"), 0)

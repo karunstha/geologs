@@ -7,7 +7,7 @@ services:
       POSTGRES_USER: geotracker
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - ./data/postgres:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U geotracker -d geotracker"]
       interval: 5s
@@ -30,13 +30,10 @@ services:
       GEOTRACKER_WEBHOOK_URL: ${GEOTRACKER_WEBHOOK_URL:-}
       GEOTRACKER_WEBHOOK_TOKEN: ${GEOTRACKER_WEBHOOK_TOKEN:-}
     ports:
-      - "127.0.0.1:${GEOTRACKER_PUBLISHED_PORT:-8765}:8765"
+      - "0.0.0.0:${GEOTRACKER_PUBLISHED_PORT:-8765}:8765"
     volumes:
       - ./.env:/config/.env:ro
     read_only: true
     tmpfs:
       - /tmp
     restart: unless-stopped
-
-volumes:
-  postgres_data:

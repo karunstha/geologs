@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import json
 import math
@@ -51,8 +52,45 @@ def mode_for(speed_mps, accuracy_m=None):
     if kmh < 7:
         return "walking"
     if kmh < 22:
-        return "cycling"
+        return "running_cycling"
     return "driving" if kmh < 200 else "unknown"
+
+
+def select_unique_fixes(points):
+    """Keep the most accurate fix in each short, nearby run of samples.
+
+    The caller supplies chronological raw points. Time limits preserve later
+    visits to the same coordinate, and the raw archive is never discarded.
+    """
+    selected = []
+    first = best = None
+    for point in points:
+        same_run = False
+        if first is not None and point["source"] == first["source"]:
+            elapsed = (datetime.fromisoformat(point["timestamp"]) - datetime.fromisoformat(first["timestamp"])).total_seconds()
+            same_run = 0 <= elapsed <= 120 and metres(point["lat"], point["lon"], first["lat"], first["lon"]) <= 15
+        if not same_run:
+            if best is not None:
+                selected.append(best)
+            first = best = point
+        elif (point["accuracy_m"] if point["accuracy_m"] is not None else float("inf")) < (best["accuracy_m"] if best["accuracy_m"] is not None else float("inf")):
+            best = point
+    if best is not None:
+        selected.append(best)
+    return selected
+
+
+def select_best_timed_fixes(points):
+    """Keep one accuracy-best observation per source timestamp for trip timing."""
+    selected = []
+    for point in points:
+        if selected and (selected[-1]["source"], selected[-1]["timestamp"]) == (point["source"], point["timestamp"]):
+            previous = selected[-1]
+            if (point["accuracy_m"] if point["accuracy_m"] is not None else float("inf")) < (previous["accuracy_m"] if previous["accuracy_m"] is not None else float("inf")):
+                selected[-1] = point
+        else:
+            selected.append(point)
+    return selected
 
 
 def stats_from_points(points):
@@ -67,40 +105,64 @@ def stats_from_points(points):
         segment = metres(prev["lat"], prev["lon"], point["lat"], point["lon"])
         if point["source"] == prev["source"] and 0 < elapsed <= 900 and segment / elapsed <= 55.6 and (point["accuracy_m"] is None or point["accuracy_m"] <= 150):
             distance += segment
-            if point["mode"] in ("walking", "cycling", "driving"):
+            if point["mode"] in ("walking", "running_cycling", "driving"):
                 moving_seconds += elapsed
     return {"points": len(points), "distance_km": round(distance / 1000, 2), "moving_hours": round(moving_seconds / 3600, 2), "modes": by_mode,
             "first": points[0]["timestamp"] if points else None, "last": points[-1]["timestamp"] if points else None}
 
 
 def trips_from_points(points):
-    """Build movement runs from chronological fixes, with no lines across gaps."""
-    trips, current = [], None
-    for previous, point in zip(points, points[1:]):
-        elapsed = (datetime.fromisoformat(point["timestamp"]) - datetime.fromisoformat(previous["timestamp"])).total_seconds()
+    """Classify connected travel as a whole; short traffic stops stay inside it."""
+    trips, run = [], []
+    last_moving_at = None
+
+    def finish():
+        active = [point for point in run if last_moving_at is None or datetime.fromisoformat(point["timestamp"]) <= last_moving_at]
+        if len(active) < 2:
+            return
+        moving = []
+        for previous, point in zip(active, active[1:]):
+            seconds = (datetime.fromisoformat(point["timestamp"]) - datetime.fromisoformat(previous["timestamp"])).total_seconds()
+            distance = metres(previous["lat"], previous["lon"], point["lat"], point["lon"])
+            if seconds > 0 and distance >= 10:
+                moving.append((distance, max(distance / seconds, point.get("speed_mps") or 0)))
+        if not moving:
+            return
+        distance_m = sum(distance for distance, _ in moving)
+        peak_kmh = max(speed for _, speed in moving) * 3.6
+        driving_evidence = any(distance >= 60 and speed * 3.6 >= 25 for distance, speed in moving)
+        mode = "driving" if driving_evidence else "running_cycling" if peak_kmh >= 7 else "walking"
+        trips.append({"start": active[0]["timestamp"], "end": active[-1]["timestamp"],
+                      "distance_km": round(distance_m / 1000, 2), "mode": mode,
+                      "modes": {mode: len(moving)},
+                      "coordinates": [[point["lon"], point["lat"]] for point in active]})
+
+    for point in points:
+        if not run:
+            run = [point]
+            last_moving_at = None
+            continue
+        previous = run[-1]
+        seconds = (datetime.fromisoformat(point["timestamp"]) - datetime.fromisoformat(previous["timestamp"])).total_seconds()
         distance = metres(previous["lat"], previous["lon"], point["lat"], point["lon"])
-        moving = previous["source"] == point["source"] and 0 < elapsed <= 900 and point["mode"] in ("walking", "cycling", "driving") and distance / elapsed <= 55.6
-        if moving and current and point["mode"] not in current["modes"]:
-            current["distance_km"] = round(current["distance_km"], 2)
-            current["mode"] = max(current["modes"], key=current["modes"].get)
-            trips.append(current)
-            current = None
-        if moving:
-            if current is None:
-                current = {"start": previous["timestamp"], "end": point["timestamp"], "distance_km": 0, "modes": {}, "coordinates": [[previous["lon"], previous["lat"]]]}
-            current["end"] = point["timestamp"]
-            current["distance_km"] += distance / 1000
-            current["modes"][point["mode"]] = current["modes"].get(point["mode"], 0) + 1
-            current["coordinates"].append([point["lon"], point["lat"]])
-        elif current:
-            current["distance_km"] = round(current["distance_km"], 2)
-            current["mode"] = max(current["modes"], key=current["modes"].get)
-            trips.append(current)
-            current = None
-    if current:
-        current["distance_km"] = round(current["distance_km"], 2)
-        current["mode"] = max(current["modes"], key=current["modes"].get)
-        trips.append(current)
+        accurate = all(p["accuracy_m"] is None or p["accuracy_m"] <= 150 for p in (previous, point))
+        connected = previous["source"] == point["source"] and 0 < seconds <= 900 and distance / seconds <= 55.6 and accurate
+        if not connected:
+            finish()
+            run = [point]
+            last_moving_at = None
+            continue
+        run.append(point)
+        if distance >= 10:
+            last_moving_at = datetime.fromisoformat(point["timestamp"])
+        elif last_moving_at is None:
+            run = [point]
+        elif last_moving_at and (datetime.fromisoformat(point["timestamp"]) - last_moving_at).total_seconds() >= 300:
+            stationary = run.pop()
+            finish()
+            run = [stationary]
+            last_moving_at = None
+    finish()
     return list(reversed(trips))
 
 
@@ -149,6 +211,15 @@ class Store:
         );
         CREATE INDEX IF NOT EXISTS points_time ON points(timestamp);
         CREATE INDEX IF NOT EXISTS points_source_time ON points(source,timestamp);
+        CREATE TABLE IF NOT EXISTS point_observations (
+            id INTEGER PRIMARY KEY, point_id INTEGER NOT NULL REFERENCES points(id),
+            legacy_point_id INTEGER UNIQUE REFERENCES points(id),
+            source TEXT NOT NULL, timestamp TEXT NOT NULL,
+            lat REAL NOT NULL, lon REAL NOT NULL, accuracy_m REAL, speed_mps REAL,
+            received_at TEXT NOT NULL, fingerprint TEXT UNIQUE
+        );
+        CREATE INDEX IF NOT EXISTS point_observations_time ON point_observations(timestamp);
+        CREATE INDEX IF NOT EXISTS point_observations_source_time ON point_observations(source,timestamp);
         CREATE TABLE IF NOT EXISTS places (
             id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE COLLATE NOCASE,
             lat REAL NOT NULL, lon REAL NOT NULL, radius_m REAL NOT NULL DEFAULT 150,
@@ -198,6 +269,15 @@ class Store:
         CREATE TRIGGER IF NOT EXISTS reverse_regions_delete AFTER DELETE ON reverse_regions
         BEGIN DELETE FROM reverse_regions_spatial WHERE id=old.id; END;
             """)
+        if not self.postgres:
+            version = self.db.execute("PRAGMA user_version").fetchone()[0]
+            if version < 1:
+                self.db.execute("UPDATE points SET mode='running_cycling' WHERE mode='cycling'")
+            if version < 2:
+                self.db.execute("""INSERT OR IGNORE INTO point_observations
+                    (point_id,legacy_point_id,source,timestamp,lat,lon,accuracy_m,speed_mps,received_at)
+                    SELECT id,id,source,timestamp,lat,lon,accuracy_m,speed_mps,timestamp FROM points""")
+                self.db.execute("PRAGMA user_version=2")
         if not self.db.execute("SELECT 1 FROM stay_processing_state LIMIT 1").fetchone() and self.db.execute("SELECT 1 FROM points LIMIT 1").fetchone():
             from .analysis import process_stays
             process_stays(self)
@@ -249,11 +329,36 @@ class Store:
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING RETURNING id""",
                 (source, str(external_id) if external_id is not None else None, timestamp, lat, lon, accuracy, speed, origin, mode))
             inserted_row = cursor.fetchone()
+            point_id = inserted_row["id"] if inserted_row else None
+            if not inserted_row:
+                existing = None
+                if external_id is not None:
+                    existing = self.db.execute("SELECT id FROM points WHERE source=? AND external_id=?", (source, str(external_id))).fetchone()
+                if existing is None:
+                    existing = self.db.execute("SELECT id FROM points WHERE source=? AND timestamp=? AND lat=? AND lon=?", (source, timestamp, lat, lon)).fetchone()
+                if existing is None:
+                    raise RuntimeError("conflicting point could not be found")
+                point_id = existing["id"]
+            reported_speed = float(raw["speed_mps"]) if raw.get("speed_mps") is not None else None
+            legacy_retry = False
+            if not inserted_row:
+                legacy = self.db.execute("""SELECT timestamp,lat,lon,accuracy_m,speed_mps
+                    FROM point_observations WHERE legacy_point_id=?""", (point_id,)).fetchone()
+                legacy_retry = bool(legacy and legacy["timestamp"] == timestamp and legacy["lat"] == lat
+                    and legacy["lon"] == lon and legacy["accuracy_m"] == accuracy
+                    and legacy["speed_mps"] == reported_speed)
+            if not legacy_retry:
+                self.db.execute("""INSERT INTO point_observations
+                    (point_id,source,timestamp,lat,lon,accuracy_m,speed_mps,received_at,fingerprint)
+                    VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(fingerprint) DO NOTHING""",
+                    (point_id, source, timestamp, lat, lon, accuracy, reported_speed,
+                     parse_time(None), hashlib.sha256(json.dumps(
+                         [source, str(external_id) if external_id is not None else None, timestamp, lat, lon, accuracy, reported_speed],
+                         separators=(",", ":")).encode()).hexdigest()))
             if not inserted_row:
                 duplicate += 1
                 continue
             inserted += 1
-            point_id = inserted_row["id"]
             # Late imports are stored but do not rewind the live geofence state.
             if previous and timestamp <= previous["timestamp"]:
                 continue
@@ -297,11 +402,44 @@ class Store:
             suffix = " LIMIT ?"
         return self._rows("SELECT id,source,external_id,timestamp,lat,lon,accuracy_m,speed_mps,speed_origin,mode FROM points" + where + " ORDER BY timestamp DESC" + suffix, args)
 
+    def observations(self, start=None, end=None, source=None, limit=5000):
+        clauses, args = [], []
+        if start:
+            clauses.append("o.timestamp>=?"); args.append(parse_time(start))
+        if end:
+            clauses.append("o.timestamp<=?"); args.append(parse_time(end))
+        if source:
+            clauses.append("o.source=?"); args.append(source)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        suffix = ""
+        if limit is not None:
+            args.append(min(max(int(limit), 1), 20000))
+            suffix = " LIMIT ?"
+        rows = self._rows("""SELECT o.id,o.point_id,p.external_id,o.source,o.timestamp,o.lat,o.lon,o.accuracy_m,
+            COALESCE(o.speed_mps,p.speed_mps) AS speed_mps,
+            CASE WHEN o.speed_mps IS NOT NULL THEN 'reported' ELSE p.speed_origin END AS speed_origin,
+            o.received_at FROM point_observations o JOIN points p ON p.id=o.point_id""" + where + " ORDER BY o.timestamp DESC,COALESCE(o.accuracy_m,1000000000) ASC,o.id DESC" + suffix, args)
+        for row in rows:
+            row["mode"] = mode_for(row["speed_mps"], row["accuracy_m"])
+        return rows
+
+    def observation_count(self, start=None, end=None, source=None):
+        clauses, args = [], []
+        if start:
+            clauses.append("timestamp>=?"); args.append(parse_time(start))
+        if end:
+            clauses.append("timestamp<=?"); args.append(parse_time(end))
+        if source:
+            clauses.append("source=?"); args.append(source)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        return self.db.execute("SELECT COUNT(*) AS n FROM point_observations" + where, args).fetchone()["n"]
+
     def latest(self):
-        rows = self._rows("SELECT id,source,external_id,timestamp,lat,lon,accuracy_m,speed_mps,speed_origin,mode FROM points ORDER BY timestamp DESC LIMIT 1")
+        rows = self.observations(limit=1)
         if not rows:
             return None
         point = rows[0]
+        point["id"] = point["point_id"]
         point["age_seconds"] = max(0, round((datetime.now(timezone.utc) - datetime.fromisoformat(point["timestamp"])).total_seconds()))
         point["stale"] = point["age_seconds"] > 900
         return point
@@ -315,8 +453,21 @@ class Store:
             rows = self._rows(f"SELECT {columns}, ABS(strftime('%s',timestamp)-strftime('%s',?)) AS seconds_away FROM points ORDER BY seconds_away LIMIT 1", (at,))
         return rows[0] if rows else None
 
-    def places(self):
-        return self._rows("SELECT id,name,lat,lon,radius_m,address FROM places ORDER BY name")
+    def places(self, enrich=False):
+        rows = self._rows("SELECT id,name,lat,lon,radius_m,address FROM places ORDER BY name")
+        if enrich:
+            changed = False
+            for place in rows:
+                if place["address"]:
+                    continue
+                result = address_for_coordinate(self, place["lat"], place["lon"])
+                if result:
+                    place["address"] = result
+                    self.db.execute("UPDATE places SET address=? WHERE id=? AND (address IS NULL OR address='')", (result, place["id"]))
+                    changed = True
+            if changed:
+                self.db.commit()
+        return rows
 
     def save_place(self, raw):
         name = str(raw.get("name", "")).strip()
@@ -327,6 +478,8 @@ class Store:
         if not (-90 <= lat <= 90 and -180 <= lon <= 180 and 20 <= radius <= 5000):
             raise ValueError("invalid place coordinates or radius (20–5000 m)")
         address = str(raw.get("address") or "")[:300]
+        if not address:
+            address = address_for_coordinate(self, lat, lon)
         if raw.get("id"):
             updated = self.db.execute("UPDATE places SET name=?,lat=?,lon=?,radius_m=?,address=? WHERE id=?", (name, lat, lon, radius, address, int(raw["id"])))
             if not updated.rowcount:
@@ -373,14 +526,19 @@ class Store:
         return {"updated": result.rowcount}
 
     def stats(self, start=None, end=None, source=None):
-        return stats_from_points(list(reversed(self.points(start, end, source=source, limit=None))))
+        raw = list(reversed(self.observations(start, end, source=source, limit=None)))
+        selected = select_unique_fixes(raw)
+        result = stats_from_points(selected)
+        result["points"] = len(raw)
+        result["unique_points"] = len(selected)
+        return result
 
     def trips(self, start=None, end=None, source=None):
         """Movement runs, split by pauses and gaps. Estimates from samples, not map matching."""
-        return trips_from_points(list(reversed(self.points(start, end, source=source, limit=None))))
+        return trips_from_points(select_best_timed_fixes(list(reversed(self.observations(start, end, source=source, limit=None)))))
 
     def export_geojson(self, start=None, end=None):
-        return {"type": "FeatureCollection", "features": [{"type": "Feature", "geometry": {"type": "Point", "coordinates": [p["lon"], p["lat"]]}, "properties": {k: v for k, v in p.items() if k not in ("lat", "lon")}} for p in self.points(start, end, limit=None)]}
+        return {"type": "FeatureCollection", "features": [{"type": "Feature", "geometry": {"type": "Point", "coordinates": [p["lon"], p["lat"]]}, "properties": {k: v for k, v in p.items() if k not in ("lat", "lon")}} for p in self.observations(start, end, limit=None)]}
 
     def import_csv(self, content, source="csv"):
         reader = csv.DictReader(io.StringIO(content) if isinstance(content, str) else content)
@@ -539,21 +697,37 @@ def photon_result(feature):
     return {"name": label or "Unknown place", "lat": lat, "lon": lon, "address": label}
 
 
-def geocode(store, query):
+def geocode(store, query, lat=None, lon=None):
     query = query.strip()
     if not query or len(query) > 200:
         raise ValueError("query is required (max 200 characters)")
-    key = "search:" + query.casefold()
+    if (lat is None) != (lon is None):
+        raise ValueError("lat and lon must be provided together")
+    if lat is not None:
+        bias = (float(lat), float(lon))
+        if not (-90 <= bias[0] <= 90 and -180 <= bias[1] <= 180):
+            raise ValueError("invalid search bias coordinates")
+    else:
+        latest = store.latest()
+        bias = (float(latest["lat"]), float(latest["lon"])) if latest else None
+    # Cache by nearby search area; a result from another city must not win later.
+    key = "search:" + query.casefold() + (f":{bias[0]:.2f}:{bias[1]:.2f}" if bias else ":unbiased")
     photon = os.environ.get("GEOTRACKER_PHOTON_URL", "").rstrip("/")
     provider = "photon:" + photon if photon else "geoapify"
     cached = store.cached(key, provider)
     if cached is not None:
         return cached
     if photon:
-        data = json_get(photon + "/api?" + urllib.parse.urlencode({"q": query, "limit": 5}))
+        params = {"q": query, "limit": 5}
+        if bias:
+            params.update({"lat": bias[0], "lon": bias[1]})
+        data = json_get(photon + "/api?" + urllib.parse.urlencode(params))
         value = [photon_result(r) for r in data.get("features", [])]
     else:
-        data = provider_request("/v1/geocode/search", {"text": query, "limit": 5, "format": "json"})
+        params = {"text": query, "limit": 5, "format": "json"}
+        if bias:
+            params["bias"] = f"proximity:{bias[1]},{bias[0]}"
+        data = provider_request("/v1/geocode/search", params)
         value = [{"name": r.get("formatted", query), "lat": r["lat"], "lon": r["lon"], "address": r.get("formatted", "")} for r in data.get("results", [])]
     store.cache(key, provider, value)
     return value
@@ -569,7 +743,8 @@ def reverse_geocode(store, lat, lon):
     with _reverse_lock:
         cached = store.reverse_region(provider, lat, lon)
         if cached is not None:
-            return {**cached, "lat": lat, "lon": lon, "cache": "region", "approximate": True}
+            approximate = metres(lat, lon, cached["lat"], cached["lon"]) > 0.5
+            return {**cached, "lat": lat, "lon": lon, "cache": "region", "approximate": approximate}
         if photon:
             data = json_get(photon + "/reverse?" + urllib.parse.urlencode({"lat": lat, "lon": lon, "limit": 1}))
             feature = data["features"][0] if data.get("features") else None
@@ -583,6 +758,15 @@ def reverse_geocode(store, lat, lon):
             result = {"name": value.get("formatted", "Unknown address"), "address": value.get("formatted", ""), "lat": lat, "lon": lon}
         store.save_reverse_region(provider, lat, lon, reverse_cache_radius(kind), result)
         return {**result, "cache": "provider", "approximate": False}
+
+
+def address_for_coordinate(store, lat, lon):
+    """Use the reverse cache first, then the configured provider when available."""
+    try:
+        value = reverse_geocode(store, lat, lon)
+        return str(value.get("address") or "")[:300]
+    except (ValueError, OSError, KeyError):
+        return ""
 
 
 def deliver_webhook(store, events):

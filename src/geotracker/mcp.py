@@ -20,6 +20,7 @@ INTEGER = {"type": "integer"}
 TOOLS = [
     {"name": "get_current_location", "description": "Most recent GPS point with fix age, stale flag, speed and detected movement mode.", "inputSchema": schema({})},
     {"name": "get_location_history", "description": "GPS samples in a time window (ISO 8601 timestamps).", "inputSchema": schema({"start": STRING, "end": STRING, "source": STRING, "limit": INTEGER})},
+    {"name": "get_raw_observations", "description": "Received coordinate and accuracy versions with receipt time; exact retransmissions are coalesced.", "inputSchema": schema({"start": STRING, "end": STRING, "source": STRING, "limit": INTEGER})},
     {"name": "get_location_at_time", "description": "Nearest recorded point to an ISO 8601 timestamp, including its time difference.", "inputSchema": schema({"timestamp": STRING}, ["timestamp"])},
     {"name": "search_locations_near", "description": "Recorded points within a radius of coordinates, optionally in a time window.", "inputSchema": schema({"lat": NUMBER, "lon": NUMBER, "radius_m": NUMBER, "start": STRING, "end": STRING, "source": STRING, "limit": INTEGER}, ["lat", "lon"])},
     {"name": "get_travel_stats", "description": "Sampled distance, movement hours, and mode counts for a time window.", "inputSchema": schema({"start": STRING, "end": STRING, "source": STRING})},
@@ -40,7 +41,7 @@ TOOLS = [
     {"name": "set_reminder_active", "description": "Enable or disable a location reminder.", "inputSchema": schema({"id": INTEGER, "active": {"type": "boolean"}}, ["id", "active"])},
     {"name": "list_reminder_events", "description": "Triggered reminder inbox for delivery/notification workflows.", "inputSchema": schema({"since_id": INTEGER, "limit": INTEGER})},
     {"name": "ingest_location", "description": "Store one location from any source and evaluate arrival reminders. Location sources may also use POST /api/points.", "inputSchema": schema({"lat": NUMBER, "lon": NUMBER, "timestamp": STRING, "source": STRING, "external_id": STRING, "accuracy_m": NUMBER, "speed_mps": NUMBER}, ["lat", "lon"])},
-    {"name": "geocode_address", "description": "Search an address with the configured Geoapify or Photon provider; results are cached.", "inputSchema": schema({"query": STRING}, ["query"])},
+    {"name": "geocode_address", "description": "Search an address near the latest recorded fix with the configured Geoapify or Photon provider; results are cached by area.", "inputSchema": schema({"query": STRING, "lat": NUMBER, "lon": NUMBER}, ["query"])},
     {"name": "reverse_geocode", "description": "Look up an address for coordinates with the configured Geoapify or Photon provider; results are cached.", "inputSchema": schema({"lat": NUMBER, "lon": NUMBER}, ["lat", "lon"])},
 ]
 
@@ -50,6 +51,8 @@ def call_tool(store, name, args):
         return store.latest()
     if name == "get_location_history":
         return store.points(args.get("start"), args.get("end"), args.get("source"), args.get("limit", 5000))
+    if name == "get_raw_observations":
+        return store.observations(args.get("start"), args.get("end"), args.get("source"), args.get("limit", 5000))
     if name == "get_location_at_time":
         return store.at_time(args["timestamp"])
     if name == "search_locations_near":
@@ -77,7 +80,7 @@ def call_tool(store, name, args):
     if name == "predict_next_destination":
         return predict_next(store)
     if name == "list_places":
-        return store.places()
+        return store.places(enrich=True)
     if name == "save_place":
         return store.save_place(args)
     if name == "list_reminders":
@@ -93,7 +96,7 @@ def call_tool(store, name, args):
         deliver_webhook(store, value["events"])
         return value
     if name == "geocode_address":
-        return geocode(store, args["query"])
+        return geocode(store, args["query"], args.get("lat"), args.get("lon"))
     if name == "reverse_geocode":
         return reverse_geocode(store, args["lat"], args["lon"])
     raise ValueError("unknown tool: " + str(name))

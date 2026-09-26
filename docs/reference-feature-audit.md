@@ -17,11 +17,11 @@ The four reference projects informed the product choices below. “Built” desc
 ## How the derived features work
 
 - **Observed stays:** incremental per-source analysis processes only new points. A late import rebuilds just its source. Gaps longer than 30 minutes split stays. Low-accuracy points do not support a stay. The result is observed time, not proof of where the person spent a gap.
-- **Frequent places:** stays matching saved place radii are named. Unmatched stays within 75 m form suggestions that the user can name. No external geocoding is performed by this analysis.
+- **Frequent places:** stays matching saved place radii are named. Unmatched stays within 75 m form suggestions that the user can name. Visible suggestions and visited places receive cache-first reverse geocoded addresses when a provider is configured.
 - **Transitions:** consecutive stays from the same source count as a transition when less than 24 hours apart. Scores decay with a 90-day half-life; raw counts remain available.
 - **Prediction:** the current fix must be near an observed stay. Fewer than three departures or only old transitions return no destination. The result is a historical tendency, not a location guarantee.
 - **Takeout import:** classic raw `locations` records are streamed in batches. Import never triggers live reminders or geocoder requests. Reimports ignore duplicate points. Other Google Timeline export shapes need explicit parsers that preserve semantic visit and activity data rather than inventing GPS fixes.
 
 ## Product additions beyond the references
 
-Geotracker connects Home Assistant directly, has a source-independent ingest API, stores arrival reminders and webhook events, and offers a browser for map paths, speed, trips, observed stays, place suggestions, and transitions. Geocoding is on demand and reverse results use a conservative spatial cache.
+Geotracker connects Home Assistant directly, has a source-independent ingest API, stores arrival reminders and webhook events, and offers a browser for map paths, speed, trips, observed stays, place suggestions, and transitions. Saved and observed places are enriched on demand through a conservative reverse cache.

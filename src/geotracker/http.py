@@ -158,6 +158,7 @@ class Handler(BaseHTTPRequestHandler):
                 value = {"ok": True, "geocoding": bool(os.environ.get("GEOAPIFY_API_KEY") or os.environ.get("GEOTRACKER_PHOTON_URL")), "geocoder": "photon" if os.environ.get("GEOTRACKER_PHOTON_URL") else "geoapify" if os.environ.get("GEOAPIFY_API_KEY") else None, "auth": bool(active_token())}
             elif url.path == "/api/current": value = store.latest()
             elif url.path == "/api/points": value = store.points(q.get("start"), q.get("end"), q.get("source"), q.get("limit", 5000))
+            elif url.path == "/api/observations": value = store.observations(q.get("start"), q.get("end"), q.get("source"), q.get("limit", 5000))
             elif url.path == "/api/stats": value = store.stats(q.get("start"), q.get("end"), q.get("source"))
             elif url.path == "/api/trips": value = store.trips(q.get("start"), q.get("end"), q.get("source"))
             elif url.path == "/api/coverage": value = store.coverage()
@@ -169,10 +170,10 @@ class Handler(BaseHTTPRequestHandler):
             elif url.path == "/api/predict-next": value = predict_next(store)
             elif url.path == "/api/insights": value = insights(store, min(int(q.get("limit", 50)), 100))
             elif url.path == "/api/day": value = day_summary(store, q["date"], q.get("timezone", "UTC"), q.get("source"))
-            elif url.path == "/api/places": value = store.places()
+            elif url.path == "/api/places": value = store.places(enrich=True)
             elif url.path == "/api/reminders": value = store.reminders()
             elif url.path == "/api/events": value = store.events(q.get("since_id", 0), q.get("limit", 100))
-            elif url.path == "/api/geocode": value = geocode(store, q.get("q", ""))
+            elif url.path == "/api/geocode": value = geocode(store, q.get("q", ""), q.get("lat"), q.get("lon"))
             elif url.path == "/api/reverse": value = reverse_geocode(store, q["lat"], q["lon"])
             elif url.path == "/api/export.geojson": value = store.export_geojson(q.get("start"), q.get("end"))
             else:

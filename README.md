@@ -5,7 +5,7 @@ A self-hosted personal location archive with a browser, arrival reminders, and M
 ## Quick plan
 
 1.  **Collect:** accept timestamped coordinates from Home Assistant, a cron job, CSV, HTTP, or an MCP tool. Keep source IDs so retries do not duplicate data.
-2.  **Understand:** store points in PostGIS or SQLite, estimate speed when samples are close enough, classify idle/walking/cycling/driving, derive movement runs, save places, and surface coverage gaps.
+2.  **Understand:** retain source fixes in PostGIS or SQLite, select the most accurate nearby fix in short time windows, estimate speed, classify walking/running or cycling/driving trips with stop tolerance, and surface coverage gaps.
 3.  **Act:** trigger one-shot or repeating reminders when a fresh position enters a saved place. Save every event in an inbox and optionally POST it to a webhook.
 4.  **Explore:** open a local-day summary with movement runs, visited places, recorded fixes, and a path map. Choose another date or source, inspect trips and stays, and export that day's GeoJSON.
 5.  **Extend:** add adapters for other location sources and providers without changing the archive or MCP tools.
@@ -29,7 +29,15 @@ Copy `.env.example` to `.env` and replace both secrets with random values. Then:
 docker compose up --build -d
 ```
 
-Open `http://127.0.0.1:8765` and enter `GEOTRACKER_TOKEN` in the browser sign-in panel. The browser keeps an HttpOnly, same-site session cookie for 30 days, so a new tab does not need the token again. Compose mounts only `.env` read-only for the app to check the current token on each request; changing the token invalidates the old browser session. Other Compose environment changes still need a container recreation. Compose starts the app and `postgis/postgis:17-3.5` with a persistent named database volume. The browser only listens on your computer by default. The official PostGIS image is pinned to `linux/amd64`; ARM hosts run that service through Docker emulation.
+Open `http://127.0.0.1:8765` and enter `GEOTRACKER_TOKEN` in the browser sign-in panel. Set `GEOTRACKER_PUBLISHED_PORT` in `.env` if port 8765 is occupied, then use that port for the browser, MCP clients, and the Home Assistant poller. Run `docker compose up -d --force-recreate app` after changing the port. The browser keeps an HttpOnly, same-site session cookie for 30 days, so a new tab does not need the token again. Compose mounts only `.env` read-only for the app to check the current token on each request; changing the token invalidates the old browser session. Other Compose environment changes still need a container recreation. PostgreSQL/PostGIS files live in `./data/postgres`, which is ignored by Git and must be included in your backups. The official PostGIS image is pinned to `linux/amd64`; ARM hosts run that service through Docker emulation.
+
+If you already ran an earlier Compose version with a named `postgres_data` volume, copy it **before starting this version**:
+
+```bash
+./scripts/migrate-postgres-data
+```
+
+The script stops the old containers, copies the volume into `./data/postgres`, then starts the new Compose stack. It refuses to overwrite a populated target and keeps the original named volume as a recovery copy. Run it from the checkout on the host that owns the old Docker volume.
 
 To copy an existing SQLite archive, stop the app container while retaining the database container, then run the migration against an **empty** PostGIS database:
 
@@ -59,18 +67,22 @@ Your SQLite file stays wherever `GEOTRACKER_DB` points; the default is `~/.local
 
 ## Connect Home Assistant with cron
 
-Create a long-lived Home Assistant token and identify a `device_tracker` entity with `latitude` and `longitude` attributes. The poller uses the [Home Assistant state API](https://developers.home-assistant.io/docs/api/rest/) and deduplicates repeated state updates. Set these variables in the environment used by cron:
+Create a long-lived Home Assistant token from your profile's Security tab and identify a GPS `device_tracker` entity with `latitude` and `longitude` attributes. The poller uses the [Home Assistant state API](https://developers.home-assistant.io/docs/api/rest/) and deduplicates repeated state updates. Fill these fields in this project's `.env` file:
+
+```dotenv
+HA_URL=http://homeassistant.local:8123
+HA_TOKEN=your-home-assistant-token
+HA_ENTITY=device_tracker.my_phone
+GEOTRACKER_URL=http://127.0.0.1:8765
+```
+
+Use the port from `GEOTRACKER_PUBLISHED_PORT` in `GEOTRACKER_URL`. `GEOTRACKER_TOKEN` is already in the same file. Check that the selected entity has current coordinates, then test one poll from the project directory:
 
 ```bash
-export HA_URL="http://homeassistant.local:8123"
-export HA_TOKEN="your-home-assistant-token"
-export HA_ENTITY="device_tracker.my_phone"
-export GEOTRACKER_URL="http://127.0.0.1:8765"
-export GEOTRACKER_TOKEN="your-geotracker-token"
 ./geotracker poll-ha
 ```
 
-Run the same command every minute from cron or a systemd timer. Use an absolute path to `geotracker` in the cron entry and a private environment file with restrictive permissions for tokens; cron does not inherit your interactive shell's exports. In a Docker setup, point `GEOTRACKER_URL` at the app. A local non-Docker poller can also use `GEOTRACKER_DATABASE_URL` or `GEOTRACKER_DB` directly.
+For ongoing collection, run it every minute from cron or a systemd timer. A cron entry must change to this project directory so the CLI reads its `.env`; use absolute paths for both. Keep `.env` private because it contains both tokens. In a Docker setup, the host poller posts to the published app port; it does not need direct database access. A local non-Docker poller can also use `GEOTRACKER_DATABASE_URL` or `GEOTRACKER_DB` directly.
 
 Home Assistant may update a tracker at a slower interval than cron. Unchanged updates are ignored, so more frequent polling does not fabricate movement. Speed derived from two positions is only an estimate; sparse GPS samples and location drift can misclassify activity. Only fixes within 30 minutes of the server clock can trigger reminders; historical CSV imports never trigger them.
 
@@ -105,7 +117,7 @@ The importer supports `latitudeE7`, `longitudeE7`, `timestamp` or `timestampMs`,
 
 The archive derives stays incrementally from each source: at least two reasonably accurate samples within 50 m, spanning at least five minutes, with no gap above 30 minutes. Repeated stops are grouped into frequent-place suggestions; you can name them in the browser. Saved places also get observed visit counts and sampled time. These are lower bounds when GPS coverage is sparse.
 
-The History page opens on the browser's local day. Driving, walking, and cycling counts are movement runs inferred from sampled speeds; running is not identified separately. "Places visited" counts distinct confirmed stop clusters, including unlabeled stops. Map lines connect plausible consecutive fixes and leave gaps disconnected. Recorded time and distance describe samples, not the full unobserved day.
+The History page opens on the browser's local day. The append-only `point_observations` table retains different received coordinate and accuracy versions, including a better reading for an existing source event; exact retransmissions are coalesced. "Recorded fixes" shows the number selected for the track out of all stored observations. Selection keeps the best accuracy fix among samples within 15 m and two minutes of the start of a nearby run; later visits remain separate. Driving, walking, and combined running/cycling counts are connected travel runs. A short stop such as a traffic light stays in the same run; a stop of five minutes or a gap over 15 minutes ends it. These are estimates from sampled speeds and displacement, and running is not distinguished from cycling. "Places visited" counts distinct confirmed stop clusters, including unlabeled stops. Map lines connect plausible selected fixes and leave gaps disconnected. Recorded time and distance describe samples, not the full unobserved day.
 
 Consecutive stays create transition counts. A next-destination estimate needs at least three observed departures and recent evidence; older transitions receive less weight. The current-location tool reports fix age and whether it is stale. Day summaries accept an IANA timezone and include a coverage note. No place or person is inferred from an IP address.
 
@@ -117,7 +129,7 @@ The browser's arrival inbox persists events. Browser notifications work while th
 
 ## Geocoding
 
--   Set `GEOAPIFY_API_KEY` to enable address search and reverse geocoding. [Geoapify's free plan](https://www.geoapify.com/pricing/) currently lists 3,000 credits/day; creating an API key requires an account. Requests are on demand. GPS points are never automatically reverse geocoded.
+-   Set `GEOAPIFY_API_KEY` to enable address search and reverse geocoding. [Geoapify's free plan](https://www.geoapify.com/pricing/) currently lists 3,000 credits/day; creating an API key requires an account. Address searches favor the latest recorded fix. Saved places, visible suggested places, and confirmed visited places are reverse geocoded through the cache; raw GPS fixes are never automatically reverse geocoded.
 -   Set `GEOTRACKER_PHOTON_URL` to use your own [Photon](https://github.com/komoot/photon/blob/master/docs/api-v1.md) instance for forward/reverse geocoding. This takes precedence over Geoapify for geocoding.
 
 Saved places, raw paths, trip estimates, reminders, and MCP history work without any provider key. The browser loads Leaflet from its CDN and OpenStreetMap map tiles, so map browsing sends viewport/tile requests to those services. It does not send your stored GPS history to the tile service.
@@ -145,7 +157,7 @@ Use the token from `GEOTRACKER_TOKEN` when one is configured. The endpoint accep
 
 ## API overview
 
-`GET /api/current`, `/api/points`, `/api/stats`, `/api/trips`, `/api/coverage`, `/api/near`, `/api/stays`, `/api/frequent-places`, `/api/transitions`, `/api/predict-next`, `/api/insights`, `/api/day`, `/api/places`, `/api/place-visits`, `/api/reminders`, `/api/events`, `/api/geocode`, `/api/reverse`, `/api/export.geojson`; `POST /api/points`, `/api/places`, `/api/reminders`, `/api/reminders/active`, `/api/events/ack`, `/mcp`.
+`GET /api/current`, `/api/points`, `/api/observations`, `/api/stats`, `/api/trips`, `/api/coverage`, `/api/near`, `/api/stays`, `/api/frequent-places`, `/api/transitions`, `/api/predict-next`, `/api/insights`, `/api/day`, `/api/places`, `/api/place-visits`, `/api/reminders`, `/api/events`, `/api/geocode`, `/api/reverse`, `/api/export.geojson`; `POST /api/points`, `/api/places`, `/api/reminders`, `/api/reminders/active`, `/api/events/ack`, `/mcp`.
 
 All data `/api/*` routes and `/mcp` require authentication when a token is configured. API clients can use the bearer token; the browser exchanges the token at `POST /api/session` for an HttpOnly session cookie. Requests from a different browser origin are rejected. The API has no account or multiuser support; run one archive per person.
 
