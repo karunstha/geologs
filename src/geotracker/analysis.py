@@ -260,6 +260,9 @@ def day_summary(store, date, timezone_name="UTC", source=None):
         place["address"] = address_for_coordinate(store, place["lat"], place["lon"])
         if not place["name"] and place["address"]:
             place["name"] = place["address"]
+    for stay in day_stays:
+        place = by_cluster[mapping[stay["id"]]]
+        stay["display_name"] = place["name"] or "Unlabeled stop"
     points = store.observations(start, end, source=source, limit=None)
     raw_chronological = list(reversed(points))
     chronological = select_unique_fixes(raw_chronological)

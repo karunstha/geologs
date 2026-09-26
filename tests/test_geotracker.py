@@ -79,9 +79,21 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(day["activity_counts"]["walking"], 1)
         self.assertEqual(len(day["visited_places"]), 1)
         self.assertEqual(day["visited_places"][0]["name"], "Campus")
+        self.assertEqual(day["stays"][0]["display_name"], "Campus")
         self.assertEqual(day["visited_places"][0]["visits"], 1)
         self.assertEqual(len(day["trips"]), 2)
         self.assertEqual(len(day["route_segments"]), 1)
+
+    def test_day_stay_uses_visited_place_reverse_geocode_label(self):
+        self.store.ingest([
+            {"source": "phone", "timestamp": "2026-09-25T10:00:00Z", "lat": 41, "lon": -87.9, "accuracy_m": 5},
+            {"source": "phone", "timestamp": "2026-09-25T10:06:00Z", "lat": 41, "lon": -87.9, "accuracy_m": 5},
+        ])
+        with patch("geotracker.analysis.address_for_coordinate", return_value="12801 South University Avenue") as reverse:
+            day = day_summary(self.store, "2026-09-25", "UTC")
+        self.assertEqual(day["visited_places"][0]["name"], "12801 South University Avenue")
+        self.assertEqual(day["stays"][0]["display_name"], day["visited_places"][0]["name"])
+        reverse.assert_called_once()
 
     def test_recorded_route_does_not_connect_gaps(self):
         self.store.ingest([
