@@ -41,10 +41,11 @@ def poll_home_assistant():
     attrs = state.get("attributes") or {}
     if attrs.get("latitude") is None or attrs.get("longitude") is None:
         raise ValueError("Home Assistant entity has no latitude/longitude attributes")
-    # last_updated is often a timestamp for non-position changes. Use polling time,
-    # and deduplicate unchanged coordinates via external_id based on the state update.
+    # Every poll is a received sample. Keep the Home Assistant update as the
+    # canonical event ID, but date each sample at the time it was received.
+    polled_at = datetime.now(timezone.utc).isoformat(timespec="microseconds")
     point = {"source": "home_assistant:" + entity, "external_id": state.get("last_updated"),
-             "timestamp": state.get("last_updated") or datetime.now(timezone.utc).isoformat(),
+             "timestamp": polled_at,
              "lat": attrs["latitude"], "lon": attrs["longitude"],
              "accuracy_m": attrs.get("gps_accuracy")}
     endpoint = os.environ.get("GEOTRACKER_URL")

@@ -32,7 +32,7 @@ def parse_time(value):
     parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     if parsed.tzinfo is None:
         raise ValueError("timestamp must include a timezone")
-    return parsed.astimezone(timezone.utc).isoformat(timespec="seconds")
+    return parsed.astimezone(timezone.utc).isoformat(timespec="auto")
 
 
 def metres(a_lat, a_lon, b_lat, b_lon):
@@ -56,27 +56,51 @@ def mode_for(speed_mps, accuracy_m=None):
     return "driving" if kmh < 200 else "unknown"
 
 
-def select_unique_fixes(points):
-    """Keep the most accurate fix in each short, nearby run of samples.
-
-    The caller supplies chronological raw points. Time limits preserve later
-    visits to the same coordinate, and the raw archive is never discarded.
-    """
-    selected = []
-    first = best = None
+def nearby_fix_runs(points):
+    """Group consecutive samples close to the first fix in a run."""
+    run = []
     for point in points:
-        same_run = False
-        if first is not None and point["source"] == first["source"]:
-            elapsed = (datetime.fromisoformat(point["timestamp"]) - datetime.fromisoformat(first["timestamp"])).total_seconds()
-            same_run = 0 <= elapsed <= 120 and metres(point["lat"], point["lon"], first["lat"], first["lon"]) <= 15
+        same_run = bool(run)
+        if run and point["source"] == run[0]["source"]:
+            elapsed = (datetime.fromisoformat(point["timestamp"]) - datetime.fromisoformat(run[0]["timestamp"])).total_seconds()
+            same_run = elapsed >= 0 and metres(point["lat"], point["lon"], run[0]["lat"], run[0]["lon"]) <= 15
+        elif run:
+            same_run = False
         if not same_run:
-            if best is not None:
-                selected.append(best)
-            first = best = point
-        elif (point["accuracy_m"] if point["accuracy_m"] is not None else float("inf")) < (best["accuracy_m"] if best["accuracy_m"] is not None else float("inf")):
-            best = point
-    if best is not None:
-        selected.append(best)
+            if run:
+                yield run
+            run = [point]
+        else:
+            run.append(point)
+    if run:
+        yield run
+
+
+def best_fix_index(run):
+    return min(range(len(run)), key=lambda i: run[i]["accuracy_m"] if run[i]["accuracy_m"] is not None else float("inf"))
+
+
+def select_unique_fixes(points):
+    """Keep the most accurate fix in each consecutive nearby run of samples."""
+    return [run[best_fix_index(run)] for run in nearby_fix_runs(points)]
+
+
+def select_route_fixes(points):
+    """Retain stop boundaries so compressing stationary samples keeps route timing."""
+    selected = []
+    for run in nearby_fix_runs(points):
+        indices = {0, best_fix_index(run), len(run) - 1}
+        last_kept = 0
+        for index in range(1, len(run)):
+            gap = (datetime.fromisoformat(run[index]["timestamp"]) - datetime.fromisoformat(run[last_kept]["timestamp"])).total_seconds()
+            if gap > 900:
+                # Keep the last available point before a route gap. A true
+                # sample gap still splits the line in route_segments_from_points.
+                bridge = index - 1 if index - 1 > last_kept else index
+                indices.add(bridge)
+                last_kept = bridge
+        for index in sorted(indices):
+            selected.append(run[index])
     return selected
 
 
@@ -298,7 +322,7 @@ class Store:
             # concurrent HTTP workers. Sorting prevents opposing batch lock order.
             for source in sorted({str(item.get("source") or "manual")[:80] for item in items}):
                 self.db.execute("SELECT pg_advisory_xact_lock(hashtext(?))", (source,))
-        inserted, duplicate, events = 0, 0, []
+        inserted, duplicate, recorded, events = 0, 0, 0, []
         for raw in items:
             lat = float(raw.get("lat", raw.get("latitude")))
             lon = float(raw.get("lon", raw.get("longitude")))
@@ -348,13 +372,14 @@ class Store:
                     and legacy["lon"] == lon and legacy["accuracy_m"] == accuracy
                     and legacy["speed_mps"] == reported_speed)
             if not legacy_retry:
-                self.db.execute("""INSERT INTO point_observations
+                observation = self.db.execute("""INSERT INTO point_observations
                     (point_id,source,timestamp,lat,lon,accuracy_m,speed_mps,received_at,fingerprint)
                     VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(fingerprint) DO NOTHING""",
                     (point_id, source, timestamp, lat, lon, accuracy, reported_speed,
                      parse_time(None), hashlib.sha256(json.dumps(
                          [source, str(external_id) if external_id is not None else None, timestamp, lat, lon, accuracy, reported_speed],
                          separators=(",", ":")).encode()).hexdigest()))
+                recorded += observation.rowcount
             if not inserted_row:
                 duplicate += 1
                 continue
@@ -385,7 +410,7 @@ class Store:
             from .analysis import process_stays
             process_stays(self, {str(item.get("source") or "manual")[:80] for item in items})
         self.db.commit()
-        return {"inserted": inserted, "duplicates": duplicate, "events": events}
+        return {"inserted": inserted, "duplicates": duplicate, "recorded": recorded, "events": events}
 
     def points(self, start=None, end=None, source=None, limit=5000):
         clauses, args = [], []

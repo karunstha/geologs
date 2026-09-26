@@ -6,7 +6,7 @@ import math
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from .core import address_for_coordinate, metres, parse_time, route_segments_from_points, select_best_timed_fixes, select_unique_fixes, stats_from_points, trips_from_points
+from .core import address_for_coordinate, metres, parse_time, route_segments_from_points, select_best_timed_fixes, select_route_fixes, select_unique_fixes, stats_from_points, trips_from_points
 
 
 STOP_RADIUS_M = 50
@@ -259,7 +259,7 @@ def day_summary(store, date, timezone_name="UTC", source=None):
     raw_chronological = list(reversed(points))
     chronological = select_unique_fixes(raw_chronological)
     trips = trips_from_points(select_best_timed_fixes(raw_chronological))
-    route_segments = route_segments_from_points(chronological)
+    route_segments = route_segments_from_points(select_route_fixes(raw_chronological))
     activity_counts = {mode: sum(trip["mode"] == mode for trip in trips) for mode in ("driving", "walking", "running_cycling")}
     stats = stats_from_points(chronological)
     stats["points"] = len(points)

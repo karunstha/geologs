@@ -12,7 +12,7 @@ from geotracker.core import Store, geocode, mode_for, reverse_cache_radius, reve
 from geotracker.analysis import day_summary, insights, place_patterns, predict_next, stays, transitions
 from geotracker.imports import import_takeout
 from geotracker.mcp import dispatch
-from geotracker.cli import load_env_file
+from geotracker.cli import load_env_file, poll_home_assistant
 from geotracker.http import Handler, active_token
 
 
@@ -127,10 +127,31 @@ class StoreTests(unittest.TestCase):
         raw = list(reversed(self.store.points(limit=None)))
         selected = select_unique_fixes(raw)
         self.assertEqual(len(raw), 3)
-        self.assertEqual(len(selected), 2)
+        self.assertEqual(len(selected), 1)
         self.assertEqual(selected[0]["accuracy_m"], 8)
         day = day_summary(self.store, "2026-09-25", "UTC")
-        self.assertEqual((day["unique_points"], day["points"]), (2, 3))
+        self.assertEqual((day["unique_points"], day["points"]), (1, 3))
+
+    def test_home_assistant_polls_record_repeated_coordinates(self):
+        state = {"last_updated": "2026-09-25T08:00:00Z",
+                 "attributes": {"latitude": 41, "longitude": -87.9, "gps_accuracy": 8}}
+        times = [datetime(2026, 9, 25, 10, 0, 0, 100000, tzinfo=timezone.utc),
+                 datetime(2026, 9, 25, 10, 0, 0, 200000, tzinfo=timezone.utc)]
+        env = {"HA_URL": "http://home-assistant.test:8123", "HA_TOKEN": "test", "HA_ENTITY": "device_tracker.phone",
+               "GEOTRACKER_URL": "", "GEOTRACKER_DATABASE_URL": "", "GEOTRACKER_DB": str(Path(self.tmp.name) / "poll.db")}
+        with patch.dict(os.environ, env), patch("geotracker.cli.urllib.request.urlopen") as urlopen, \
+                patch("geotracker.cli.datetime") as clock:
+            urlopen.side_effect = lambda *_args, **_kwargs: io.BytesIO(json.dumps(state).encode())
+            clock.now.side_effect = times
+            first, second = poll_home_assistant(), poll_home_assistant()
+        self.assertEqual((first["inserted"], first["recorded"]), (1, 1))
+        self.assertEqual((second["duplicates"], second["recorded"]), (1, 1))
+        archive = Store(Path(self.tmp.name) / "poll.db")
+        try:
+            day = day_summary(archive, "2026-09-25", "UTC")
+            self.assertEqual((day["unique_points"], day["points"]), (1, 2))
+        finally:
+            archive.close()
 
     def test_duplicate_delivery_is_stored_and_better_accuracy_is_selected(self):
         first = {"source": "phone", "external_id": "ha-1", "timestamp": "2026-09-25T10:00:00Z",
