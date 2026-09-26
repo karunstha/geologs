@@ -372,6 +372,40 @@ class StoreTests(unittest.TestCase):
         put(2, 3)
         self.assertEqual(stays(self.store)[0]["point_count"], 3)
 
+    def test_repeated_home_assistant_samples_create_separate_stays_across_gap(self):
+        base = datetime(2026, 9, 25, 10, tzinfo=timezone.utc)
+        def poll(minute):
+            return self.store.ingest({"source": "home_assistant:phone", "external_id": "unchanged-state",
+                                      "timestamp": (base + timedelta(minutes=minute)).isoformat(),
+                                      "lat": 41, "lon": -87.9, "accuracy_m": 4})
+        poll(0)
+        self.assertEqual(poll(6)["recorded"], 1)
+        self.assertEqual(len(self.store.points()), 1)
+        self.assertEqual(len(stays(self.store)), 1)
+        self.assertEqual(stays(self.store)[0]["point_count"], 2)
+        poll(50)
+        poll(56)
+        rows = stays(self.store)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual([row["point_count"] for row in rows], [2, 2])
+
+    def test_existing_raw_samples_bootstrap_stays_when_opened(self):
+        path = Path(self.tmp.name) / "bootstrap.db"
+        archive = Store(path)
+        base = datetime(2026, 9, 25, 10, tzinfo=timezone.utc)
+        for minute in (0, 6):
+            archive.ingest({"source": "home_assistant:phone", "external_id": "same-state",
+                            "timestamp": (base + timedelta(minutes=minute)).isoformat(),
+                            "lat": 41, "lon": -87.9, "accuracy_m": 4}, process_analysis=False)
+        self.assertEqual(len(stays(archive)), 0)
+        archive.close()
+        reopened = Store(path)
+        try:
+            self.assertEqual(len(stays(reopened)), 1)
+            self.assertEqual(stays(reopened)[0]["point_count"], 2)
+        finally:
+            reopened.close()
+
     def test_takeout_import_is_idempotent_and_does_not_trigger_reminders(self):
         place = self.store.save_place({"name": "Market", "lat": 41, "lon": -87.9})
         self.store.create_reminder({"text": "Buy salt", "place_id": place["id"]})

@@ -245,6 +245,7 @@ class Store:
         );
         CREATE INDEX IF NOT EXISTS point_observations_time ON point_observations(timestamp);
         CREATE INDEX IF NOT EXISTS point_observations_source_time ON point_observations(source,timestamp);
+        CREATE INDEX IF NOT EXISTS point_observations_source_id ON point_observations(source,id);
         CREATE TABLE IF NOT EXISTS places (
             id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE COLLATE NOCASE,
             lat REAL NOT NULL, lon REAL NOT NULL, radius_m REAL NOT NULL DEFAULT 150,
@@ -276,6 +277,19 @@ class Store:
         CREATE INDEX IF NOT EXISTS observed_stays_time ON observed_stays(started_at);
         CREATE TABLE IF NOT EXISTS stay_processing_state (
             source TEXT PRIMARY KEY, last_point_id INTEGER NOT NULL,
+            last_timestamp TEXT NOT NULL, candidate TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS observed_stays_v2 (
+            id INTEGER PRIMARY KEY, source TEXT NOT NULL,
+            start_observation_id INTEGER NOT NULL UNIQUE REFERENCES point_observations(id),
+            end_observation_id INTEGER NOT NULL REFERENCES point_observations(id),
+            started_at TEXT NOT NULL, ended_at TEXT NOT NULL,
+            lat REAL NOT NULL, lon REAL NOT NULL,
+            point_count INTEGER NOT NULL, ongoing INTEGER NOT NULL DEFAULT 1
+        );
+        CREATE INDEX IF NOT EXISTS observed_stays_v2_time ON observed_stays_v2(started_at);
+        CREATE TABLE IF NOT EXISTS stay_observation_state (
+            source TEXT PRIMARY KEY, last_observation_id INTEGER NOT NULL,
             last_timestamp TEXT NOT NULL, candidate TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS geocode_cache (
@@ -326,9 +340,12 @@ class Store:
                         AND (julianday(timestamp)-julianday(prev_timestamp))*86400 > 0
                         AND (julianday(timestamp)-julianday(prev_timestamp))*86400 <= 900)""")
                 self.db.execute("PRAGMA user_version=3")
-        if not self.db.execute("SELECT 1 FROM stay_processing_state LIMIT 1").fetchone() and self.db.execute("SELECT 1 FROM points LIMIT 1").fetchone():
-            from .analysis import process_stays
-            process_stays(self)
+        if not self.db.execute("SELECT 1 FROM stay_observation_state LIMIT 1").fetchone() and self.db.execute("SELECT 1 FROM point_observations LIMIT 1").fetchone():
+            if self.postgres:
+                self.db.execute("SELECT pg_advisory_xact_lock(hashtext('geotracker:stays:bootstrap'))")
+            if not self.db.execute("SELECT 1 FROM stay_observation_state LIMIT 1").fetchone():
+                from .analysis import process_stays
+                process_stays(self)
         self.db.commit()
 
     def close(self):
@@ -436,7 +453,7 @@ class Store:
                 event_id = self.db.execute("INSERT INTO events(reminder_id,point_id,triggered_at) VALUES (?,?,?) RETURNING id", (reminder["id"], point_id, timestamp)).fetchone()["id"]
                 self.db.execute("UPDATE reminders SET last_triggered_at=?,active=? WHERE id=?", (timestamp, int(bool(reminder["repeat"])), reminder["id"]))
                 events.append({"id": event_id, "reminder_id": reminder["id"], "text": reminder["text"], "place": reminder["place_name"], "triggered_at": timestamp})
-        if inserted and process_analysis:
+        if recorded and process_analysis:
             from .analysis import process_stays
             process_stays(self, {str(item.get("source") or "manual")[:80] for item in items})
         self.db.commit()

@@ -16,10 +16,12 @@ TABLES = {
     "source_state": "source point_id",
     "observed_stays": "id source start_point_id end_point_id started_at ended_at lat lon point_count ongoing",
     "stay_processing_state": "source last_point_id last_timestamp candidate",
+    "observed_stays_v2": "id source start_observation_id end_observation_id started_at ended_at lat lon point_count ongoing",
+    "stay_observation_state": "source last_observation_id last_timestamp candidate",
     "geocode_cache": "cache_key provider value created_at",
     "reverse_regions": "id provider center_lat center_lon radius_m value created_at expires_at",
 }
-IDENTITY_TABLES = ("points", "point_observations", "places", "reminders", "events", "observed_stays", "reverse_regions")
+IDENTITY_TABLES = ("points", "point_observations", "places", "reminders", "events", "observed_stays", "observed_stays_v2", "reverse_regions")
 
 
 def migrate_sqlite(sqlite_path, postgres_url):
@@ -38,7 +40,7 @@ def migrate_sqlite(sqlite_path, postgres_url):
             if target.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone():
                 raise ValueError("PostGIS target must be empty before migration")
         for table, names in TABLES.items():
-            if table == "point_observations" and table not in source_tables:
+            if table in ("point_observations", "observed_stays_v2", "stay_observation_state") and table not in source_tables:
                 continue
             columns = names.split()
             source_columns = {row[1] for row in source.execute(f"PRAGMA table_info({table})")}

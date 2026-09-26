@@ -16,7 +16,7 @@ The four reference projects informed the product choices below. “Built” desc
 
 ## How the derived features work
 
-- **Observed stays:** incremental per-source analysis processes only new points. A late import rebuilds just its source. Gaps longer than 30 minutes split stays. Low-accuracy points do not support a stay. The result is observed time, not proof of where the person spent a gap.
+- **Observed stays:** incremental per-source analysis processes raw observations, including repeated Home Assistant polls. A late import rebuilds just its source. Gaps longer than 30 minutes split stays. Low-accuracy points do not support a stay. The result is observed time, not proof of where the person spent a gap.
 - **Frequent places:** stays matching saved place radii are named. Unmatched stays within 75 m form suggestions that the user can name. Visible suggestions and visited places receive cache-first reverse geocoded addresses when a provider is configured.
 - **Transitions:** consecutive stays from the same source count as a transition when less than 24 hours apart. Scores decay with a 90-day half-life; raw counts remain available.
 - **Prediction:** the current fix must be near an observed stay. Fewer than three departures or only old transitions return no destination. The result is a historical tendency, not a location guarantee.

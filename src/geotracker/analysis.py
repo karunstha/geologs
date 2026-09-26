@@ -30,56 +30,61 @@ def _new_candidate(point):
 def _save_candidate(store, source, candidate, ongoing):
     if candidate is None or candidate["count"] < 2 or _duration(candidate) < STOP_MIN_SECONDS:
         return
-    store.db.execute("""INSERT INTO observed_stays
-        (source,start_point_id,end_point_id,started_at,ended_at,lat,lon,point_count,ongoing)
-        VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(start_point_id) DO UPDATE SET
-        end_point_id=excluded.end_point_id,ended_at=excluded.ended_at,
+    store.db.execute("""INSERT INTO observed_stays_v2
+        (source,start_observation_id,end_observation_id,started_at,ended_at,lat,lon,point_count,ongoing)
+        VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(start_observation_id) DO UPDATE SET
+        end_observation_id=excluded.end_observation_id,ended_at=excluded.ended_at,
         lat=excluded.lat,lon=excluded.lon,point_count=excluded.point_count,ongoing=excluded.ongoing""",
         (source, candidate["start_id"], candidate["end_id"], candidate["start"], candidate["end"],
          candidate["lat"], candidate["lon"], candidate["count"], int(ongoing)))
 
 
 def process_stays(store, sources=None, rebuild=False):
-    """Process only new source points; a late import rebuilds that source safely."""
+    """Process raw observations; a late import rebuilds that source safely."""
     if sources is None:
-        sources = [r["source"] for r in store._rows("SELECT DISTINCT source FROM points")]
+        sources = [r["source"] for r in store._rows("SELECT DISTINCT source FROM point_observations")]
     processed = 0
     for source in sources:
-        state = store.db.execute("SELECT * FROM stay_processing_state WHERE source=?", (source,)).fetchone()
-        last_id = state["last_point_id"] if state else 0
-        incoming = store._rows("SELECT * FROM points WHERE source=? AND id>? ORDER BY timestamp,id", (source, last_id))
-        if rebuild or (state and incoming and incoming[0]["timestamp"] <= state["last_timestamp"]):
-            store.db.execute("DELETE FROM observed_stays WHERE source=?", (source,))
-            store.db.execute("DELETE FROM stay_processing_state WHERE source=?", (source,))
+        state = store.db.execute("SELECT * FROM stay_observation_state WHERE source=?", (source,)).fetchone()
+        last_id = state["last_observation_id"] if state else 0
+        first_new = store.db.execute("""SELECT timestamp FROM point_observations
+            WHERE source=? AND id>? ORDER BY timestamp,id LIMIT 1""", (source, last_id)).fetchone()
+        if rebuild or (state and first_new and first_new["timestamp"] <= state["last_timestamp"]):
+            store.db.execute("DELETE FROM observed_stays_v2 WHERE source=?", (source,))
+            store.db.execute("DELETE FROM stay_observation_state WHERE source=?", (source,))
             state = None
-            incoming = store._rows("SELECT * FROM points WHERE source=? ORDER BY timestamp,id", (source,))
-        if not incoming:
-            continue
+            last_id = 0
+        cursor = store.db.execute("""SELECT * FROM point_observations
+            WHERE source=? AND id>? ORDER BY timestamp,id""", (source, last_id))
         candidate = json.loads(state["candidate"]) if state else None
-        for point in incoming:
-            processed += 1
-            if candidate:
-                elapsed = (datetime.fromisoformat(point["timestamp"]) - datetime.fromisoformat(candidate["end"])).total_seconds()
-                reported_moving = point["speed_origin"] == "reported" and point["speed_mps"] is not None and point["speed_mps"] > 2.5
-                within = (0 < elapsed <= MAX_SAMPLE_GAP_SECONDS and _eligible(point) and not reported_moving
-                          and metres(point["lat"], point["lon"], candidate["first_lat"], candidate["first_lon"]) <= STOP_RADIUS_M
-                          and metres(point["lat"], point["lon"], candidate["lat"], candidate["lon"]) <= STOP_RADIUS_M)
-                if within:
-                    count = candidate["count"] + 1
-                    candidate["lat"] += (point["lat"] - candidate["lat"]) / count
-                    candidate["lon"] += (point["lon"] - candidate["lon"]) / count
-                    candidate["count"] = count
-                    candidate["end"] = point["timestamp"]
-                    candidate["end_id"] = point["id"]
-                    _save_candidate(store, source, candidate, True)
-                    continue
-                _save_candidate(store, source, candidate, False)
-            candidate = _new_candidate(point) if _eligible(point) else None
-        max_id = max(p["id"] for p in incoming)
-        last_time = max(p["timestamp"] for p in incoming)
-        store.db.execute("""INSERT INTO stay_processing_state(source,last_point_id,last_timestamp,candidate)
+        max_id, last_time = last_id, state["last_timestamp"] if state else None
+        while batch := cursor.fetchmany(1000):
+            for point in batch:
+                processed += 1
+                max_id = max(max_id, point["id"])
+                last_time = point["timestamp"]
+                if candidate:
+                    elapsed = (datetime.fromisoformat(point["timestamp"]) - datetime.fromisoformat(candidate["end"])).total_seconds()
+                    reported_moving = point["speed_origin"] == "reported" and point["speed_mps"] is not None and point["speed_mps"] > 2.5
+                    within = (0 < elapsed <= MAX_SAMPLE_GAP_SECONDS and _eligible(point) and not reported_moving
+                              and metres(point["lat"], point["lon"], candidate["first_lat"], candidate["first_lon"]) <= STOP_RADIUS_M
+                              and metres(point["lat"], point["lon"], candidate["lat"], candidate["lon"]) <= STOP_RADIUS_M)
+                    if within:
+                        count = candidate["count"] + 1
+                        candidate["lat"] += (point["lat"] - candidate["lat"]) / count
+                        candidate["lon"] += (point["lon"] - candidate["lon"]) / count
+                        candidate["count"] = count
+                        candidate["end"] = point["timestamp"]
+                        candidate["end_id"] = point["id"]
+                        _save_candidate(store, source, candidate, True)
+                        continue
+                    _save_candidate(store, source, candidate, False)
+                candidate = _new_candidate(point) if _eligible(point) else None
+        if max_id == last_id:
+            continue
+        store.db.execute("""INSERT INTO stay_observation_state(source,last_observation_id,last_timestamp,candidate)
             VALUES (?,?,?,?) ON CONFLICT(source) DO UPDATE SET
-            last_point_id=excluded.last_point_id,last_timestamp=excluded.last_timestamp,candidate=excluded.candidate""",
+            last_observation_id=excluded.last_observation_id,last_timestamp=excluded.last_timestamp,candidate=excluded.candidate""",
             (source, max_id, last_time, json.dumps(candidate)))
     return {"processed_points": processed}
 
@@ -103,7 +108,7 @@ def stays(store, start=None, end=None, source=None, limit=500):
     if limit is not None:
         args.append(min(max(int(limit), 1), 5000))
         suffix = " LIMIT ?"
-    rows = store._rows("SELECT * FROM observed_stays" + where + " ORDER BY started_at DESC" + suffix, args)
+    rows = store._rows("SELECT * FROM observed_stays_v2" + where + " ORDER BY started_at DESC" + suffix, args)
     places = store.places()
     for row in rows:
         row["observed_minutes"] = round((datetime.fromisoformat(row["ended_at"]) - datetime.fromisoformat(row["started_at"])).total_seconds() / 60, 1)
