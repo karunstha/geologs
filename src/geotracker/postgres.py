@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS point_observations (
     legacy_point_id BIGINT UNIQUE REFERENCES points(id),
     source TEXT NOT NULL, timestamp TEXT NOT NULL,
     lat DOUBLE PRECISION NOT NULL, lon DOUBLE PRECISION NOT NULL,
-    accuracy_m DOUBLE PRECISION, speed_mps DOUBLE PRECISION, received_at TEXT NOT NULL,
+    accuracy_m DOUBLE PRECISION, speed_mps DOUBLE PRECISION, speed_origin TEXT, received_at TEXT NOT NULL,
     fingerprint TEXT UNIQUE
 );
 CREATE INDEX IF NOT EXISTS point_observations_time ON point_observations(timestamp DESC);
@@ -117,6 +117,26 @@ class PostgresConnection:
                         SELECT id,id,source,timestamp,lat,lon,accuracy_m,speed_mps,timestamp FROM points WHERE true
                         ON CONFLICT(legacy_point_id) DO NOTHING""")
                     self.connection.execute("INSERT INTO schema_migrations(version) VALUES(2)")
+                if not self.connection.execute("SELECT 1 FROM schema_migrations WHERE version=3").fetchone():
+                    self.connection.execute("ALTER TABLE point_observations ADD COLUMN IF NOT EXISTS speed_origin TEXT")
+                    self.connection.execute("""UPDATE point_observations o SET speed_mps=p.speed_mps,speed_origin=p.speed_origin
+                        FROM points p WHERE p.id=o.point_id AND (o.legacy_point_id IS NOT NULL OR
+                        (o.speed_mps IS NULL AND o.timestamp=p.timestamp AND o.lat=p.lat AND o.lon=p.lon
+                         AND o.accuracy_m IS NOT DISTINCT FROM p.accuracy_m))""")
+                    self.connection.execute("""UPDATE point_observations SET speed_origin='reported'
+                        WHERE speed_mps IS NOT NULL AND speed_origin IS NULL""")
+                    self.connection.execute("""WITH prior AS (
+                        SELECT id,lat,lon,timestamp,
+                            LAG(lat) OVER (PARTITION BY source ORDER BY timestamp,id) AS prev_lat,
+                            LAG(lon) OVER (PARTITION BY source ORDER BY timestamp,id) AS prev_lon,
+                            LAG(timestamp) OVER (PARTITION BY source ORDER BY timestamp,id) AS prev_timestamp
+                        FROM point_observations)
+                        UPDATE point_observations o SET speed_mps=0,speed_origin='estimated'
+                        FROM prior p WHERE o.id=p.id AND o.speed_mps IS NULL
+                        AND p.lat=p.prev_lat AND p.lon=p.prev_lon
+                        AND p.timestamp::timestamptz-p.prev_timestamp::timestamptz > interval '0 seconds'
+                        AND p.timestamp::timestamptz-p.prev_timestamp::timestamptz <= interval '15 minutes'""")
+                    self.connection.execute("INSERT INTO schema_migrations(version) VALUES(3)")
                 self.connection.commit()
                 _initialized_urls.add(url)
 

@@ -153,6 +153,42 @@ class StoreTests(unittest.TestCase):
         finally:
             archive.close()
 
+    def test_repeated_poll_does_not_inherit_previous_movement_speed(self):
+        self.store.ingest({"source": "ha", "external_id": "first", "timestamp": "2026-09-25T10:00:00Z",
+                           "lat": 41, "lon": -87.9, "accuracy_m": 4})
+        moving = {"source": "ha", "external_id": "second", "timestamp": "2026-09-25T10:01:00Z",
+                  "lat": 41.0014, "lon": -87.9, "accuracy_m": 4}
+        self.store.ingest(moving)
+        self.store.ingest({**moving, "timestamp": "2026-09-25T10:01:01Z"})
+        newest, previous = self.store.observations(limit=2)
+        self.assertEqual(previous["mode"], "running_cycling")
+        self.assertEqual(newest["speed_mps"], 0)
+        self.assertEqual(newest["speed_origin"], "estimated")
+        self.assertEqual(newest["mode"], "idle")
+
+    def test_existing_observations_get_speed_origin_without_inheriting_speed(self):
+        path = Path(self.tmp.name) / "v2.db"
+        archive = Store(path)
+        archive.ingest({"source": "ha", "external_id": "first", "timestamp": "2026-09-25T10:00:00Z",
+                        "lat": 41, "lon": -87.9, "accuracy_m": 4})
+        moving = {"source": "ha", "external_id": "second", "timestamp": "2026-09-25T10:01:00Z",
+                  "lat": 41.0014, "lon": -87.9, "accuracy_m": 4}
+        archive.ingest(moving)
+        archive.ingest({**moving, "timestamp": "2026-09-25T10:01:01Z"})
+        archive.db.execute("UPDATE point_observations SET speed_mps=NULL")
+        archive.db.execute("ALTER TABLE point_observations DROP COLUMN speed_origin")
+        archive.db.execute("PRAGMA user_version=2")
+        archive.db.commit()
+        archive.close()
+        migrated = Store(path)
+        try:
+            newest, previous = migrated.observations(limit=2)
+            self.assertEqual(previous["mode"], "running_cycling")
+            self.assertEqual(newest["speed_mps"], 0)
+            self.assertEqual(newest["mode"], "idle")
+        finally:
+            migrated.close()
+
     def test_duplicate_delivery_is_stored_and_better_accuracy_is_selected(self):
         first = {"source": "phone", "external_id": "ha-1", "timestamp": "2026-09-25T10:00:00Z",
                  "lat": 41, "lon": -87.9, "accuracy_m": 80}

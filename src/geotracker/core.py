@@ -240,6 +240,7 @@ class Store:
             legacy_point_id INTEGER UNIQUE REFERENCES points(id),
             source TEXT NOT NULL, timestamp TEXT NOT NULL,
             lat REAL NOT NULL, lon REAL NOT NULL, accuracy_m REAL, speed_mps REAL,
+            speed_origin TEXT,
             received_at TEXT NOT NULL, fingerprint TEXT UNIQUE
         );
         CREATE INDEX IF NOT EXISTS point_observations_time ON point_observations(timestamp);
@@ -302,6 +303,29 @@ class Store:
                     (point_id,legacy_point_id,source,timestamp,lat,lon,accuracy_m,speed_mps,received_at)
                     SELECT id,id,source,timestamp,lat,lon,accuracy_m,speed_mps,timestamp FROM points""")
                 self.db.execute("PRAGMA user_version=2")
+            if version < 3:
+                columns = {row[1] for row in self.db.execute("PRAGMA table_info(point_observations)")}
+                if "speed_origin" not in columns:
+                    self.db.execute("ALTER TABLE point_observations ADD COLUMN speed_origin TEXT")
+                self.db.execute("""UPDATE point_observations SET speed_mps=(SELECT p.speed_mps FROM points p WHERE p.id=point_id),
+                    speed_origin=(SELECT p.speed_origin FROM points p WHERE p.id=point_id)
+                    WHERE legacy_point_id IS NOT NULL OR
+                    (speed_mps IS NULL AND EXISTS (SELECT 1 FROM points p WHERE p.id=point_id
+                        AND p.timestamp=point_observations.timestamp AND p.lat=point_observations.lat
+                        AND p.lon=point_observations.lon AND p.accuracy_m IS point_observations.accuracy_m))""")
+                self.db.execute("UPDATE point_observations SET speed_origin='reported' WHERE speed_mps IS NOT NULL AND speed_origin IS NULL")
+                self.db.execute("""WITH prior AS (
+                    SELECT id,lat,lon,timestamp,
+                        LAG(lat) OVER (PARTITION BY source ORDER BY timestamp,id) AS prev_lat,
+                        LAG(lon) OVER (PARTITION BY source ORDER BY timestamp,id) AS prev_lon,
+                        LAG(timestamp) OVER (PARTITION BY source ORDER BY timestamp,id) AS prev_timestamp
+                    FROM point_observations)
+                    UPDATE point_observations SET speed_mps=0,speed_origin='estimated'
+                    WHERE speed_mps IS NULL AND id IN (
+                        SELECT id FROM prior WHERE lat=prev_lat AND lon=prev_lon
+                        AND (julianday(timestamp)-julianday(prev_timestamp))*86400 > 0
+                        AND (julianday(timestamp)-julianday(prev_timestamp))*86400 <= 900)""")
+                self.db.execute("PRAGMA user_version=3")
         if not self.db.execute("SELECT 1 FROM stay_processing_state LIMIT 1").fetchone() and self.db.execute("SELECT 1 FROM points LIMIT 1").fetchone():
             from .analysis import process_stays
             process_stays(self)
@@ -340,12 +364,17 @@ class Store:
                 raise ValueError("speed_mps must be nonnegative")
             previous = self.db.execute("""SELECT p.* FROM source_state s JOIN points p ON p.id=s.point_id WHERE s.source=?""", (source,)).fetchone()
             origin = "reported" if speed is not None else None
-            if speed is None and previous:
-                elapsed = (datetime.fromisoformat(timestamp) - datetime.fromisoformat(previous["timestamp"])).total_seconds()
-                if 5 <= elapsed <= 900 and (accuracy is None or accuracy <= 150) and (previous["accuracy_m"] is None or previous["accuracy_m"] <= 150):
-                    estimated = metres(lat, lon, previous["lat"], previous["lon"]) / elapsed
-                    if estimated <= 55.6:
-                        speed, origin = estimated, "estimated"
+            if speed is None:
+                prior_fix = self.db.execute("""SELECT timestamp,lat,lon,accuracy_m FROM point_observations
+                    WHERE source=? AND timestamp<? ORDER BY timestamp DESC,id DESC LIMIT 1""", (source, timestamp)).fetchone()
+                if prior_fix:
+                    elapsed = (datetime.fromisoformat(timestamp) - datetime.fromisoformat(prior_fix["timestamp"])).total_seconds()
+                    if 0 < elapsed <= 900 and (accuracy is None or accuracy <= 150) and (prior_fix["accuracy_m"] is None or prior_fix["accuracy_m"] <= 150):
+                        distance = metres(lat, lon, prior_fix["lat"], prior_fix["lon"])
+                        if distance <= 1:
+                            speed, origin = 0.0, "estimated"
+                        elif elapsed >= 5 and distance / elapsed <= 55.6:
+                            speed, origin = distance / elapsed, "estimated"
             mode = mode_for(speed, accuracy)
             external_id = raw.get("external_id")
             cursor = self.db.execute("""INSERT INTO points
@@ -366,16 +395,17 @@ class Store:
             reported_speed = float(raw["speed_mps"]) if raw.get("speed_mps") is not None else None
             legacy_retry = False
             if not inserted_row:
-                legacy = self.db.execute("""SELECT timestamp,lat,lon,accuracy_m,speed_mps
+                legacy = self.db.execute("""SELECT timestamp,lat,lon,accuracy_m,speed_mps,speed_origin
                     FROM point_observations WHERE legacy_point_id=?""", (point_id,)).fetchone()
                 legacy_retry = bool(legacy and legacy["timestamp"] == timestamp and legacy["lat"] == lat
                     and legacy["lon"] == lon and legacy["accuracy_m"] == accuracy
-                    and legacy["speed_mps"] == reported_speed)
+                    and (legacy["speed_mps"] == reported_speed or
+                         (reported_speed is None and legacy["speed_origin"] in (None, "estimated"))))
             if not legacy_retry:
                 observation = self.db.execute("""INSERT INTO point_observations
-                    (point_id,source,timestamp,lat,lon,accuracy_m,speed_mps,received_at,fingerprint)
-                    VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(fingerprint) DO NOTHING""",
-                    (point_id, source, timestamp, lat, lon, accuracy, reported_speed,
+                    (point_id,source,timestamp,lat,lon,accuracy_m,speed_mps,speed_origin,received_at,fingerprint)
+                    VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(fingerprint) DO NOTHING""",
+                    (point_id, source, timestamp, lat, lon, accuracy, speed, origin,
                      parse_time(None), hashlib.sha256(json.dumps(
                          [source, str(external_id) if external_id is not None else None, timestamp, lat, lon, accuracy, reported_speed],
                          separators=(",", ":")).encode()).hexdigest()))
@@ -441,8 +471,7 @@ class Store:
             args.append(min(max(int(limit), 1), 20000))
             suffix = " LIMIT ?"
         rows = self._rows("""SELECT o.id,o.point_id,p.external_id,o.source,o.timestamp,o.lat,o.lon,o.accuracy_m,
-            COALESCE(o.speed_mps,p.speed_mps) AS speed_mps,
-            CASE WHEN o.speed_mps IS NOT NULL THEN 'reported' ELSE p.speed_origin END AS speed_origin,
+            o.speed_mps,o.speed_origin,
             o.received_at FROM point_observations o JOIN points p ON p.id=o.point_id""" + where + " ORDER BY o.timestamp DESC,COALESCE(o.accuracy_m,1000000000) ASC,o.id DESC" + suffix, args)
         for row in rows:
             row["mode"] = mode_for(row["speed_mps"], row["accuracy_m"])

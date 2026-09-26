@@ -9,7 +9,7 @@ from .postgres import PostgresConnection
 
 TABLES = {
     "points": "id source external_id timestamp lat lon accuracy_m speed_mps speed_origin mode",
-    "point_observations": "id point_id legacy_point_id source timestamp lat lon accuracy_m speed_mps received_at fingerprint",
+    "point_observations": "id point_id legacy_point_id source timestamp lat lon accuracy_m speed_mps speed_origin received_at fingerprint",
     "places": "id name lat lon radius_m address",
     "reminders": "id text place_id active repeat cooldown_minutes created_at last_triggered_at",
     "events": "id reminder_id point_id triggered_at acknowledged_at webhook_status",
@@ -41,7 +41,8 @@ def migrate_sqlite(sqlite_path, postgres_url):
             if table == "point_observations" and table not in source_tables:
                 continue
             columns = names.split()
-            select = source.execute(f"SELECT {','.join(columns)} FROM {table}")
+            source_columns = {row[1] for row in source.execute(f"PRAGMA table_info({table})")}
+            select = source.execute("SELECT " + ",".join(column if column in source_columns else f"NULL AS {column}" for column in columns) + f" FROM {table}")
             placeholders = ",".join(["%s"] * len(columns))
             statement = f"INSERT INTO {table} ({','.join(columns)}) VALUES ({placeholders})"
             count = 0
@@ -52,9 +53,27 @@ def migrate_sqlite(sqlite_path, postgres_url):
             counts[table] = count
         if "point_observations" not in source_tables:
             target.execute("""INSERT INTO point_observations
-                (point_id,legacy_point_id,source,timestamp,lat,lon,accuracy_m,speed_mps,received_at)
-                SELECT id,id,source,timestamp,lat,lon,accuracy_m,speed_mps,timestamp FROM points""")
+                (point_id,legacy_point_id,source,timestamp,lat,lon,accuracy_m,speed_mps,speed_origin,received_at)
+                SELECT id,id,source,timestamp,lat,lon,accuracy_m,speed_mps,speed_origin,timestamp FROM points""")
             counts["point_observations"] = counts["points"]
+        else:
+            target.execute("""UPDATE point_observations o SET speed_mps=p.speed_mps,speed_origin=p.speed_origin
+                FROM points p WHERE p.id=o.point_id AND (o.legacy_point_id IS NOT NULL OR
+                (o.speed_mps IS NULL AND o.timestamp=p.timestamp AND o.lat=p.lat AND o.lon=p.lon
+                 AND o.accuracy_m IS NOT DISTINCT FROM p.accuracy_m))""")
+            target.execute("""UPDATE point_observations SET speed_origin='reported'
+                WHERE speed_mps IS NOT NULL AND speed_origin IS NULL""")
+            target.execute("""WITH prior AS (
+                SELECT id,lat,lon,timestamp,
+                    LAG(lat) OVER (PARTITION BY source ORDER BY timestamp,id) AS prev_lat,
+                    LAG(lon) OVER (PARTITION BY source ORDER BY timestamp,id) AS prev_lon,
+                    LAG(timestamp) OVER (PARTITION BY source ORDER BY timestamp,id) AS prev_timestamp
+                FROM point_observations)
+                UPDATE point_observations o SET speed_mps=0,speed_origin='estimated'
+                FROM prior p WHERE o.id=p.id AND o.speed_mps IS NULL
+                AND p.lat=p.prev_lat AND p.lon=p.prev_lon
+                AND p.timestamp::timestamptz-p.prev_timestamp::timestamptz > interval '0 seconds'
+                AND p.timestamp::timestamptz-p.prev_timestamp::timestamptz <= interval '15 minutes'""")
         for table in IDENTITY_TABLES:
             target.execute(f"SELECT setval(pg_get_serial_sequence('{table}','id'), COALESCE(MAX(id),1), COUNT(*)>0) FROM {table}")
         for table, expected in counts.items():
