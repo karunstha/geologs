@@ -2,7 +2,7 @@
 
 `GEOTRACKER_DATABASE_URL` selects the PostgreSQL/PostGIS store. Docker Compose configures it by default; SQLite remains available without that variable. The schema is implemented in `src/geotracker/postgres.py`, and the one-time copy is in `src/geotracker/migration.py`.
 
-The runtime schema keeps the same API fields as SQLite and adds generated geography columns with GiST indexes for recorded points, saved places, and reverse-cache centers. `near` and reverse-cache lookups use indexed `ST_DWithin`; historical stays, geofences, and reminders retain the existing behavior. Reverse geocoding remains on demand.
+The runtime schema keeps raw `point_observations`, a materialized `timeline_fixes` layer, and derived stays. It also adds generated geography columns with GiST indexes for recorded points, saved places, and reverse-cache centers. `near` and reverse-cache lookups use indexed `ST_DWithin`; historical stays, geofences, and reminders retain the existing behavior. Reverse geocoding remains cache-first and on demand.
 
 ## Sequence
 

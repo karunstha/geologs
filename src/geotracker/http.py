@@ -11,7 +11,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from .core import Store, deliver_webhook, geocode, reverse_geocode
-from .analysis import day_summary, insights, place_patterns, predict_next, stays, transitions
+from .analysis import day_summary, insights, place_patterns, predict_next, stays, transitions, visited_places
 from .mcp import SUPPORTED_VERSIONS, dispatch
 from .postgres import INTEGRITY_ERRORS
 
@@ -159,6 +159,7 @@ class Handler(BaseHTTPRequestHandler):
             elif url.path == "/api/current": value = store.latest()
             elif url.path == "/api/points": value = store.points(q.get("start"), q.get("end"), q.get("source"), q.get("limit", 5000))
             elif url.path == "/api/observations": value = store.observations(q.get("start"), q.get("end"), q.get("source"), q.get("limit", 5000))
+            elif url.path == "/api/timeline": value = store.timeline(q.get("start"), q.get("end"), q.get("source"), q.get("limit", 5000))
             elif url.path == "/api/stats": value = store.stats(q.get("start"), q.get("end"), q.get("source"))
             elif url.path == "/api/trips": value = store.trips(q.get("start"), q.get("end"), q.get("source"))
             elif url.path == "/api/coverage": value = store.coverage()
@@ -166,6 +167,7 @@ class Handler(BaseHTTPRequestHandler):
             elif url.path == "/api/place-visits": value = store.place_visits(q["place_id"], q.get("start"), q.get("end"))
             elif url.path == "/api/stays": value = stays(store, q.get("start"), q.get("end"), q.get("source"), q.get("limit", 500))
             elif url.path == "/api/frequent-places": value = place_patterns(store, q.get("limit", 50))[0]
+            elif url.path == "/api/visited-places": value = visited_places(store, q.get("limit", 100))
             elif url.path == "/api/transitions": value = transitions(store, q.get("limit", 50))
             elif url.path == "/api/predict-next": value = predict_next(store)
             elif url.path == "/api/insights": value = insights(store, min(int(q.get("limit", 50)), 100))

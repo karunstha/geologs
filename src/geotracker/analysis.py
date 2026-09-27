@@ -6,12 +6,73 @@ import math
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from .core import address_for_coordinate, metres, parse_time, route_segments_from_points, select_best_timed_fixes, select_route_fixes, select_unique_fixes, stats_from_points, trips_from_points
+from .core import address_for_coordinate, metres, parse_time, route_segments_from_points, select_best_timed_fixes, smooth_route_segment, stats_from_points, trips_from_points
 
 
 STOP_RADIUS_M = 50
 STOP_MIN_SECONDS = 300
 MAX_SAMPLE_GAP_SECONDS = 1800
+
+
+def sync_timeline(store, sources=None, rebuild=False, since_ids=None):
+    """Materialize an efficient timeline from raw observations and confirmed stays.
+
+    Samples while travelling remain available. A confirmed stationary run keeps
+    only its arrival and latest/departure observations in the timeline; raw
+    observations remain untouched in point_observations.
+    """
+    if sources is None:
+        sources = [row["source"] for row in store._rows("SELECT DISTINCT source FROM point_observations")]
+    since_ids = since_ids or {}
+    for source in sources:
+        since_id = 0 if rebuild else since_ids.get(source, 0)
+        if rebuild:
+            store.db.execute("DELETE FROM timeline_fixes WHERE source=?", (source,))
+        store.db.execute("""INSERT INTO timeline_fixes(observation_id,source,role,stay_id)
+            SELECT id,source,'movement',NULL FROM point_observations
+            WHERE source=? AND id>? ON CONFLICT(observation_id) DO NOTHING""", (source, since_id))
+        store.db.execute("""DELETE FROM timeline_fixes WHERE observation_id IN (
+            SELECT id FROM (SELECT id,ROW_NUMBER() OVER (
+                PARTITION BY source,timestamp ORDER BY COALESCE(accuracy_m,1000000000),id DESC) AS rank
+                FROM point_observations WHERE source=? AND timestamp IN (
+                    SELECT timestamp FROM point_observations WHERE source=? AND id>?)) ranked WHERE rank>1)""",
+            (source, source, since_id))
+        # Closing a stay changes no observation ID, so it would not be selected
+        # by the incremental end_observation_id query below. Promote its former
+        # `latest` edge when the first point outside the stop arrives.
+        store.db.execute("""UPDATE timeline_fixes SET role='departure' WHERE source=? AND role='latest'
+            AND stay_id IN (SELECT id FROM observed_stays_v2 WHERE source=? AND ongoing=0)""",
+            (source, source))
+        stay_query = "SELECT * FROM observed_stays_v2 WHERE source=?"
+        stay_args = [source]
+        if not rebuild:
+            stay_query += " AND end_observation_id>?"
+            stay_args.append(since_id)
+        stay_query += " ORDER BY started_at,id"
+        for stay in store._rows(stay_query, stay_args):
+            store.db.execute("""DELETE FROM timeline_fixes WHERE observation_id IN (
+                SELECT id FROM point_observations WHERE source=? AND timestamp>=? AND timestamp<=?
+                AND id<>? AND id<>?)""",
+                (source, stay["started_at"], stay["ended_at"], stay["start_observation_id"], stay["end_observation_id"]))
+            store.db.execute("""INSERT INTO timeline_fixes(observation_id,source,role,stay_id)
+                VALUES (?,?,?,?) ON CONFLICT(observation_id) DO UPDATE SET role=excluded.role,stay_id=excluded.stay_id""",
+                (stay["start_observation_id"], source, "arrival", stay["id"]))
+            store.db.execute("""INSERT INTO timeline_fixes(observation_id,source,role,stay_id)
+                VALUES (?,?,?,?) ON CONFLICT(observation_id) DO UPDATE SET role=excluded.role,stay_id=excluded.stay_id""",
+                (stay["end_observation_id"], source, "latest" if stay["ongoing"] else "departure", stay["id"]))
+        state = store.db.execute("SELECT candidate FROM stay_observation_state WHERE source=?", (source,)).fetchone()
+        candidate = json.loads(state["candidate"]) if state and state["candidate"] else None
+        if candidate and candidate["count"] >= 2 and _duration(candidate) < STOP_MIN_SECONDS:
+            store.db.execute("""DELETE FROM timeline_fixes WHERE observation_id IN (
+                SELECT id FROM point_observations WHERE source=? AND timestamp>=? AND timestamp<=?
+                AND id<>? AND id<>?)""",
+                (source, candidate["start"], candidate["end"], candidate["start_id"], candidate["end_id"]))
+            store.db.execute("""INSERT INTO timeline_fixes(observation_id,source,role,stay_id)
+                VALUES (?,?,?,NULL) ON CONFLICT(observation_id) DO UPDATE SET role=excluded.role""",
+                (candidate["start_id"], source, "arrival"))
+            store.db.execute("""INSERT INTO timeline_fixes(observation_id,source,role,stay_id)
+                VALUES (?,?,?,NULL) ON CONFLICT(observation_id) DO UPDATE SET role=excluded.role""",
+                (candidate["end_id"], source, "latest"))
 
 
 def _duration(candidate):
@@ -44,24 +105,33 @@ def process_stays(store, sources=None, rebuild=False):
     if sources is None:
         sources = [r["source"] for r in store._rows("SELECT DISTINCT source FROM point_observations")]
     processed = 0
+    processed_sources = set()
+    rebuilt_sources = set()
+    since_ids = {}
     for source in sources:
         state = store.db.execute("SELECT * FROM stay_observation_state WHERE source=?", (source,)).fetchone()
         last_id = state["last_observation_id"] if state else 0
+        since_ids[source] = 0 if rebuild else last_id
         first_new = store.db.execute("""SELECT timestamp FROM point_observations
             WHERE source=? AND id>? ORDER BY timestamp,id LIMIT 1""", (source, last_id)).fetchone()
         if rebuild or (state and first_new and first_new["timestamp"] <= state["last_timestamp"]):
+            rebuilt_sources.add(source)
             store.db.execute("DELETE FROM observed_stays_v2 WHERE source=?", (source,))
             store.db.execute("DELETE FROM stay_observation_state WHERE source=?", (source,))
             state = None
             last_id = 0
-        cursor = store.db.execute("""SELECT * FROM point_observations
-            WHERE source=? AND id>? ORDER BY timestamp,id""", (source, last_id))
+        source_max_id = store.db.execute(
+            "SELECT COALESCE(MAX(id),?) AS id FROM point_observations WHERE source=?", (last_id, source)).fetchone()["id"]
+        cursor = store.db.execute("""SELECT * FROM (
+            SELECT o.*,ROW_NUMBER() OVER (PARTITION BY o.source,o.timestamp
+                ORDER BY COALESCE(o.accuracy_m,1000000000),o.id DESC) AS observation_rank
+            FROM point_observations o WHERE o.source=? AND o.id>?) ranked
+            WHERE observation_rank=1 ORDER BY timestamp,id""", (source, last_id))
         candidate = json.loads(state["candidate"]) if state else None
-        max_id, last_time = last_id, state["last_timestamp"] if state else None
+        max_id, last_time = source_max_id, state["last_timestamp"] if state else None
         while batch := cursor.fetchmany(1000):
             for point in batch:
                 processed += 1
-                max_id = max(max_id, point["id"])
                 last_time = point["timestamp"]
                 if candidate:
                     elapsed = (datetime.fromisoformat(point["timestamp"]) - datetime.fromisoformat(candidate["end"])).total_seconds()
@@ -82,10 +152,16 @@ def process_stays(store, sources=None, rebuild=False):
                 candidate = _new_candidate(point) if _eligible(point) else None
         if max_id == last_id:
             continue
+        processed_sources.add(source)
         store.db.execute("""INSERT INTO stay_observation_state(source,last_observation_id,last_timestamp,candidate)
             VALUES (?,?,?,?) ON CONFLICT(source) DO UPDATE SET
             last_observation_id=excluded.last_observation_id,last_timestamp=excluded.last_timestamp,candidate=excluded.candidate""",
             (source, max_id, last_time, json.dumps(candidate)))
+    incremental_sources = processed_sources - rebuilt_sources
+    if incremental_sources:
+        sync_timeline(store, incremental_sources, since_ids=since_ids)
+    if rebuilt_sources:
+        sync_timeline(store, rebuilt_sources, rebuild=True)
     return {"processed_points": processed}
 
 
@@ -158,6 +234,20 @@ def place_patterns(store, limit=50, rows=None):
         cluster["observed_minutes"] = round(cluster["observed_minutes"], 1)
     ordered = sorted(clusters, key=lambda c: (c["observed_minutes"], c["visits"]), reverse=True)
     return ordered if limit is None else ordered[:min(int(limit), 5000)], mapping
+
+
+def visited_places(store, limit=500):
+    """Observed places ordered by total sampled time, with cache-first labels."""
+    clusters, _ = place_patterns(store, limit=None)
+    saved = {place["id"]: place for place in store.places(enrich=True)}
+    result = []
+    for cluster in clusters[:min(max(int(limit), 1), 5000)]:
+        place = saved.get(cluster["place_id"])
+        address = place["address"] if place else address_for_coordinate(store, cluster["lat"], cluster["lon"])
+        result.append({**cluster, "address": address,
+                       "display_name": cluster["name"] or address or "Unlabeled stop",
+                       "saved": bool(place)})
+    return result
 
 
 def transitions(store, limit=50, patterns=None, rows=None):
@@ -265,15 +355,16 @@ def day_summary(store, date, timezone_name="UTC", source=None):
         stay["display_name"] = place["name"] or "Unlabeled stop"
     points = store.observations(start, end, source=source, limit=None)
     raw_chronological = list(reversed(points))
-    chronological = select_unique_fixes(raw_chronological)
+    chronological = list(reversed(store.timeline(start, end, source=source, limit=None)))
     trips = trips_from_points(select_best_timed_fixes(raw_chronological))
-    route_segments = route_segments_from_points(select_route_fixes(raw_chronological))
+    route_segments = [smooth_route_segment(segment) for segment in route_segments_from_points(chronological)]
     activity_counts = {mode: sum(trip["mode"] == mode for trip in trips) for mode in ("driving", "walking", "running_cycling")}
     stats = stats_from_points(chronological)
     stats["points"] = len(points)
     stats["unique_points"] = len(chronological)
+    stats["timeline_points"] = len(chronological)
     return {"date": date, "timezone": timezone_name, "source": source, "points": len(points), "stays": day_stays,
-            "unique_points": len(chronological), "stats": stats, "trips": trips, "route_segments": route_segments, "activity_counts": activity_counts,
+            "unique_points": len(chronological), "timeline_points": len(chronological), "stats": stats, "trips": trips, "route_segments": route_segments, "activity_counts": activity_counts,
             "visited_places": visited_places,
             "first_fix": points[-1]["timestamp"] if points else None,
             "last_fix": points[0]["timestamp"] if points else None,

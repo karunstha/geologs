@@ -76,6 +76,47 @@ def migrate_sqlite(sqlite_path, postgres_url):
                 AND p.lat=p.prev_lat AND p.lon=p.prev_lon
                 AND p.timestamp::timestamptz-p.prev_timestamp::timestamptz > interval '0 seconds'
                 AND p.timestamp::timestamptz-p.prev_timestamp::timestamptz <= interval '15 minutes'""")
+        target.execute("""INSERT INTO timeline_fixes(observation_id,source,role,stay_id)
+            SELECT id,source,'movement',NULL FROM point_observations WHERE true
+            ON CONFLICT(observation_id) DO NOTHING""")
+        target.execute("""DELETE FROM timeline_fixes WHERE observation_id IN (
+            SELECT id FROM (SELECT id,ROW_NUMBER() OVER (
+                PARTITION BY source,timestamp ORDER BY COALESCE(accuracy_m,1000000000),id DESC) AS rank
+                FROM point_observations) ranked WHERE rank>1)""")
+        target.execute("""DELETE FROM timeline_fixes t USING point_observations o
+            WHERE t.observation_id=o.id AND EXISTS (
+                SELECT 1 FROM observed_stays_v2 s WHERE s.source=o.source
+                AND o.timestamp>=s.started_at AND o.timestamp<=s.ended_at
+                AND o.id<>s.start_observation_id AND o.id<>s.end_observation_id)""")
+        target.execute("""INSERT INTO timeline_fixes(observation_id,source,role,stay_id)
+            SELECT start_observation_id,source,'arrival',id FROM observed_stays_v2 WHERE true
+            ON CONFLICT(observation_id) DO UPDATE SET role=excluded.role,stay_id=excluded.stay_id""")
+        target.execute("""INSERT INTO timeline_fixes(observation_id,source,role,stay_id)
+            SELECT end_observation_id,source,CASE WHEN ongoing=1 THEN 'latest' ELSE 'departure' END,id
+            FROM observed_stays_v2 WHERE true ON CONFLICT(observation_id) DO UPDATE
+            SET role=excluded.role,stay_id=excluded.stay_id""")
+        target.execute("""WITH candidates AS (
+            SELECT source,candidate::jsonb AS value FROM stay_observation_state
+            WHERE (candidate::jsonb->>'count')::integer>=2
+            AND (candidate::jsonb->>'end')::timestamptz-(candidate::jsonb->>'start')::timestamptz<interval '5 minutes')
+            DELETE FROM timeline_fixes t USING point_observations o,candidates c
+            WHERE t.observation_id=o.id AND o.source=c.source
+            AND o.timestamp>=(c.value->>'start') AND o.timestamp<=(c.value->>'end')
+            AND o.id<>(c.value->>'start_id')::bigint AND o.id<>(c.value->>'end_id')::bigint""")
+        target.execute("""WITH candidates AS (
+            SELECT source,candidate::jsonb AS value FROM stay_observation_state
+            WHERE (candidate::jsonb->>'count')::integer>=2
+            AND (candidate::jsonb->>'end')::timestamptz-(candidate::jsonb->>'start')::timestamptz<interval '5 minutes')
+            INSERT INTO timeline_fixes(observation_id,source,role,stay_id)
+            SELECT (value->>'start_id')::bigint,source,'arrival',NULL FROM candidates WHERE true
+            ON CONFLICT(observation_id) DO UPDATE SET role=excluded.role""")
+        target.execute("""WITH candidates AS (
+            SELECT source,candidate::jsonb AS value FROM stay_observation_state
+            WHERE (candidate::jsonb->>'count')::integer>=2
+            AND (candidate::jsonb->>'end')::timestamptz-(candidate::jsonb->>'start')::timestamptz<interval '5 minutes')
+            INSERT INTO timeline_fixes(observation_id,source,role,stay_id)
+            SELECT (value->>'end_id')::bigint,source,'latest',NULL FROM candidates WHERE true
+            ON CONFLICT(observation_id) DO UPDATE SET role=excluded.role""")
         for table in IDENTITY_TABLES:
             target.execute(f"SELECT setval(pg_get_serial_sequence('{table}','id'), COALESCE(MAX(id),1), COUNT(*)>0) FROM {table}")
         for table, expected in counts.items():

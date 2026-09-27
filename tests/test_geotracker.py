@@ -8,8 +8,8 @@ from email.message import Message
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from geotracker.core import Store, geocode, mode_for, reverse_cache_radius, reverse_geocode, route_segments_from_points, select_unique_fixes
-from geotracker.analysis import day_summary, insights, place_patterns, predict_next, stays, transitions
+from geotracker.core import Store, geocode, mode_for, reverse_cache_radius, reverse_geocode, route_segments_from_points, smooth_route_segment
+from geotracker.analysis import day_summary, insights, place_patterns, predict_next, stays, transitions, visited_places
 from geotracker.imports import import_takeout
 from geotracker.mcp import dispatch
 from geotracker.cli import load_env_file, poll_home_assistant
@@ -82,7 +82,7 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(day["stays"][0]["display_name"], "Campus")
         self.assertEqual(day["visited_places"][0]["visits"], 1)
         self.assertEqual(len(day["trips"]), 2)
-        self.assertEqual(len(day["route_segments"]), 1)
+        self.assertEqual(len(day["route_segments"]), 2)
 
     def test_day_stay_uses_visited_place_reverse_geocode_label(self):
         self.store.ingest([
@@ -104,6 +104,12 @@ class StoreTests(unittest.TestCase):
         segments = route_segments_from_points(list(reversed(self.store.points(limit=None))))
         self.assertEqual(len(segments), 1)
         self.assertEqual(len(segments[0]), 2)
+
+    def test_local_route_smoothing_preserves_recorded_endpoints(self):
+        path = [[-87.9, 41], [-87.89, 41.01], [-87.88, 41]]
+        smoothed = smooth_route_segment(path)
+        self.assertEqual((smoothed[0], smoothed[-1]), (path[0], path[-1]))
+        self.assertGreater(len(smoothed), len(path))
 
     def test_trip_classification_uses_connected_trip_context(self):
         self.store.ingest([
@@ -130,19 +136,17 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(day["trips"][0]["mode"], "driving")
         self.assertEqual(day["activity_counts"]["running_cycling"], 0)
 
-    def test_accuracy_selection_preserves_raw_fixes(self):
+    def test_compact_stationary_timeline_preserves_raw_fixes(self):
         self.store.ingest([
             {"source": "phone", "timestamp": "2026-09-25T10:00:00Z", "lat": 41, "lon": -87.9, "accuracy_m": 90},
             {"source": "phone", "timestamp": "2026-09-25T10:00:30Z", "lat": 41.00002, "lon": -87.9, "accuracy_m": 8},
             {"source": "phone", "timestamp": "2026-09-25T10:04:00Z", "lat": 41.00003, "lon": -87.9, "accuracy_m": 12},
         ])
-        raw = list(reversed(self.store.points(limit=None)))
-        selected = select_unique_fixes(raw)
-        self.assertEqual(len(raw), 3)
-        self.assertEqual(len(selected), 1)
-        self.assertEqual(selected[0]["accuracy_m"], 8)
+        self.assertEqual(len(self.store.observations(limit=None)), 3)
+        timeline = list(reversed(self.store.timeline(limit=None)))
+        self.assertEqual([point["role"] for point in timeline], ["arrival", "latest"])
         day = day_summary(self.store, "2026-09-25", "UTC")
-        self.assertEqual((day["unique_points"], day["points"]), (1, 3))
+        self.assertEqual((day["timeline_points"], day["points"]), (2, 3))
 
     def test_home_assistant_polls_record_repeated_coordinates(self):
         state = {"last_updated": "2026-09-25T08:00:00Z",
@@ -161,7 +165,7 @@ class StoreTests(unittest.TestCase):
         archive = Store(Path(self.tmp.name) / "poll.db")
         try:
             day = day_summary(archive, "2026-09-25", "UTC")
-            self.assertEqual((day["unique_points"], day["points"]), (1, 2))
+            self.assertEqual((day["timeline_points"], day["points"]), (2, 2))
         finally:
             archive.close()
 
@@ -177,6 +181,34 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(newest["speed_mps"], 0)
         self.assertEqual(newest["speed_origin"], "estimated")
         self.assertEqual(newest["mode"], "idle")
+
+    def test_compact_timeline_keeps_stop_edges_and_movement(self):
+        base = datetime(2026, 9, 25, 10, tzinfo=timezone.utc)
+        at_home = [{"source": "phone", "timestamp": (base + timedelta(minutes=minute)).isoformat(),
+                    "lat": 41, "lon": -87.9, "accuracy_m": 5} for minute in range(100)]
+        self.store.ingest(at_home)
+        timeline = list(reversed(self.store.timeline(limit=None)))
+        self.assertEqual(len(self.store.observations(limit=None)), 100)
+        self.assertEqual([point["role"] for point in timeline], ["arrival", "latest"])
+        self.assertEqual([point["timestamp"] for point in timeline], [at_home[0]["timestamp"], at_home[-1]["timestamp"]])
+        movement = [{"source": "phone", "timestamp": (base + timedelta(minutes=minute)).isoformat(),
+                     "lat": 41 + (minute - 99) * .001, "lon": -87.9, "accuracy_m": 5}
+                    for minute in range(100, 104)]
+        self.store.ingest(movement)
+        timeline = list(reversed(self.store.timeline(limit=None)))
+        self.assertEqual(len(timeline), 6)
+        self.assertEqual(timeline[1]["role"], "departure")
+        self.assertEqual([point["role"] for point in timeline[-4:]], ["movement"] * 4)
+
+    def test_stays_use_best_accuracy_observation_for_a_timestamp(self):
+        self.store.ingest([
+            {"source": "phone", "timestamp": "2026-09-25T10:00:00Z", "lat": 41, "lon": -87.9, "accuracy_m": 5},
+            {"source": "phone", "timestamp": "2026-09-25T10:00:00Z", "lat": 41, "lon": -87.9, "accuracy_m": 90},
+            {"source": "phone", "timestamp": "2026-09-25T10:06:00Z", "lat": 41, "lon": -87.9, "accuracy_m": 5},
+        ])
+        timeline = list(reversed(self.store.timeline(limit=None)))
+        self.assertEqual(len(self.store.observations(limit=None)), 3)
+        self.assertEqual([point["accuracy_m"] for point in timeline], [5, 5])
 
     def test_existing_observations_get_speed_origin_without_inheriting_speed(self):
         path = Path(self.tmp.name) / "v2.db"
@@ -244,8 +276,11 @@ class StoreTests(unittest.TestCase):
         init = dispatch(self.store, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25"}})
         self.assertEqual(init["result"]["serverInfo"]["name"], "geotracker")
         tools = dispatch(self.store, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
-        self.assertIn("get_current_location", [t["name"] for t in tools["result"]["tools"]])
-        self.assertNotIn("plan_route", [t["name"] for t in tools["result"]["tools"]])
+        tool_names = [t["name"] for t in tools["result"]["tools"]]
+        self.assertIn("get_current_location", tool_names)
+        self.assertIn("get_compact_timeline", tool_names)
+        self.assertIn("get_visited_places", tool_names)
+        self.assertNotIn("plan_route", tool_names)
         result = dispatch(self.store, {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "get_current_location", "arguments": {}}})
         self.assertEqual(result["result"]["structuredContent"]["result"]["lat"], 41)
 
@@ -367,6 +402,9 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(day_summary(self.store, "2026-09-25", "UTC")["points"], 21)
         place = self.store.save_place({"name": "University", "lat": 41, "lon": -87.9})
         self.assertEqual(self.store.place_visits(place["id"])["total_observed_minutes"], 24)
+        ranked = visited_places(self.store)
+        self.assertEqual((ranked[0]["display_name"], ranked[0]["saved"], ranked[0]["visits"]), ("University", True, 4))
+        self.assertGreater(ranked[0]["observed_minutes"], ranked[1]["observed_minutes"])
         self.assertEqual(insights(self.store)["unlabeled_places"][0]["visits"], 3)
         mcp = dispatch(self.store, {"jsonrpc": "2.0", "id": 9, "method": "tools/call",
                                     "params": {"name": "get_frequent_places", "arguments": {"limit": 10}}})

@@ -90,6 +90,12 @@ CREATE TABLE IF NOT EXISTS stay_observation_state (
     source TEXT PRIMARY KEY, last_observation_id BIGINT NOT NULL,
     last_timestamp TEXT NOT NULL, candidate TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS timeline_fixes (
+    observation_id BIGINT PRIMARY KEY REFERENCES point_observations(id) ON DELETE CASCADE,
+    source TEXT NOT NULL, role TEXT NOT NULL,
+    stay_id BIGINT REFERENCES observed_stays_v2(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS timeline_fixes_source ON timeline_fixes(source);
 CREATE TABLE IF NOT EXISTS geocode_cache (
     cache_key TEXT PRIMARY KEY, provider TEXT NOT NULL,
     value TEXT NOT NULL, created_at TEXT NOT NULL
@@ -152,6 +158,49 @@ class PostgresConnection:
                         AND p.timestamp::timestamptz-p.prev_timestamp::timestamptz > interval '0 seconds'
                         AND p.timestamp::timestamptz-p.prev_timestamp::timestamptz <= interval '15 minutes'""")
                     self.connection.execute("INSERT INTO schema_migrations(version) VALUES(3)")
+                if not self.connection.execute("SELECT 1 FROM schema_migrations WHERE version=4").fetchone():
+                    self.connection.execute("""INSERT INTO timeline_fixes(observation_id,source,role,stay_id)
+                        SELECT id,source,'movement',NULL FROM point_observations WHERE true
+                        ON CONFLICT(observation_id) DO NOTHING""")
+                    self.connection.execute("""DELETE FROM timeline_fixes WHERE observation_id IN (
+                        SELECT id FROM (SELECT id,ROW_NUMBER() OVER (
+                            PARTITION BY source,timestamp ORDER BY COALESCE(accuracy_m,1000000000),id DESC) AS rank
+                            FROM point_observations) ranked WHERE rank>1)""")
+                    self.connection.execute("""DELETE FROM timeline_fixes t USING point_observations o
+                        WHERE t.observation_id=o.id AND EXISTS (
+                            SELECT 1 FROM observed_stays_v2 s WHERE s.source=o.source
+                            AND o.timestamp>=s.started_at AND o.timestamp<=s.ended_at
+                            AND o.id<>s.start_observation_id AND o.id<>s.end_observation_id)""")
+                    self.connection.execute("""INSERT INTO timeline_fixes(observation_id,source,role,stay_id)
+                        SELECT start_observation_id,source,'arrival',id FROM observed_stays_v2 WHERE true
+                        ON CONFLICT(observation_id) DO UPDATE SET role=excluded.role,stay_id=excluded.stay_id""")
+                    self.connection.execute("""INSERT INTO timeline_fixes(observation_id,source,role,stay_id)
+                        SELECT end_observation_id,source,CASE WHEN ongoing=1 THEN 'latest' ELSE 'departure' END,id
+                        FROM observed_stays_v2 WHERE true ON CONFLICT(observation_id) DO UPDATE
+                        SET role=excluded.role,stay_id=excluded.stay_id""")
+                    self.connection.execute("""WITH candidates AS (
+                        SELECT source,candidate::jsonb AS value FROM stay_observation_state
+                        WHERE (candidate::jsonb->>'count')::integer>=2
+                        AND (candidate::jsonb->>'end')::timestamptz-(candidate::jsonb->>'start')::timestamptz<interval '5 minutes')
+                        DELETE FROM timeline_fixes t USING point_observations o,candidates c
+                        WHERE t.observation_id=o.id AND o.source=c.source
+                        AND o.timestamp>=(c.value->>'start') AND o.timestamp<=(c.value->>'end')
+                        AND o.id<>(c.value->>'start_id')::bigint AND o.id<>(c.value->>'end_id')::bigint""")
+                    self.connection.execute("""WITH candidates AS (
+                        SELECT source,candidate::jsonb AS value FROM stay_observation_state
+                        WHERE (candidate::jsonb->>'count')::integer>=2
+                        AND (candidate::jsonb->>'end')::timestamptz-(candidate::jsonb->>'start')::timestamptz<interval '5 minutes')
+                        INSERT INTO timeline_fixes(observation_id,source,role,stay_id)
+                        SELECT (value->>'start_id')::bigint,source,'arrival',NULL FROM candidates WHERE true
+                        ON CONFLICT(observation_id) DO UPDATE SET role=excluded.role""")
+                    self.connection.execute("""WITH candidates AS (
+                        SELECT source,candidate::jsonb AS value FROM stay_observation_state
+                        WHERE (candidate::jsonb->>'count')::integer>=2
+                        AND (candidate::jsonb->>'end')::timestamptz-(candidate::jsonb->>'start')::timestamptz<interval '5 minutes')
+                        INSERT INTO timeline_fixes(observation_id,source,role,stay_id)
+                        SELECT (value->>'end_id')::bigint,source,'latest',NULL FROM candidates WHERE true
+                        ON CONFLICT(observation_id) DO UPDATE SET role=excluded.role""")
+                    self.connection.execute("INSERT INTO schema_migrations(version) VALUES(4)")
                 self.connection.commit()
                 _initialized_urls.add(url)
 

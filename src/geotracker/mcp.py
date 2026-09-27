@@ -3,7 +3,7 @@ import json
 import sqlite3
 
 from .core import deliver_webhook, geocode, reverse_geocode
-from .analysis import day_summary, place_patterns, predict_next, stays, transitions
+from .analysis import day_summary, place_patterns, predict_next, stays, transitions, visited_places
 from .postgres import INTEGRITY_ERRORS
 
 DB_INPUT_ERRORS = (ValueError, KeyError, TypeError, sqlite3.IntegrityError) + INTEGRITY_ERRORS
@@ -21,6 +21,7 @@ TOOLS = [
     {"name": "get_current_location", "description": "Most recent GPS point with fix age, stale flag, speed and detected movement mode.", "inputSchema": schema({})},
     {"name": "get_location_history", "description": "GPS samples in a time window (ISO 8601 timestamps).", "inputSchema": schema({"start": STRING, "end": STRING, "source": STRING, "limit": INTEGER})},
     {"name": "get_raw_observations", "description": "Received coordinate and accuracy versions with receipt time; exact retransmissions are coalesced.", "inputSchema": schema({"start": STRING, "end": STRING, "source": STRING, "limit": INTEGER})},
+    {"name": "get_compact_timeline", "description": "Informational fixes: movement samples plus arrival and departure edges, with stationary repetition removed.", "inputSchema": schema({"start": STRING, "end": STRING, "source": STRING, "limit": INTEGER})},
     {"name": "get_location_at_time", "description": "Nearest recorded point to an ISO 8601 timestamp, including its time difference.", "inputSchema": schema({"timestamp": STRING}, ["timestamp"])},
     {"name": "search_locations_near", "description": "Recorded points within a radius of coordinates, optionally in a time window.", "inputSchema": schema({"lat": NUMBER, "lon": NUMBER, "radius_m": NUMBER, "start": STRING, "end": STRING, "source": STRING, "limit": INTEGER}, ["lat", "lon"])},
     {"name": "get_travel_stats", "description": "Sampled distance, movement hours, and mode counts for a time window.", "inputSchema": schema({"start": STRING, "end": STRING, "source": STRING})},
@@ -29,6 +30,7 @@ TOOLS = [
     {"name": "get_place_visits", "description": "Observed visits to a saved place, split by exits or gaps over 30 minutes.", "inputSchema": schema({"place_id": INTEGER, "start": STRING, "end": STRING}, ["place_id"])},
     {"name": "get_stays", "description": "Observed stops of at least five minutes within 50 m, with optional saved place labels. Sparse GPS cannot prove time in gaps.", "inputSchema": schema({"start": STRING, "end": STRING, "source": STRING, "limit": INTEGER})},
     {"name": "get_frequent_places", "description": "Saved and suggested places ranked by observed stop time and visits; unlabeled clusters can be named with save_place.", "inputSchema": schema({"limit": INTEGER})},
+    {"name": "get_visited_places", "description": "Saved and unsaved observed places ranked by total sampled time, with cache-first address labels.", "inputSchema": schema({"limit": INTEGER})},
     {"name": "get_unlabeled_frequent_places", "description": "Frequent observed stop clusters that do not yet match a saved place.", "inputSchema": schema({"limit": INTEGER})},
     {"name": "get_time_at_place", "description": "Observed visit count and sampled duration at a saved place; unobserved gaps are excluded.", "inputSchema": schema({"place_id": INTEGER, "start": STRING, "end": STRING}, ["place_id"])},
     {"name": "get_day_summary", "description": "Daily fixes, movement runs, observed visited places, and coverage for a local calendar day.", "inputSchema": schema({"date": STRING, "timezone": STRING, "source": STRING}, ["date"])},
@@ -53,6 +55,8 @@ def call_tool(store, name, args):
         return store.points(args.get("start"), args.get("end"), args.get("source"), args.get("limit", 5000))
     if name == "get_raw_observations":
         return store.observations(args.get("start"), args.get("end"), args.get("source"), args.get("limit", 5000))
+    if name == "get_compact_timeline":
+        return store.timeline(args.get("start"), args.get("end"), args.get("source"), args.get("limit", 5000))
     if name == "get_location_at_time":
         return store.at_time(args["timestamp"])
     if name == "search_locations_near":
@@ -69,6 +73,8 @@ def call_tool(store, name, args):
         return stays(store, args.get("start"), args.get("end"), args.get("source"), args.get("limit", 500))
     if name == "get_frequent_places":
         return place_patterns(store, args.get("limit", 50))[0]
+    if name == "get_visited_places":
+        return visited_places(store, args.get("limit", 100))
     if name == "get_unlabeled_frequent_places":
         return [p for p in place_patterns(store, None)[0] if p["place_id"] is None][:min(int(args.get("limit", 50)), 500)]
     if name == "get_time_at_place":

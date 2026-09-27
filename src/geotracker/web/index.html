@@ -33,7 +33,7 @@
         <div><span>Walking trips</span><strong id="stat-walking">0</strong></div>
         <div><span>Running / cycling trips</span><strong id="stat-running-cycling">0</strong></div>
         <div><span>Places visited</span><strong id="stat-places">0</strong></div>
-        <div><span>Recorded fixes</span><strong id="stat-points">0 unique out of 0</strong></div>
+        <div><span>Timeline fixes</span><strong id="stat-points">0 key out of 0 raw</strong></div>
       </div>
       <p id="day-context" class="day-context" hidden></p>
 
@@ -41,7 +41,7 @@
         <section class="map-shell" aria-label="Recorded location map">
           <div class="map-topline"><span id="map-note">Recorded route</span><button id="locate" class="small-button" hidden>Last fix</button></div>
           <div class="map-stage"><div id="map" role="application" aria-label="Location map"></div><div id="history-empty" class="map-empty"><strong>No locations recorded for this day</strong><span>Choose another date to explore your history.</span></div></div>
-          <div id="map-footer" class="map-footer" hidden><span><i class="legend path"></i> Recorded segments</span><span>Gaps are not connected</span></div>
+          <div id="map-footer" class="map-footer" hidden><span><i class="legend path"></i> Smoothed recorded path</span><span>Estimated from GPS; gaps are not connected</span></div>
         </section>
         <aside id="inspector" class="inspector" hidden>
           <section><h2>Visited places</h2><div id="visited-places" class="list"></div></section>
@@ -61,22 +61,20 @@
         <div class="detail-panel active" data-panel-view="trips"><div id="trips" class="list"></div></div>
         <div class="detail-panel" data-panel-view="stays"><div id="stays" class="list"></div></div>
         <div class="detail-panel" data-panel-view="speed"><div id="speed-chart" class="chart-wrap"></div></div>
-        <div class="detail-panel" data-panel-view="samples"><p id="sample-count" class="section-note"></p><div class="table-wrap"><table><thead><tr><th>Time</th><th>Source</th><th>Mode</th><th>Speed</th><th>Coordinates</th><th>Accuracy</th></tr></thead><tbody id="points-table"></tbody></table></div></div>
+        <div class="detail-panel" data-panel-view="samples"><div class="sample-toolbar"><div class="mini-tabs"><button class="active" data-sample-view="timeline">Key fixes</button><button data-sample-view="raw">Raw samples</button></div><p id="sample-count" class="section-note"></p></div><div class="table-wrap"><table><thead><tr><th>Time</th><th>Type</th><th>Source</th><th>Mode</th><th>Speed</th><th>Coordinates</th><th>Accuracy</th></tr></thead><tbody id="points-table"></tbody></table></div></div>
         <div class="detail-panel" data-panel-view="patterns"><p id="prediction" class="section-note"></p><div id="transitions" class="list"></div></div>
         <div class="detail-panel" data-panel-view="coverage"><div id="coverage" class="list"></div></div>
       </section>
     </section>
 
     <section id="places-view" class="view">
-      <div class="page-head"><h1>Places</h1></div>
-      <div class="places-layout">
-        <section class="surface"><h2>Saved places</h2><div id="places-list" class="list"></div></section>
-        <div class="places-tools">
-          <section class="surface"><h2>Find an address</h2><form id="search-form" class="search-row"><input id="search" placeholder="Search by name or address" aria-label="Search address"><button class="outline-button">Search</button></form><div id="search-results" class="result-list"></div><p id="geocode-hint" class="section-note"></p></section>
-          <section class="surface"><h2>Place details</h2><form id="place-form" class="form-stack"><input type="hidden" id="place-id"><label>Name<input id="place-name" required maxlength="120" placeholder="e.g. University"></label><div class="form-pair"><label>Latitude<input id="place-lat" type="number" step="any" min="-90" max="90" required></label><label>Longitude<input id="place-lon" type="number" step="any" min="-180" max="180" required></label></div><button type="button" id="reverse" class="text-button align-start">Find address from coordinates</button><label>Arrival radius (m)<input id="place-radius" type="number" min="20" max="5000" value="150" required></label><label>Address<input id="place-address" maxlength="300"></label><button class="primary-button align-start">Save place</button></form></section>
-        </div>
+      <div class="page-head"><h1>Places</h1><button id="add-place" class="primary-button">Add place</button></div>
+      <div class="page-tabs" role="tablist" aria-label="Places">
+        <button class="active" data-places-tab="saved" role="tab" aria-selected="true">Saved places</button>
+        <button data-places-tab="visited" role="tab" aria-selected="false">Places visited</button>
       </div>
-      <section id="suggestions-panel" class="surface suggestions" hidden><h2>Suggested places</h2><div id="suggestions-list" class="list"></div></section>
+      <section class="surface places-panel active" data-places-panel="saved"><div class="section-heading"><div><h2>Saved places</h2><p>Named places used by reminders and visit history.</p></div></div><div id="places-list" class="list"></div></section>
+      <section class="surface places-panel" data-places-panel="visited"><div class="section-heading"><div><h2>Places visited</h2><p>Ranked by total observed time, then number of visits.</p></div></div><div id="all-visited-places" class="list"></div></section>
     </section>
 
     <section id="reminders-view" class="view">
@@ -85,6 +83,12 @@
       <section id="arrival-inbox" class="surface arrival-inbox" hidden><h2>Arrival events</h2><div id="events-list" class="list"></div></section>
     </section>
   </main>
+
+  <dialog id="place-dialog" class="place-dialog">
+    <div class="dialog-head"><div><h2 id="place-dialog-title">Add place</h2><p>Search near your latest fix or enter coordinates.</p></div><button id="close-place-dialog" class="dialog-close" type="button" aria-label="Close">×</button></div>
+    <section class="dialog-section"><form id="search-form" class="search-row"><input id="search" placeholder="Search by name or address" aria-label="Search address"><button class="outline-button">Search</button></form><div id="search-results" class="result-list"></div><p id="geocode-hint" class="section-note"></p></section>
+    <section class="dialog-section"><form id="place-form" class="form-stack"><input type="hidden" id="place-id"><label>Name<input id="place-name" required maxlength="120" placeholder="e.g. University"></label><div class="form-pair"><label>Latitude<input id="place-lat" type="number" step="any" min="-90" max="90" required></label><label>Longitude<input id="place-lon" type="number" step="any" min="-180" max="180" required></label></div><button type="button" id="reverse" class="text-button align-start">Find address from coordinates</button><label>Arrival radius (m)<input id="place-radius" type="number" min="20" max="5000" value="150" required></label><label>Address<input id="place-address" maxlength="300"></label><div class="dialog-actions"><button type="button" id="cancel-place" class="outline-button">Cancel</button><button class="primary-button">Save place</button></div></form></section>
+  </dialog>
 
   <div id="auth-panel" class="auth-backdrop" hidden><form id="auth-form" class="auth-card"><h2>Unlock Geotracker</h2><label>Access token<input id="auth-token" type="password" autocomplete="current-password" required></label><p id="auth-error" class="auth-error" role="alert"></p><div class="auth-actions"><button type="button" id="auth-cancel" class="outline-button">Cancel</button><button class="primary-button">Unlock</button></div></form></div>
   <div id="toast" role="status" aria-live="polite"></div>

@@ -56,54 +56,6 @@ def mode_for(speed_mps, accuracy_m=None):
     return "driving" if kmh < 200 else "unknown"
 
 
-def nearby_fix_runs(points):
-    """Group consecutive samples close to the first fix in a run."""
-    run = []
-    for point in points:
-        same_run = bool(run)
-        if run and point["source"] == run[0]["source"]:
-            elapsed = (datetime.fromisoformat(point["timestamp"]) - datetime.fromisoformat(run[0]["timestamp"])).total_seconds()
-            same_run = elapsed >= 0 and metres(point["lat"], point["lon"], run[0]["lat"], run[0]["lon"]) <= 15
-        elif run:
-            same_run = False
-        if not same_run:
-            if run:
-                yield run
-            run = [point]
-        else:
-            run.append(point)
-    if run:
-        yield run
-
-
-def best_fix_index(run):
-    return min(range(len(run)), key=lambda i: run[i]["accuracy_m"] if run[i]["accuracy_m"] is not None else float("inf"))
-
-
-def select_unique_fixes(points):
-    """Keep the most accurate fix in each consecutive nearby run of samples."""
-    return [run[best_fix_index(run)] for run in nearby_fix_runs(points)]
-
-
-def select_route_fixes(points):
-    """Retain stop boundaries so compressing stationary samples keeps route timing."""
-    selected = []
-    for run in nearby_fix_runs(points):
-        indices = {0, best_fix_index(run), len(run) - 1}
-        last_kept = 0
-        for index in range(1, len(run)):
-            gap = (datetime.fromisoformat(run[index]["timestamp"]) - datetime.fromisoformat(run[last_kept]["timestamp"])).total_seconds()
-            if gap > 900:
-                # Keep the last available point before a route gap. A true
-                # sample gap still splits the line in route_segments_from_points.
-                bridge = index - 1 if index - 1 > last_kept else index
-                indices.add(bridge)
-                last_kept = bridge
-        for index in sorted(indices):
-            selected.append(run[index])
-    return selected
-
-
 def select_best_timed_fixes(points):
     """Keep one accuracy-best observation per source timestamp for trip timing."""
     selected = []
@@ -159,7 +111,7 @@ def trips_from_points(points):
         trips.append({"start": active[0]["timestamp"], "end": active[-1]["timestamp"],
                       "distance_km": round(distance_m / 1000, 2), "mode": mode,
                       "modes": {mode: len(moving)},
-                      "coordinates": [[point["lon"], point["lat"]] for point in active]})
+                      "coordinates": smooth_route_segment([[point["lon"], point["lat"]] for point in active])})
 
     for point in points:
         if not run:
@@ -213,6 +165,23 @@ def route_segments_from_points(points):
     return segments
 
 
+def smooth_route_segment(coordinates, iterations=2):
+    """Round GPS polyline corners without using or implying a road network."""
+    result = coordinates
+    if len(result) < 3:
+        return result
+    for _ in range(iterations):
+        smoothed = [result[0]]
+        for first, second in zip(result, result[1:]):
+            smoothed.append([first[0] * 0.75 + second[0] * 0.25,
+                             first[1] * 0.75 + second[1] * 0.25])
+            smoothed.append([first[0] * 0.25 + second[0] * 0.75,
+                             first[1] * 0.25 + second[1] * 0.75])
+        smoothed.append(result[-1])
+        result = smoothed
+    return result
+
+
 class Store:
     def __init__(self, path=None):
         url = os.environ.get("GEOTRACKER_DATABASE_URL") if path is None else None
@@ -246,6 +215,12 @@ class Store:
         CREATE INDEX IF NOT EXISTS point_observations_time ON point_observations(timestamp);
         CREATE INDEX IF NOT EXISTS point_observations_source_time ON point_observations(source,timestamp);
         CREATE INDEX IF NOT EXISTS point_observations_source_id ON point_observations(source,id);
+        CREATE TABLE IF NOT EXISTS timeline_fixes (
+            observation_id INTEGER PRIMARY KEY REFERENCES point_observations(id) ON DELETE CASCADE,
+            source TEXT NOT NULL, role TEXT NOT NULL,
+            stay_id INTEGER REFERENCES observed_stays_v2(id) ON DELETE SET NULL
+        );
+        CREATE INDEX IF NOT EXISTS timeline_fixes_source ON timeline_fixes(source);
         CREATE TABLE IF NOT EXISTS places (
             id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE COLLATE NOCASE,
             lat REAL NOT NULL, lon REAL NOT NULL, radius_m REAL NOT NULL DEFAULT 150,
@@ -310,6 +285,7 @@ class Store:
             """)
         if not self.postgres:
             version = self.db.execute("PRAGMA user_version").fetchone()[0]
+            rebuild_analysis = version < 5
             if version < 1:
                 self.db.execute("UPDATE points SET mode='running_cycling' WHERE mode='cycling'")
             if version < 2:
@@ -340,7 +316,17 @@ class Store:
                         AND (julianday(timestamp)-julianday(prev_timestamp))*86400 > 0
                         AND (julianday(timestamp)-julianday(prev_timestamp))*86400 <= 900)""")
                 self.db.execute("PRAGMA user_version=3")
-        if not self.db.execute("SELECT 1 FROM stay_observation_state LIMIT 1").fetchone() and self.db.execute("SELECT 1 FROM point_observations LIMIT 1").fetchone():
+        if self.postgres and not self.db.execute("SELECT 1 FROM schema_migrations WHERE version=5").fetchone():
+            self.db.execute("SELECT pg_advisory_xact_lock(hashtext('geotracker:analysis:migration:5'))")
+            if not self.db.execute("SELECT 1 FROM schema_migrations WHERE version=5").fetchone():
+                from .analysis import process_stays
+                process_stays(self, rebuild=True)
+                self.db.execute("INSERT INTO schema_migrations(version) VALUES(5)")
+        elif not self.postgres and rebuild_analysis:
+            from .analysis import process_stays
+            process_stays(self, rebuild=True)
+            self.db.execute("PRAGMA user_version=5")
+        elif not self.db.execute("SELECT 1 FROM stay_observation_state LIMIT 1").fetchone() and self.db.execute("SELECT 1 FROM point_observations LIMIT 1").fetchone():
             if self.postgres:
                 self.db.execute("SELECT pg_advisory_xact_lock(hashtext('geotracker:stays:bootstrap'))")
             if not self.db.execute("SELECT 1 FROM stay_observation_state LIMIT 1").fetchone():
@@ -494,6 +480,28 @@ class Store:
             row["mode"] = mode_for(row["speed_mps"], row["accuracy_m"])
         return rows
 
+    def timeline(self, start=None, end=None, source=None, limit=5000):
+        """Compact informational fixes: movement plus stop arrival/departure edges."""
+        clauses, args = [], []
+        if start:
+            clauses.append("o.timestamp>=?"); args.append(parse_time(start))
+        if end:
+            clauses.append("o.timestamp<=?"); args.append(parse_time(end))
+        if source:
+            clauses.append("o.source=?"); args.append(source)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        suffix = ""
+        if limit is not None:
+            args.append(min(max(int(limit), 1), 20000))
+            suffix = " LIMIT ?"
+        rows = self._rows("""SELECT o.id,o.point_id,p.external_id,o.source,o.timestamp,o.lat,o.lon,
+            o.accuracy_m,o.speed_mps,o.speed_origin,o.received_at,t.role,t.stay_id
+            FROM timeline_fixes t JOIN point_observations o ON o.id=t.observation_id
+            JOIN points p ON p.id=o.point_id""" + where + " ORDER BY o.timestamp DESC,o.id DESC" + suffix, args)
+        for row in rows:
+            row["mode"] = mode_for(row["speed_mps"], row["accuracy_m"])
+        return rows
+
     def observation_count(self, start=None, end=None, source=None):
         clauses, args = [], []
         if start:
@@ -598,10 +606,11 @@ class Store:
 
     def stats(self, start=None, end=None, source=None):
         raw = list(reversed(self.observations(start, end, source=source, limit=None)))
-        selected = select_unique_fixes(raw)
+        selected = list(reversed(self.timeline(start, end, source=source, limit=None)))
         result = stats_from_points(selected)
         result["points"] = len(raw)
         result["unique_points"] = len(selected)
+        result["timeline_points"] = len(selected)
         return result
 
     def trips(self, start=None, end=None, source=None):
@@ -674,19 +683,19 @@ class Store:
         return found
 
     def coverage(self):
-        sources = self._rows("SELECT source,COUNT(*) AS points,MIN(timestamp) AS first,MAX(timestamp) AS last FROM points GROUP BY source ORDER BY source")
+        sources = self._rows("SELECT source,COUNT(*) AS points,MIN(timestamp) AS first,MAX(timestamp) AS last FROM point_observations GROUP BY source ORDER BY source")
         if self.postgres:
             gaps = self._rows("""SELECT source, previous AS start, timestamp AS end,
                 ROUND(((EXTRACT(EPOCH FROM timestamp::timestamptz)-EXTRACT(EPOCH FROM previous::timestamptz))/3600)::numeric,1)::double precision AS hours
                 FROM (SELECT source,timestamp,LAG(timestamp) OVER
-                      (PARTITION BY source ORDER BY timestamp) AS previous FROM points) p
+                      (PARTITION BY source ORDER BY timestamp) AS previous FROM point_observations) p
                 WHERE previous IS NOT NULL AND timestamp::timestamptz-previous::timestamptz>interval '24 hours'
                 ORDER BY timestamp DESC LIMIT 200""")
         else:
             gaps = self._rows("""SELECT source, previous AS start, timestamp AS end,
             ROUND((strftime('%s',timestamp)-strftime('%s',previous))/3600.0,1) AS hours
             FROM (SELECT source,timestamp,LAG(timestamp) OVER
-                  (PARTITION BY source ORDER BY timestamp) AS previous FROM points)
+                  (PARTITION BY source ORDER BY timestamp) AS previous FROM point_observations)
             WHERE previous IS NOT NULL AND strftime('%s',timestamp)-strftime('%s',previous)>86400
             ORDER BY timestamp DESC LIMIT 200""")
         return {"sources": sources, "gaps_over_24h": gaps}
