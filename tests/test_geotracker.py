@@ -1,4 +1,6 @@
 import json
+import hashlib
+import hmac
 import io
 import os
 import tempfile
@@ -8,7 +10,7 @@ from email.message import Message
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from geotracker.core import Store, geocode, mode_for, reverse_cache_radius, reverse_geocode, route_segments_from_points, smooth_route_segment
+from geotracker.core import Store, deliver_webhook, geocode, mode_for, reverse_cache_radius, reverse_geocode, route_segments_from_points, smooth_route_segment
 from geotracker.analysis import day_summary, insights, place_patterns, predict_next, stays, transitions, visited_places
 from geotracker.imports import import_takeout
 from geotracker.mcp import dispatch
@@ -450,6 +452,18 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(first["address"], "Market Street")
             self.assertEqual(second["address"], "Market Street")
             self.assertEqual(request.call_count, 1)
+
+    def test_webhook_uses_hermes_compatible_hmac_v2_signature(self):
+        event = {"id": 99, "text": "Pick up salt", "place": "Walmart"}
+        env = {"GEOTRACKER_WEBHOOK_URL": "http://host.docker.internal:8644/webhooks/geotracker-reminders",
+               "GEOTRACKER_WEBHOOK_SECRET": "shared-secret", "GEOTRACKER_WEBHOOK_TOKEN": ""}
+        with patch.dict(os.environ, env), patch("geotracker.core.urllib.request.urlopen", return_value=io.BytesIO()) as urlopen:
+            deliver_webhook(self.store, [event])
+        request = urlopen.call_args.args[0]
+        headers = {key.lower(): value for key, value in request.header_items()}
+        timestamp = headers["x-webhook-timestamp"]
+        expected = hmac.new(b"shared-secret", timestamp.encode() + b"." + request.data, hashlib.sha256).hexdigest()
+        self.assertEqual(headers["x-webhook-signature-v2"], expected)
 
     def test_reverse_cache_expires_and_coarse_results_have_no_assumed_area(self):
         self.assertEqual(reverse_cache_radius("city"), 0)

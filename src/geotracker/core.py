@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import hmac
 import io
 import json
 import math
@@ -984,14 +985,23 @@ def deliver_webhook(store, events):
     url = os.environ.get("GEOTRACKER_WEBHOOK_URL")
     if not url or not events:
         return
-    if not url.startswith("https://") and not url.startswith("http://127.0.0.1") and not url.startswith("http://localhost"):
+    parsed_url = urllib.parse.urlparse(url)
+    local_hosts = ("127.0.0.1", "::1", "localhost", "host.docker.internal")
+    if parsed_url.scheme != "https" and not (parsed_url.scheme == "http" and parsed_url.hostname in local_hosts):
         raise ValueError("webhook URL must use HTTPS or loopback HTTP")
     for event in events:
         headers = {"Content-Type": "application/json"}
         token = os.environ.get("GEOTRACKER_WEBHOOK_TOKEN")
         if token:
             headers["Authorization"] = "Bearer " + token
-        request = urllib.request.Request(url, json.dumps(event).encode(), headers=headers, method="POST")
+        body = json.dumps(event, separators=(",", ":")).encode()
+        secret = os.environ.get("GEOTRACKER_WEBHOOK_SECRET")
+        if secret:
+            timestamp = str(int(datetime.now(timezone.utc).timestamp()))
+            headers["X-Webhook-Timestamp"] = timestamp
+            headers["X-Webhook-Signature-V2"] = hmac.new(
+                secret.encode(), timestamp.encode() + b"." + body, hashlib.sha256).hexdigest()
+        request = urllib.request.Request(url, body, headers=headers, method="POST")
         try:
             with urllib.request.urlopen(request, timeout=8):
                 status = "sent"

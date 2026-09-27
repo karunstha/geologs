@@ -29,8 +29,11 @@ services:
       GEOTRACKER_PHOTON_URL: ${GEOTRACKER_PHOTON_URL:-}
       GEOTRACKER_WEBHOOK_URL: ${GEOTRACKER_WEBHOOK_URL:-}
       GEOTRACKER_WEBHOOK_TOKEN: ${GEOTRACKER_WEBHOOK_TOKEN:-}
+      GEOTRACKER_WEBHOOK_SECRET: ${GEOTRACKER_WEBHOOK_SECRET:-}
     ports:
       - "0.0.0.0:${GEOTRACKER_PUBLISHED_PORT:-8765}:8765"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./.env:/config/.env:ro
     read_only: true

@@ -161,6 +161,46 @@ The running server exposes MCP at `http://127.0.0.1:8765/mcp` using stateless St
 
 Use the token from `GEOTRACKER_TOKEN` when one is configured. The endpoint accepts JSON-RPC messages at `POST /mcp`; clients must send `Content-Type: application/json` and `Accept: application/json, text/event-stream`. It responds with JSON for requests and `202 Accepted` for notifications. This server does not issue session IDs or provide a standalone event stream, so `GET /mcp` returns `405 Method Not Allowed`. Available tools cover current/raw/compact history, nearby/time lookup, recorded trips, stats, coverage, observed stays and places, saved place visits and observed time, day summaries, transitions, next-destination estimates, reminders and events, ingestion, geocoding, and reverse geocoding. No raw SQL execution is exposed.
 
+### Hermes Agent
+
+Put the Geotracker token in `~/.hermes/.env`:
+
+```dotenv
+GEOTRACKER_MCP_TOKEN=the-value-of-GEOTRACKER_TOKEN
+```
+
+Add the Streamable HTTP server to `~/.hermes/config.yaml`. Use the published port from this project's `.env`:
+
+```yaml
+mcp_servers:
+  geotracker:
+    url: "http://127.0.0.1:8765/mcp"
+    headers:
+      Authorization: "Bearer ${GEOTRACKER_MCP_TOKEN}"
+```
+
+Run `hermes mcp test geotracker`, then start a new chat or use `/reload-mcp`. Hermes registers tools with names such as `mcp_geotracker_create_reminder`. Ask naturally: “Using Geotracker, remind me to pick up salt the next time I arrive at Walmart.” Hermes can list saved places and create the reminder. For an unsaved destination, ask it to find nearby matches first, let you choose one, save it, and then create the reminder. Geotracker evaluates the arrival from incoming Home Assistant samples; Hermes does not need to remain in the chat.
+
+The MCP connection lets Hermes manage reminders, but Streamable HTTP does not push a triggered event into an idle Hermes session. To deliver the event through a configured Hermes channel, enable the Hermes webhook gateway and create a direct-delivery route:
+
+```bash
+hermes gateway setup
+hermes webhook subscribe geotracker-reminders \
+  --deliver telegram \
+  --deliver-only \
+  --prompt "Location reminder: {text} — arrived at {place}" \
+  --description "Deliver Geotracker arrival reminders"
+```
+
+Replace `telegram` with the Hermes delivery platform you use. Copy the URL and HMAC secret printed by Hermes into the Geotracker `.env`. When Geotracker runs in Docker and Hermes runs on the host, use the host alias in the URL:
+
+```dotenv
+GEOTRACKER_WEBHOOK_URL=http://host.docker.internal:8644/webhooks/geotracker-reminders
+GEOTRACKER_WEBHOOK_SECRET=the-secret-printed-by-hermes
+```
+
+Run `docker compose up -d --force-recreate app` after changing these values. Geotracker signs webhook requests with Hermes's replay-protected V2 HMAC headers. `GEOTRACKER_WEBHOOK_TOKEN` remains available for non-Hermes endpoints that use bearer authentication.
+
 ## API overview
 
 `GET /api/current`, `/api/points`, `/api/observations`, `/api/timeline`, `/api/settings`, `/api/stats`, `/api/trips`, `/api/coverage`, `/api/near`, `/api/stays`, `/api/frequent-places`, `/api/visited-places`, `/api/transitions`, `/api/predict-next`, `/api/insights`, `/api/day`, `/api/places`, `/api/place-visits`, `/api/reminders`, `/api/events`, `/api/geocode`, `/api/reverse`, `/api/export.geojson`; `POST /api/points`, `/api/settings`, `/api/places`, `/api/reminders`, `/api/reminders/active`, `/api/events/ack`, `/mcp`. `/api/observations` accepts `limit` and `offset` for raw-data pagination.
