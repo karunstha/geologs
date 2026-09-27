@@ -93,6 +93,26 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(len(day["trips"]), 2)
         self.assertEqual(len(day["route_segments"]), 2)
 
+    def test_day_summary_is_persisted_until_its_inputs_change(self):
+        self.store.ingest([
+            {"source": "phone", "timestamp": "2026-09-25T10:00:00Z", "lat": 41, "lon": -87.9},
+            {"source": "phone", "timestamp": "2026-09-25T10:01:00Z", "lat": 41.001, "lon": -87.9},
+        ])
+        first = day_summary(self.store, "2026-09-25", "UTC", "phone")
+        self.assertEqual(self.store.db.execute("SELECT COUNT(*) AS n FROM analysis_cache").fetchone()["n"], 1)
+        with patch("geotracker.analysis.stays", side_effect=AssertionError("summary was recalculated")):
+            self.assertEqual(day_summary(self.store, "2026-09-25", "UTC", "phone"), first)
+
+        self.store.ingest({"source": "phone", "timestamp": "2026-09-25T10:02:00Z", "lat": 41.002, "lon": -87.9})
+        with patch("geotracker.analysis.stays", wraps=stays) as calculate_stays:
+            updated = day_summary(self.store, "2026-09-25", "UTC", "phone")
+        self.assertTrue(calculate_stays.called)
+        self.assertEqual(updated["points"], 3)
+        self.assertEqual(self.store.db.execute("SELECT COUNT(*) AS n FROM analysis_cache").fetchone()["n"], 1)
+
+        self.store.save_place({"name": "Campus", "lat": 41, "lon": -87.9})
+        self.assertEqual(self.store.db.execute("SELECT COUNT(*) AS n FROM analysis_cache").fetchone()["n"], 0)
+
     def test_day_stay_uses_visited_place_reverse_geocode_label(self):
         self.store.ingest([
             {"source": "phone", "timestamp": "2026-09-25T10:00:00Z", "lat": 41, "lon": -87.9, "accuracy_m": 5},
@@ -170,6 +190,32 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(len(day["trips"]), 1)
         self.assertEqual(day["trips"][0]["mode"], "driving")
         self.assertEqual(day["activity_counts"]["running_cycling"], 0)
+
+    def test_held_home_assistant_state_does_not_strand_next_fix(self):
+        self.store.ingest([
+            {"source": "home_assistant:phone", "external_id": "held", "timestamp": "2026-09-25T10:00:00Z",
+             "lat": 41, "lon": -87.9, "accuracy_m": 5},
+            {"source": "home_assistant:phone", "external_id": "held", "timestamp": "2026-09-25T10:04:00Z",
+             "lat": 41, "lon": -87.9, "accuracy_m": 5},
+            {"source": "home_assistant:phone", "external_id": "fresh", "timestamp": "2026-09-25T10:05:00Z",
+             "lat": 41.045, "lon": -87.9, "accuracy_m": 5},
+        ])
+        day = day_summary(self.store, "2026-09-25", "UTC")
+        self.assertEqual(len(day["route_segments"]), 1)
+        self.assertEqual(len(day["trips"]), 1)
+        self.assertEqual(day["trips"][0]["mode"], "driving")
+        self.assertGreater(day["stats"]["distance_km"], 4)
+
+    def test_held_source_state_does_not_bridge_more_than_fifteen_minutes(self):
+        points = [
+            {"id": 1, "source": "ha", "external_id": "held", "timestamp": "2026-09-25T10:00:00+00:00",
+             "lat": 41, "lon": -87.9, "accuracy_m": 5},
+            {"id": 2, "source": "ha", "external_id": "held", "timestamp": "2026-09-25T10:20:00+00:00",
+             "lat": 41, "lon": -87.9, "accuracy_m": 5},
+            {"id": 3, "source": "ha", "external_id": "fresh", "timestamp": "2026-09-25T10:21:00+00:00",
+             "lat": 41.045, "lon": -87.9, "accuracy_m": 5},
+        ]
+        self.assertEqual(route_segments_from_points(points), [])
 
     def test_compact_stationary_timeline_preserves_raw_fixes(self):
         self.store.ingest([

@@ -99,6 +99,10 @@ CREATE INDEX IF NOT EXISTS timeline_fixes_source ON timeline_fixes(source);
 CREATE TABLE IF NOT EXISTS app_settings (
     key TEXT PRIMARY KEY, value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS analysis_cache (
+    cache_key TEXT PRIMARY KEY, watermark TEXT NOT NULL,
+    value TEXT NOT NULL, created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS geocode_cache (
     cache_key TEXT PRIMARY KEY, provider TEXT NOT NULL,
     value TEXT NOT NULL, created_at TEXT NOT NULL

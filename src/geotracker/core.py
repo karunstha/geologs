@@ -19,6 +19,8 @@ from .postgres import PostgresConnection
 
 _reverse_lock = threading.Lock()
 DEFAULT_SETTINGS = {"speed_strategy": "reported", "reported_speed_offset_kmh": 0.0}
+MAX_CONNECTED_GAP_SECONDS = 900
+MAX_PLAUSIBLE_SPEED_MPS = 55.6
 
 
 def database_path() -> str:
@@ -70,6 +72,37 @@ def select_best_timed_fixes(points):
     return sorted(selected.values(), key=lambda point: (point["timestamp"], point.get("id", 0)))
 
 
+def _same_source_state(previous, point):
+    """True when polling returned the same source event at the same position."""
+    external_id = previous.get("external_id")
+    return (previous["source"] == point["source"] and external_id is not None
+            and external_id == point.get("external_id")
+            and metres(previous["lat"], previous["lon"], point["lat"], point["lon"]) <= 50)
+
+
+def _connected_elapsed(previous, point, held_since=None):
+    """Return a plausible edge duration, including a short held-source window."""
+    if previous["source"] != point["source"]:
+        return None
+    accurate = all(item["accuracy_m"] is None or item["accuracy_m"] <= 150 for item in (previous, point))
+    if not accurate:
+        return None
+    current_at = datetime.fromisoformat(point["timestamp"])
+    elapsed = (current_at - datetime.fromisoformat(previous["timestamp"])).total_seconds()
+    distance = metres(previous["lat"], previous["lon"], point["lat"], point["lon"])
+    if 0 < elapsed <= MAX_CONNECTED_GAP_SECONDS and distance / elapsed <= MAX_PLAUSIBLE_SPEED_MPS:
+        return elapsed
+    # Home Assistant may return one unchanged state for several polls while the
+    # device is moving. The transition could have happened anywhere inside that
+    # short window, so use its first observation rather than the last poll.
+    if held_since is not None and held_since is not previous and _same_source_state(held_since, previous):
+        elapsed = (current_at - datetime.fromisoformat(held_since["timestamp"])).total_seconds()
+        distance = metres(held_since["lat"], held_since["lon"], point["lat"], point["lon"])
+        if 0 < elapsed <= MAX_CONNECTED_GAP_SECONDS and distance / elapsed <= MAX_PLAUSIBLE_SPEED_MPS:
+            return elapsed
+    return None
+
+
 def stats_from_points(points):
     """Summarize chronological fixes without bridging source or coverage gaps."""
     distance, moving_seconds, by_mode = 0, 0, {}
@@ -79,13 +112,16 @@ def stats_from_points(points):
         by_source.setdefault(point["source"], []).append(point)
     for source_points in by_source.values():
         source_points.sort(key=lambda point: (point["timestamp"], point.get("id", 0)))
+        held_since = source_points[0] if source_points else None
         for prev, point in zip(source_points, source_points[1:]):
-            elapsed = (datetime.fromisoformat(point["timestamp"]) - datetime.fromisoformat(prev["timestamp"])).total_seconds()
+            elapsed = _connected_elapsed(prev, point, held_since)
             segment = metres(prev["lat"], prev["lon"], point["lat"], point["lon"])
-            if 0 < elapsed <= 900 and segment / elapsed <= 55.6 and (point["accuracy_m"] is None or point["accuracy_m"] <= 150):
+            if elapsed is not None:
                 distance += segment
                 if point["mode"] in ("walking", "running_cycling", "driving"):
                     moving_seconds += elapsed
+            if not _same_source_state(prev, point):
+                held_since = point
     return {"points": len(points), "distance_km": round(distance / 1000, 2), "moving_hours": round(moving_seconds / 3600, 2), "modes": by_mode,
             "first": points[0]["timestamp"] if points else None, "last": points[-1]["timestamp"] if points else None}
 
@@ -103,16 +139,16 @@ def trips_from_points(points):
 
 
 def _trips_for_source(points):
-    trips, run = [], []
+    trips, run, edge_seconds = [], [], []
     last_moving_at = None
+    held_since = None
 
     def finish():
         active = [point for point in run if last_moving_at is None or datetime.fromisoformat(point["timestamp"]) <= last_moving_at]
         if len(active) < 2:
             return
         moving = []
-        for previous, point in zip(active, active[1:]):
-            seconds = (datetime.fromisoformat(point["timestamp"]) - datetime.fromisoformat(previous["timestamp"])).total_seconds()
+        for previous, point, seconds in zip(active, active[1:], edge_seconds[:len(active) - 1]):
             distance = metres(previous["lat"], previous["lon"], point["lat"], point["lon"])
             if seconds > 0 and distance >= 10:
                 moving.append((distance, max(distance / seconds, point.get("speed_mps") or 0)))
@@ -131,27 +167,36 @@ def _trips_for_source(points):
         if not run:
             run = [point]
             last_moving_at = None
+            held_since = point
             continue
         previous = run[-1]
-        seconds = (datetime.fromisoformat(point["timestamp"]) - datetime.fromisoformat(previous["timestamp"])).total_seconds()
+        seconds = _connected_elapsed(previous, point, held_since)
         distance = metres(previous["lat"], previous["lon"], point["lat"], point["lon"])
-        accurate = all(p["accuracy_m"] is None or p["accuracy_m"] <= 150 for p in (previous, point))
-        connected = previous["source"] == point["source"] and 0 < seconds <= 900 and distance / seconds <= 55.6 and accurate
-        if not connected:
+        held = _same_source_state(previous, point)
+        if seconds is None:
             finish()
             run = [point]
+            edge_seconds = []
             last_moving_at = None
+            held_since = point
             continue
         run.append(point)
+        edge_seconds.append(seconds)
         if distance >= 10:
             last_moving_at = datetime.fromisoformat(point["timestamp"])
         elif last_moving_at is None:
-            run = [point]
-        elif last_moving_at and (datetime.fromisoformat(point["timestamp"]) - last_moving_at).total_seconds() >= 300:
+            if not held:
+                run = [point]
+                edge_seconds = []
+        elif last_moving_at and not held and (datetime.fromisoformat(point["timestamp"]) - last_moving_at).total_seconds() >= 300:
             stationary = run.pop()
+            edge_seconds.pop()
             finish()
             run = [stationary]
+            edge_seconds = []
             last_moving_at = None
+        if not held:
+            held_since = point
     finish()
     return trips
 
@@ -165,19 +210,17 @@ def route_segments_from_points(points):
             by_source.setdefault(point["source"], []).append(point)
     for source_points in by_source.values():
         source_points.sort(key=lambda point: (point["timestamp"], point.get("id", 0)))
-        current, previous = [], None
+        current, previous, held_since = [], None, None
         for point in source_points:
-            connected = False
-            if previous:
-                elapsed = (datetime.fromisoformat(point["timestamp"]) - datetime.fromisoformat(previous["timestamp"])).total_seconds()
-                distance = metres(previous["lat"], previous["lon"], point["lat"], point["lon"])
-                connected = 0 < elapsed <= 900 and distance / elapsed <= 55.6
+            connected = previous is not None and _connected_elapsed(previous, point, held_since) is not None
             if not connected:
                 if len(current) > 1:
                     segments.append(current)
                 current = [[point["lon"], point["lat"]]]
             else:
                 current.append([point["lon"], point["lat"]])
+            if previous is None or not _same_source_state(previous, point):
+                held_since = point
             previous = point
         if len(current) > 1:
             segments.append(current)
@@ -249,6 +292,10 @@ class Store:
         CREATE INDEX IF NOT EXISTS timeline_fixes_source ON timeline_fixes(source);
         CREATE TABLE IF NOT EXISTS app_settings (
             key TEXT PRIMARY KEY, value TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS analysis_cache (
+            cache_key TEXT PRIMARY KEY, watermark TEXT NOT NULL,
+            value TEXT NOT NULL, created_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS places (
             id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE COLLATE NOCASE,
@@ -393,6 +440,33 @@ class Store:
                 ON CONFLICT(key) DO UPDATE SET value=excluded.value""", (key, json.dumps(value)))
         self.db.commit()
         return values
+
+    def analysis_watermark(self, start=None, end=None, source=None):
+        clauses, args = [], []
+        if start:
+            clauses.append("timestamp>=?"); args.append(parse_time(start))
+        if end:
+            clauses.append("timestamp<=?"); args.append(parse_time(end))
+        if source:
+            clauses.append("source=?"); args.append(source)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        row = self.db.execute("SELECT COUNT(*) AS count,COALESCE(MAX(id),0) AS max_id FROM point_observations" + where, args).fetchone()
+        return f"{row['count']}:{row['max_id']}"
+
+    def cached_analysis(self, cache_key, watermark):
+        row = self.db.execute("SELECT value FROM analysis_cache WHERE cache_key=? AND watermark=?", (cache_key, watermark)).fetchone()
+        return json.loads(row["value"]) if row else None
+
+    def save_analysis(self, cache_key, watermark, value):
+        self.db.execute("""INSERT INTO analysis_cache(cache_key,watermark,value,created_at) VALUES (?,?,?,?)
+            ON CONFLICT(cache_key) DO UPDATE SET watermark=excluded.watermark,value=excluded.value,created_at=excluded.created_at""",
+            (cache_key, watermark, json.dumps(value, separators=(",", ":")), parse_time(None)))
+        self.db.commit()
+
+    def clear_analysis_cache(self, commit=True):
+        self.db.execute("DELETE FROM analysis_cache")
+        if commit:
+            self.db.commit()
 
     def ingest(self, payload, trigger_reminders=True, process_analysis=True):
         items = payload if isinstance(payload, list) else [payload]
@@ -622,6 +696,7 @@ class Store:
             id_ = int(raw["id"])
         else:
             id_ = self.db.execute("INSERT INTO places(name,lat,lon,radius_m,address) VALUES (?,?,?,?,?) RETURNING id", (name, lat, lon, radius, address)).fetchone()["id"]
+        self.db.execute("DELETE FROM analysis_cache")
         self.db.commit()
         return self._rows("SELECT id,name,lat,lon,radius_m,address FROM places WHERE id=?", (id_,))[0]
 

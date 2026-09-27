@@ -1,8 +1,10 @@
 """Observed stays and repeatable place patterns derived from source GPS samples."""
 from __future__ import annotations
 
+import hashlib
 import json
 import math
+import os
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -102,6 +104,8 @@ def _save_candidate(store, source, candidate, ongoing):
 
 def process_stays(store, sources=None, rebuild=False):
     """Process raw observations; a late import rebuilds that source safely."""
+    if rebuild:
+        store.clear_analysis_cache(commit=False)
     if sources is None:
         sources = [r["source"] for r in store._rows("SELECT DISTINCT source FROM point_observations")]
     processed = 0
@@ -337,6 +341,13 @@ def day_summary(store, date, timezone_name="UTC", source=None):
     day_end = (day + timedelta(days=1)).astimezone(timezone.utc)
     start = day_start.isoformat()
     end = (day_end - timedelta(microseconds=1)).isoformat()
+    provider = "photon:" + os.environ.get("GEOTRACKER_PHOTON_URL", "") if os.environ.get("GEOTRACKER_PHOTON_URL") else "geoapify:" + str(bool(os.environ.get("GEOAPIFY_API_KEY")))
+    cache_identity = json.dumps(["day-v2", date, timezone_name, source, provider], separators=(",", ":"))
+    cache_key = "day:" + hashlib.sha256(cache_identity.encode()).hexdigest()
+    watermark = store.analysis_watermark(start, end, source)
+    cached = store.cached_analysis(cache_key, watermark)
+    if cached is not None:
+        return cached
     day_stays = list(reversed(stays(store, start, end, source=source, limit=None)))
     for stay in day_stays:
         first = max(datetime.fromisoformat(stay["started_at"]), day_start)
@@ -366,7 +377,7 @@ def day_summary(store, date, timezone_name="UTC", source=None):
     stats["points"] = len(points)
     stats["unique_points"] = len(chronological)
     stats["timeline_points"] = len(chronological)
-    return {"date": date, "timezone": timezone_name, "source": source, "points": len(points), "stays": day_stays,
+    result = {"date": date, "timezone": timezone_name, "source": source, "points": len(points), "stays": day_stays,
             "unique_points": len(chronological), "timeline_points": len(chronological), "stats": stats, "trips": trips, "route_segments": route_segments, "activity_counts": activity_counts,
             "visited_places": visited_places,
             "first_fix": points[-1]["timestamp"] if points else None,
@@ -374,3 +385,5 @@ def day_summary(store, date, timezone_name="UTC", source=None):
             "first_location": {"lat": points[-1]["lat"], "lon": points[-1]["lon"]} if points else None,
             "last_location": {"lat": points[0]["lat"], "lon": points[0]["lon"]} if points else None,
             "coverage_note": "Stays are observed from samples; time in unobserved gaps is unknown"}
+    store.save_analysis(cache_key, watermark, result)
+    return result
