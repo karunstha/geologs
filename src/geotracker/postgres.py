@@ -96,6 +96,9 @@ CREATE TABLE IF NOT EXISTS timeline_fixes (
     stay_id BIGINT REFERENCES observed_stays_v2(id) ON DELETE SET NULL
 );
 CREATE INDEX IF NOT EXISTS timeline_fixes_source ON timeline_fixes(source);
+CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY, value TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS geocode_cache (
     cache_key TEXT PRIMARY KEY, provider TEXT NOT NULL,
     value TEXT NOT NULL, created_at TEXT NOT NULL

@@ -232,6 +232,7 @@ def place_patterns(store, limit=50, rows=None):
         mapping[stay["id"]] = target
     for cluster in clusters:
         cluster["observed_minutes"] = round(cluster["observed_minutes"], 1)
+        cluster["display_name"] = cluster["name"] or f"{cluster['lat']:.5f}, {cluster['lon']:.5f}"
     ordered = sorted(clusters, key=lambda c: (c["observed_minutes"], c["visits"]), reverse=True)
     return ordered if limit is None else ordered[:min(int(limit), 5000)], mapping
 
@@ -245,7 +246,7 @@ def visited_places(store, limit=500):
         place = saved.get(cluster["place_id"])
         address = place["address"] if place else address_for_coordinate(store, cluster["lat"], cluster["lon"])
         result.append({**cluster, "address": address,
-                       "display_name": cluster["name"] or address or "Unlabeled stop",
+                       "display_name": cluster["name"] or address or cluster["display_name"],
                        "saved": bool(place)})
     return result
 
@@ -275,8 +276,8 @@ def transitions(store, limit=50, patterns=None, rows=None):
     result = list(edges.values())
     for edge in result:
         a, b = cluster_by_id[edge["from_cluster_id"]], cluster_by_id[edge["to_cluster_id"]]
-        edge["from_name"] = a["name"] or f"Unlabeled place {a['cluster_id']}"
-        edge["to_name"] = b["name"] or f"Unlabeled place {b['cluster_id']}"
+        edge["from_name"] = a["display_name"]
+        edge["to_name"] = b["display_name"]
         edge["to_lat"], edge["to_lon"] = b["lat"], b["lon"]
         edge["weighted_score"] = round(edge["weighted_score"], 4)
     ordered = sorted(result, key=lambda e: (e["weighted_score"], e["count"]), reverse=True)
@@ -300,7 +301,7 @@ def predict_next(store, patterns=None, edges=None):
     if (datetime.now(timezone.utc) - datetime.fromisoformat(newest)).total_seconds() > 180 * 86400:
         return {"prediction": None, "reason": "transition evidence is older than 180 days", "observations": total}
     total_score = sum(e["weighted_score"] for e in edges)
-    return {"from": origin["name"] or f"Unlabeled place {origin['cluster_id']}",
+    return {"from": origin["display_name"],
             "prediction": top["to_name"], "lat": top["to_lat"], "lon": top["to_lon"],
             "observations": total, "matching_transitions": top["count"], "frequency": round(top["weighted_score"] / total_score, 2) if total_score else 0,
             "current_fix_stale": current["stale"],
@@ -310,10 +311,12 @@ def predict_next(store, patterns=None, edges=None):
 def insights(store, limit=50):
     rows = stays(store, limit=None)
     patterns = place_patterns(store, limit=None, rows=rows)
+    for place in [place for place in patterns[0] if not place["name"]][:12]:
+        place["address"] = address_for_coordinate(store, place["lat"], place["lon"])
+        if place["address"]:
+            place["display_name"] = place["address"]
     edges = transitions(store, limit=None, patterns=patterns, rows=rows)
     unlabeled = [p for p in patterns[0] if p["place_id"] is None][:limit]
-    for place in unlabeled[:12]:
-        place["address"] = address_for_coordinate(store, place["lat"], place["lon"])
     return {"frequent_places": patterns[0][:limit],
             "unlabeled_places": unlabeled,
             "transitions": edges[:limit],
@@ -352,7 +355,7 @@ def day_summary(store, date, timezone_name="UTC", source=None):
             place["name"] = place["address"]
     for stay in day_stays:
         place = by_cluster[mapping[stay["id"]]]
-        stay["display_name"] = place["name"] or "Unlabeled stop"
+        stay["display_name"] = place["name"] or place["display_name"]
     points = store.observations(start, end, source=source, limit=None)
     raw_chronological = list(reversed(points))
     chronological = list(reversed(store.timeline(start, end, source=source, limit=None)))

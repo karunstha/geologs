@@ -20,7 +20,7 @@ INTEGER = {"type": "integer"}
 TOOLS = [
     {"name": "get_current_location", "description": "Most recent GPS point with fix age, stale flag, speed and detected movement mode.", "inputSchema": schema({})},
     {"name": "get_location_history", "description": "GPS samples in a time window (ISO 8601 timestamps).", "inputSchema": schema({"start": STRING, "end": STRING, "source": STRING, "limit": INTEGER})},
-    {"name": "get_raw_observations", "description": "Received coordinate and accuracy versions with receipt time; exact retransmissions are coalesced.", "inputSchema": schema({"start": STRING, "end": STRING, "source": STRING, "limit": INTEGER})},
+    {"name": "get_raw_observations", "description": "Paginated received coordinate and accuracy versions with receipt time; exact retransmissions are coalesced.", "inputSchema": schema({"start": STRING, "end": STRING, "source": STRING, "limit": INTEGER, "offset": INTEGER})},
     {"name": "get_compact_timeline", "description": "Informational fixes: movement samples plus arrival and departure edges, with stationary repetition removed.", "inputSchema": schema({"start": STRING, "end": STRING, "source": STRING, "limit": INTEGER})},
     {"name": "get_location_at_time", "description": "Nearest recorded point to an ISO 8601 timestamp, including its time difference.", "inputSchema": schema({"timestamp": STRING}, ["timestamp"])},
     {"name": "search_locations_near", "description": "Recorded points within a radius of coordinates, optionally in a time window.", "inputSchema": schema({"lat": NUMBER, "lon": NUMBER, "radius_m": NUMBER, "start": STRING, "end": STRING, "source": STRING, "limit": INTEGER}, ["lat", "lon"])},
@@ -54,7 +54,7 @@ def call_tool(store, name, args):
     if name == "get_location_history":
         return store.points(args.get("start"), args.get("end"), args.get("source"), args.get("limit", 5000))
     if name == "get_raw_observations":
-        return store.observations(args.get("start"), args.get("end"), args.get("source"), args.get("limit", 5000))
+        return store.observations(args.get("start"), args.get("end"), args.get("source"), args.get("limit", 5000), args.get("offset", 0))
     if name == "get_compact_timeline":
         return store.timeline(args.get("start"), args.get("end"), args.get("source"), args.get("limit", 5000))
     if name == "get_location_at_time":

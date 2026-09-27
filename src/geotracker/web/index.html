@@ -15,6 +15,7 @@
         <button class="nav active" data-view="explore">History</button>
         <button class="nav" data-view="places">Places</button>
         <button class="nav" data-view="reminders">Reminders <span id="event-count" class="pill" hidden>0</span></button>
+        <button class="nav" data-view="settings">Settings</button>
       </nav>
       <div class="top-actions"><span id="connection" class="connection">Connecting…</span><button id="auth-button" class="text-button" type="button">Account</button></div>
     </div>
@@ -41,7 +42,7 @@
         <section class="map-shell" aria-label="Recorded location map">
           <div class="map-topline"><span id="map-note">Recorded route</span><button id="locate" class="small-button" hidden>Last fix</button></div>
           <div class="map-stage"><div id="map" role="application" aria-label="Location map"></div><div id="history-empty" class="map-empty"><strong>No locations recorded for this day</strong><span>Choose another date to explore your history.</span></div></div>
-          <div id="map-footer" class="map-footer" hidden><span><i class="legend path"></i> Smoothed recorded path</span><span>Estimated from GPS; gaps are not connected</span></div>
+          <div id="map-footer" class="map-footer" hidden><span><i class="legend path"></i> Recorded GPS path</span><span>Gaps and implausible jumps are not connected</span></div>
         </section>
         <aside id="inspector" class="inspector" hidden>
           <section><h2>Visited places</h2><div id="visited-places" class="list"></div></section>
@@ -61,8 +62,8 @@
         <div class="detail-panel active" data-panel-view="trips"><div id="trips" class="list"></div></div>
         <div class="detail-panel" data-panel-view="stays"><div id="stays" class="list"></div></div>
         <div class="detail-panel" data-panel-view="speed"><div id="speed-chart" class="chart-wrap"></div></div>
-        <div class="detail-panel" data-panel-view="samples"><div class="sample-toolbar"><div class="mini-tabs"><button class="active" data-sample-view="timeline">Key fixes</button><button data-sample-view="raw">Raw samples</button></div><p id="sample-count" class="section-note"></p></div><div class="table-wrap"><table><thead><tr><th>Time</th><th>Type</th><th>Source</th><th>Mode</th><th>Speed</th><th>Coordinates</th><th>Accuracy</th></tr></thead><tbody id="points-table"></tbody></table></div></div>
-        <div class="detail-panel" data-panel-view="patterns"><p id="prediction" class="section-note"></p><div id="transitions" class="list"></div></div>
+        <div class="detail-panel" data-panel-view="samples"><div class="sample-toolbar"><div class="mini-tabs"><button class="active" data-sample-view="timeline">Key fixes</button><button data-sample-view="raw">Raw samples</button></div><p id="sample-count" class="section-note"></p></div><div class="table-wrap"><table><thead><tr><th>Time</th><th>Type</th><th>Source</th><th>Mode</th><th>Speed</th><th>Coordinates</th><th>Accuracy</th><th></th></tr></thead><tbody id="points-table"></tbody></table></div><div id="raw-pagination" class="pagination" hidden><button id="raw-previous" class="outline-button">Previous</button><span id="raw-page"></span><button id="raw-next" class="outline-button">Next</button></div></div>
+        <div class="detail-panel" data-panel-view="patterns"><p id="prediction" class="section-note"></p><div class="pattern-columns"><section><h3>Common places</h3><div id="pattern-places" class="list"></div></section><section><h3>Transitions</h3><div id="transitions" class="list"></div></section></div></div>
         <div class="detail-panel" data-panel-view="coverage"><div id="coverage" class="list"></div></div>
       </section>
     </section>
@@ -81,6 +82,14 @@
       <div class="page-head"><h1>Reminders</h1><button id="notifications" class="outline-button">Enable browser alerts</button></div>
       <div class="reminders-layout"><section class="surface"><h2>New reminder</h2><form id="reminder-form" class="form-stack"><label>Remind me to<input id="reminder-text" required maxlength="500" placeholder="Pick up salt"></label><label>When I arrive at<select id="reminder-place" required></select></label><label class="check"><input id="reminder-repeat" type="checkbox"> Repeat on future visits</label><label id="reminder-cooldown-field" hidden>Repeat cooldown (minutes)<input id="reminder-cooldown" type="number" min="1" max="525600" value="1440"></label><button class="primary-button align-start">Create reminder</button></form></section><section class="surface"><h2>Active and past reminders</h2><div id="reminders-list" class="list"></div></section></div>
       <section id="arrival-inbox" class="surface arrival-inbox" hidden><h2>Arrival events</h2><div id="events-list" class="list"></div></section>
+    </section>
+
+    <section id="settings-view" class="view">
+      <div class="page-head"><h1>Settings</h1></div>
+      <div class="settings-layout">
+        <section class="surface"><h2>Speed</h2><form id="settings-form" class="form-stack"><label>Speed source<select id="speed-strategy"><option value="reported">Use source speed, calculate when missing</option><option value="calculated">Always calculate from coordinates</option></select></label><label id="speed-offset-field">Source speed adjustment (km/h)<input id="speed-offset" type="number" min="-100" max="100" step="0.1" value="0"><span class="field-help">Use a negative value when the source consistently reports too high.</span></label><p class="section-note">Changes apply to newly received samples. Calculated speed uses distance and elapsed time between consecutive accurate fixes.</p><button class="primary-button align-start">Save settings</button></form></section>
+        <section class="surface"><h2>Analysis timing</h2><div class="settings-copy"><p>Raw samples and arrival reminders are stored immediately.</p><p>Stay candidates update incrementally and become visible only after nearby fixes span at least five minutes. Routes, trips, and place patterns are recalculated from the selected data when requested, so an early estimate is replaced as more evidence arrives.</p></div></section>
+      </div>
     </section>
   </main>
 

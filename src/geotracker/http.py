@@ -158,8 +158,9 @@ class Handler(BaseHTTPRequestHandler):
                 value = {"ok": True, "geocoding": bool(os.environ.get("GEOAPIFY_API_KEY") or os.environ.get("GEOTRACKER_PHOTON_URL")), "geocoder": "photon" if os.environ.get("GEOTRACKER_PHOTON_URL") else "geoapify" if os.environ.get("GEOAPIFY_API_KEY") else None, "auth": bool(active_token())}
             elif url.path == "/api/current": value = store.latest()
             elif url.path == "/api/points": value = store.points(q.get("start"), q.get("end"), q.get("source"), q.get("limit", 5000))
-            elif url.path == "/api/observations": value = store.observations(q.get("start"), q.get("end"), q.get("source"), q.get("limit", 5000))
+            elif url.path == "/api/observations": value = store.observations(q.get("start"), q.get("end"), q.get("source"), q.get("limit", 5000), q.get("offset", 0))
             elif url.path == "/api/timeline": value = store.timeline(q.get("start"), q.get("end"), q.get("source"), q.get("limit", 5000))
+            elif url.path == "/api/settings": value = store.settings()
             elif url.path == "/api/stats": value = store.stats(q.get("start"), q.get("end"), q.get("source"))
             elif url.path == "/api/trips": value = store.trips(q.get("start"), q.get("end"), q.get("source"))
             elif url.path == "/api/coverage": value = store.coverage()
@@ -257,6 +258,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/points":
                 result = store.ingest(payload)
                 deliver_webhook(store, result["events"])
+            elif path == "/api/settings": result = store.save_settings(payload)
             elif path == "/api/places": result = store.save_place(payload)
             elif path == "/api/reminders": result = store.create_reminder(payload)
             elif path == "/api/reminders/active": result = store.set_reminder_active(payload["id"], payload["active"])

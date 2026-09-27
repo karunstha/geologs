@@ -61,6 +61,15 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(len(self.store.near(41, -87, 100, source="one")), 1)
         self.assertEqual(self.store.near(41, -87, 100, source="two"), [])
 
+    def test_interleaved_sources_keep_independent_route_segments(self):
+        points = [
+            {"id": 1, "source": "one", "timestamp": "2026-09-26T10:00:00+00:00", "lat": 41, "lon": -87, "accuracy_m": 5},
+            {"id": 2, "source": "two", "timestamp": "2026-09-26T10:01:00+00:00", "lat": 42, "lon": -88, "accuracy_m": 5},
+            {"id": 3, "source": "one", "timestamp": "2026-09-26T10:02:00+00:00", "lat": 41.001, "lon": -87, "accuracy_m": 5},
+            {"id": 4, "source": "two", "timestamp": "2026-09-26T10:03:00+00:00", "lat": 42.001, "lon": -88, "accuracy_m": 5},
+        ]
+        self.assertEqual(len(route_segments_from_points(points)), 2)
+
     def test_day_summary_counts_trips_and_unique_observed_places(self):
         self.store.save_place({"name": "Campus", "lat": 41, "lon": -87.9, "radius_m": 150})
         fixes = [
@@ -110,6 +119,32 @@ class StoreTests(unittest.TestCase):
         smoothed = smooth_route_segment(path)
         self.assertEqual((smoothed[0], smoothed[-1]), (path[0], path[-1]))
         self.assertGreater(len(smoothed), len(path))
+        self.assertTrue(all(point in smoothed for point in path))
+
+    def test_raw_observation_pagination(self):
+        for minute in range(5):
+            self.store.ingest({"source": "phone", "timestamp": f"2026-09-25T10:0{minute}:00Z",
+                               "lat": 41 + minute / 1000, "lon": -87.9})
+        first = self.store.observations(limit=2, offset=0)
+        second = self.store.observations(limit=2, offset=2)
+        last = self.store.observations(limit=2, offset=4)
+        self.assertEqual([row["id"] for row in first + second + last], [5, 4, 3, 2, 1])
+
+    def test_speed_settings_reported_offset_and_calculated_mode(self):
+        self.store.save_settings({"speed_strategy": "reported", "reported_speed_offset_kmh": -3.6})
+        self.store.ingest({"source": "reported", "timestamp": "2026-09-25T10:00:00Z",
+                           "lat": 41, "lon": -87.9, "speed_mps": 2})
+        reported = self.store.observations(source="reported", limit=1)[0]
+        self.assertAlmostEqual(reported["speed_mps"], 1)
+        self.assertEqual(reported["speed_origin"], "reported_adjusted")
+        self.store.save_settings({"speed_strategy": "calculated", "reported_speed_offset_kmh": -3.6})
+        self.store.ingest([
+            {"source": "calculated", "timestamp": "2026-09-25T10:00:00Z", "lat": 41, "lon": -87.9, "speed_mps": 40},
+            {"source": "calculated", "timestamp": "2026-09-25T10:01:00Z", "lat": 41.001, "lon": -87.9, "speed_mps": 40},
+        ])
+        calculated = self.store.observations(source="calculated", limit=1)[0]
+        self.assertEqual(calculated["speed_origin"], "estimated")
+        self.assertLess(calculated["speed_mps"], 3)
 
     def test_trip_classification_uses_connected_trip_context(self):
         self.store.ingest([
@@ -405,7 +440,9 @@ class StoreTests(unittest.TestCase):
         ranked = visited_places(self.store)
         self.assertEqual((ranked[0]["display_name"], ranked[0]["saved"], ranked[0]["visits"]), ("University", True, 4))
         self.assertGreater(ranked[0]["observed_minutes"], ranked[1]["observed_minutes"])
-        self.assertEqual(insights(self.store)["unlabeled_places"][0]["visits"], 3)
+        insight = insights(self.store)
+        self.assertEqual(insight["unlabeled_places"][0]["visits"], 3)
+        self.assertNotIn("Unlabeled", insight["unlabeled_places"][0]["display_name"])
         mcp = dispatch(self.store, {"jsonrpc": "2.0", "id": 9, "method": "tools/call",
                                     "params": {"name": "get_frequent_places", "arguments": {"limit": 10}}})
         self.assertEqual(mcp["result"]["structuredContent"]["result"][0]["name"], "University")

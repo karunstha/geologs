@@ -18,6 +18,7 @@ from .postgres import PostgresConnection
 
 
 _reverse_lock = threading.Lock()
+DEFAULT_SETTINGS = {"speed_strategy": "reported", "reported_speed_offset_kmh": 0.0}
 
 
 def database_path() -> str:
@@ -58,37 +59,50 @@ def mode_for(speed_mps, accuracy_m=None):
 
 def select_best_timed_fixes(points):
     """Keep one accuracy-best observation per source timestamp for trip timing."""
-    selected = []
+    selected = {}
     for point in points:
-        if selected and (selected[-1]["source"], selected[-1]["timestamp"]) == (point["source"], point["timestamp"]):
-            previous = selected[-1]
-            if (point["accuracy_m"] if point["accuracy_m"] is not None else float("inf")) < (previous["accuracy_m"] if previous["accuracy_m"] is not None else float("inf")):
-                selected[-1] = point
-        else:
-            selected.append(point)
-    return selected
+        key = (point["source"], point["timestamp"])
+        previous = selected.get(key)
+        accuracy = point["accuracy_m"] if point["accuracy_m"] is not None else float("inf")
+        previous_accuracy = previous["accuracy_m"] if previous and previous["accuracy_m"] is not None else float("inf")
+        if previous is None or accuracy < previous_accuracy or (accuracy == previous_accuracy and point.get("id", 0) > previous.get("id", 0)):
+            selected[key] = point
+    return sorted(selected.values(), key=lambda point: (point["timestamp"], point.get("id", 0)))
 
 
 def stats_from_points(points):
     """Summarize chronological fixes without bridging source or coverage gaps."""
     distance, moving_seconds, by_mode = 0, 0, {}
-    for i, point in enumerate(points):
+    by_source = {}
+    for point in points:
         by_mode[point["mode"]] = by_mode.get(point["mode"], 0) + 1
-        if i == 0:
-            continue
-        prev = points[i - 1]
-        elapsed = (datetime.fromisoformat(point["timestamp"]) - datetime.fromisoformat(prev["timestamp"])).total_seconds()
-        segment = metres(prev["lat"], prev["lon"], point["lat"], point["lon"])
-        if point["source"] == prev["source"] and 0 < elapsed <= 900 and segment / elapsed <= 55.6 and (point["accuracy_m"] is None or point["accuracy_m"] <= 150):
-            distance += segment
-            if point["mode"] in ("walking", "running_cycling", "driving"):
-                moving_seconds += elapsed
+        by_source.setdefault(point["source"], []).append(point)
+    for source_points in by_source.values():
+        source_points.sort(key=lambda point: (point["timestamp"], point.get("id", 0)))
+        for prev, point in zip(source_points, source_points[1:]):
+            elapsed = (datetime.fromisoformat(point["timestamp"]) - datetime.fromisoformat(prev["timestamp"])).total_seconds()
+            segment = metres(prev["lat"], prev["lon"], point["lat"], point["lon"])
+            if 0 < elapsed <= 900 and segment / elapsed <= 55.6 and (point["accuracy_m"] is None or point["accuracy_m"] <= 150):
+                distance += segment
+                if point["mode"] in ("walking", "running_cycling", "driving"):
+                    moving_seconds += elapsed
     return {"points": len(points), "distance_km": round(distance / 1000, 2), "moving_hours": round(moving_seconds / 3600, 2), "modes": by_mode,
             "first": points[0]["timestamp"] if points else None, "last": points[-1]["timestamp"] if points else None}
 
 
 def trips_from_points(points):
     """Classify connected travel as a whole; short traffic stops stay inside it."""
+    by_source = {}
+    for point in points:
+        by_source.setdefault(point["source"], []).append(point)
+    trips = []
+    for source_points in by_source.values():
+        source_points.sort(key=lambda point: (point["timestamp"], point.get("id", 0)))
+        trips.extend(_trips_for_source(source_points))
+    return sorted(trips, key=lambda trip: trip["start"], reverse=True)
+
+
+def _trips_for_source(points):
     trips, run = [], []
     last_moving_at = None
 
@@ -139,46 +153,58 @@ def trips_from_points(points):
             run = [stationary]
             last_moving_at = None
     finish()
-    return list(reversed(trips))
+    return trips
 
 
 def route_segments_from_points(points):
-    """Connect consecutive plausible fixes, regardless of movement classification."""
-    segments, current = [], []
-    previous = None
+    """Connect plausible fixes per source and skip readings too inaccurate to route."""
+    segments = []
+    by_source = {}
     for point in points:
-        connected = False
-        if previous:
-            elapsed = (datetime.fromisoformat(point["timestamp"]) - datetime.fromisoformat(previous["timestamp"])).total_seconds()
-            distance = metres(previous["lat"], previous["lon"], point["lat"], point["lon"])
-            accurate = all(p["accuracy_m"] is None or p["accuracy_m"] <= 150 for p in (previous, point))
-            connected = point["source"] == previous["source"] and 0 < elapsed <= 900 and distance / elapsed <= 55.6 and accurate
-        if not connected:
-            if len(current) > 1:
-                segments.append(current)
-            current = [[point["lon"], point["lat"]]]
-        else:
-            current.append([point["lon"], point["lat"]])
-        previous = point
-    if len(current) > 1:
-        segments.append(current)
+        if point["accuracy_m"] is None or point["accuracy_m"] <= 150:
+            by_source.setdefault(point["source"], []).append(point)
+    for source_points in by_source.values():
+        source_points.sort(key=lambda point: (point["timestamp"], point.get("id", 0)))
+        current, previous = [], None
+        for point in source_points:
+            connected = False
+            if previous:
+                elapsed = (datetime.fromisoformat(point["timestamp"]) - datetime.fromisoformat(previous["timestamp"])).total_seconds()
+                distance = metres(previous["lat"], previous["lon"], point["lat"], point["lon"])
+                connected = 0 < elapsed <= 900 and distance / elapsed <= 55.6
+            if not connected:
+                if len(current) > 1:
+                    segments.append(current)
+                current = [[point["lon"], point["lat"]]]
+            else:
+                current.append([point["lon"], point["lat"]])
+            previous = point
+        if len(current) > 1:
+            segments.append(current)
     return segments
 
 
-def smooth_route_segment(coordinates, iterations=2):
-    """Round GPS polyline corners without using or implying a road network."""
-    result = coordinates
-    if len(result) < 3:
-        return result
-    for _ in range(iterations):
-        smoothed = [result[0]]
-        for first, second in zip(result, result[1:]):
-            smoothed.append([first[0] * 0.75 + second[0] * 0.25,
-                             first[1] * 0.75 + second[1] * 0.25])
-            smoothed.append([first[0] * 0.25 + second[0] * 0.75,
-                             first[1] * 0.25 + second[1] * 0.75])
-        smoothed.append(result[-1])
-        result = smoothed
+def smooth_route_segment(coordinates, samples_per_leg=4):
+    """Interpolate a GPS path while passing through every recorded fix."""
+    if len(coordinates) < 3:
+        return coordinates
+    result = []
+    for index in range(len(coordinates) - 1):
+        p0 = coordinates[max(0, index - 1)]
+        p1 = coordinates[index]
+        p2 = coordinates[index + 1]
+        p3 = coordinates[min(len(coordinates) - 1, index + 2)]
+        for step in range(samples_per_leg):
+            t = step / samples_per_leg
+            t2, t3 = t * t, t * t * t
+            point = []
+            for axis in (0, 1):
+                value = .5 * ((2 * p1[axis]) + (-p0[axis] + p2[axis]) * t
+                              + (2*p0[axis] - 5*p1[axis] + 4*p2[axis] - p3[axis]) * t2
+                              + (-p0[axis] + 3*p1[axis] - 3*p2[axis] + p3[axis]) * t3)
+                point.append(min(max(value, min(p1[axis], p2[axis])), max(p1[axis], p2[axis])))
+            result.append(point)
+    result.append(coordinates[-1])
     return result
 
 
@@ -221,6 +247,9 @@ class Store:
             stay_id INTEGER REFERENCES observed_stays_v2(id) ON DELETE SET NULL
         );
         CREATE INDEX IF NOT EXISTS timeline_fixes_source ON timeline_fixes(source);
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY, value TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS places (
             id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE COLLATE NOCASE,
             lat REAL NOT NULL, lon REAL NOT NULL, radius_m REAL NOT NULL DEFAULT 150,
@@ -340,6 +369,31 @@ class Store:
     def _rows(self, query, args=()):
         return [dict(row) for row in self.db.execute(query, args).fetchall()]
 
+    def settings(self):
+        values = dict(DEFAULT_SETTINGS)
+        for row in self._rows("SELECT key,value FROM app_settings"):
+            if row["key"] in values:
+                try:
+                    values[row["key"]] = json.loads(row["value"])
+                except (TypeError, ValueError):
+                    pass
+        return values
+
+    def save_settings(self, raw):
+        current = self.settings()
+        strategy = str(raw.get("speed_strategy", current["speed_strategy"]))
+        if strategy not in ("reported", "calculated"):
+            raise ValueError("speed_strategy must be reported or calculated")
+        offset = float(raw.get("reported_speed_offset_kmh", current["reported_speed_offset_kmh"]))
+        if not math.isfinite(offset) or not -100 <= offset <= 100:
+            raise ValueError("reported_speed_offset_kmh must be between -100 and 100")
+        values = {"speed_strategy": strategy, "reported_speed_offset_kmh": round(offset, 2)}
+        for key, value in values.items():
+            self.db.execute("""INSERT INTO app_settings(key,value) VALUES (?,?)
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value""", (key, json.dumps(value)))
+        self.db.commit()
+        return values
+
     def ingest(self, payload, trigger_reminders=True, process_analysis=True):
         items = payload if isinstance(payload, list) else [payload]
         if len(items) > 1000:
@@ -349,6 +403,7 @@ class Store:
             # concurrent HTTP workers. Sorting prevents opposing batch lock order.
             for source in sorted({str(item.get("source") or "manual")[:80] for item in items}):
                 self.db.execute("SELECT pg_advisory_xact_lock(hashtext(?))", (source,))
+        speed_settings = self.settings()
         inserted, duplicate, recorded, events = 0, 0, 0, []
         for raw in items:
             lat = float(raw.get("lat", raw.get("latitude")))
@@ -361,12 +416,14 @@ class Store:
             accuracy = float(accuracy) if accuracy is not None else None
             if accuracy is not None and (not math.isfinite(accuracy) or accuracy < 0):
                 raise ValueError("accuracy_m must be nonnegative")
-            speed = raw.get("speed_mps")
-            speed = float(speed) if speed is not None else None
-            if speed is not None and (not math.isfinite(speed) or speed < 0):
+            reported_speed = raw.get("speed_mps")
+            reported_speed = float(reported_speed) if reported_speed is not None else None
+            if reported_speed is not None and (not math.isfinite(reported_speed) or reported_speed < 0):
                 raise ValueError("speed_mps must be nonnegative")
+            use_reported = speed_settings["speed_strategy"] == "reported" and reported_speed is not None
+            speed = max(0.0, reported_speed + speed_settings["reported_speed_offset_kmh"] / 3.6) if use_reported else None
             previous = self.db.execute("""SELECT p.* FROM source_state s JOIN points p ON p.id=s.point_id WHERE s.source=?""", (source,)).fetchone()
-            origin = "reported" if speed is not None else None
+            origin = "reported_adjusted" if use_reported and speed_settings["reported_speed_offset_kmh"] else "reported" if use_reported else None
             if speed is None:
                 prior_fix = self.db.execute("""SELECT timestamp,lat,lon,accuracy_m FROM point_observations
                     WHERE source=? AND timestamp<? ORDER BY timestamp DESC,id DESC LIMIT 1""", (source, timestamp)).fetchone()
@@ -395,15 +452,14 @@ class Store:
                 if existing is None:
                     raise RuntimeError("conflicting point could not be found")
                 point_id = existing["id"]
-            reported_speed = float(raw["speed_mps"]) if raw.get("speed_mps") is not None else None
             legacy_retry = False
             if not inserted_row:
                 legacy = self.db.execute("""SELECT timestamp,lat,lon,accuracy_m,speed_mps,speed_origin
                     FROM point_observations WHERE legacy_point_id=?""", (point_id,)).fetchone()
                 legacy_retry = bool(legacy and legacy["timestamp"] == timestamp and legacy["lat"] == lat
                     and legacy["lon"] == lon and legacy["accuracy_m"] == accuracy
-                    and (legacy["speed_mps"] == reported_speed or
-                         (reported_speed is None and legacy["speed_origin"] in (None, "estimated"))))
+                    and (legacy["speed_mps"] == speed or
+                         (speed is None and legacy["speed_origin"] in (None, "estimated"))))
             if not legacy_retry:
                 observation = self.db.execute("""INSERT INTO point_observations
                     (point_id,source,timestamp,lat,lon,accuracy_m,speed_mps,speed_origin,received_at,fingerprint)
@@ -460,7 +516,7 @@ class Store:
             suffix = " LIMIT ?"
         return self._rows("SELECT id,source,external_id,timestamp,lat,lon,accuracy_m,speed_mps,speed_origin,mode FROM points" + where + " ORDER BY timestamp DESC" + suffix, args)
 
-    def observations(self, start=None, end=None, source=None, limit=5000):
+    def observations(self, start=None, end=None, source=None, limit=5000, offset=0):
         clauses, args = [], []
         if start:
             clauses.append("o.timestamp>=?"); args.append(parse_time(start))
@@ -471,8 +527,8 @@ class Store:
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         suffix = ""
         if limit is not None:
-            args.append(min(max(int(limit), 1), 20000))
-            suffix = " LIMIT ?"
+            args.extend((min(max(int(limit), 1), 20000), min(max(int(offset), 0), 10_000_000)))
+            suffix = " LIMIT ? OFFSET ?"
         rows = self._rows("""SELECT o.id,o.point_id,p.external_id,o.source,o.timestamp,o.lat,o.lon,o.accuracy_m,
             o.speed_mps,o.speed_origin,
             o.received_at FROM point_observations o JOIN points p ON p.id=o.point_id""" + where + " ORDER BY o.timestamp DESC,COALESCE(o.accuracy_m,1000000000) ASC,o.id DESC" + suffix, args)
