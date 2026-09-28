@@ -8,7 +8,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from .core import address_for_coordinate, metres, parse_time, route_segments_from_points, select_best_timed_fixes, smooth_route_segment, stats_from_points, trips_from_points
+from .core import metres, parse_time, place_for_coordinate, route_segments_from_points, select_best_timed_fixes, smooth_route_segment, stats_from_points, trips_from_points
 
 
 STOP_RADIUS_M = 50
@@ -248,9 +248,11 @@ def visited_places(store, limit=500):
     result = []
     for cluster in clusters[:min(max(int(limit), 1), 5000)]:
         place = saved.get(cluster["place_id"])
-        address = place["address"] if place else address_for_coordinate(store, cluster["lat"], cluster["lon"])
-        result.append({**cluster, "address": address,
-                       "display_name": cluster["name"] or address or cluster["display_name"],
+        found = ({"name": place["name"], "address": place["address"]} if place
+                 else place_for_coordinate(store, cluster["lat"], cluster["lon"]))
+        resolved_name = cluster["name"] or found["name"] or found["address"]
+        result.append({**cluster, "name": resolved_name, "address": found["address"],
+                       "display_name": resolved_name or cluster["display_name"],
                        "saved": bool(place)})
     return result
 
@@ -316,9 +318,11 @@ def insights(store, limit=50):
     rows = stays(store, limit=None)
     patterns = place_patterns(store, limit=None, rows=rows)
     for place in [place for place in patterns[0] if not place["name"]][:12]:
-        place["address"] = address_for_coordinate(store, place["lat"], place["lon"])
-        if place["address"]:
-            place["display_name"] = place["address"]
+        found = place_for_coordinate(store, place["lat"], place["lon"])
+        place["address"] = found["address"]
+        if found["name"] or found["address"]:
+            place["name"] = found["name"] or found["address"]
+            place["display_name"] = place["name"]
     edges = transitions(store, limit=None, patterns=patterns, rows=rows)
     unlabeled = [p for p in patterns[0] if p["place_id"] is None][:limit]
     return {"frequent_places": patterns[0][:limit],
@@ -342,7 +346,7 @@ def day_summary(store, date, timezone_name="UTC", source=None):
     start = day_start.isoformat()
     end = (day_end - timedelta(microseconds=1)).isoformat()
     provider = "photon:" + os.environ.get("GEOTRACKER_PHOTON_URL", "") if os.environ.get("GEOTRACKER_PHOTON_URL") else "geoapify:" + str(bool(os.environ.get("GEOAPIFY_API_KEY")))
-    cache_identity = json.dumps(["day-v2", date, timezone_name, source, provider], separators=(",", ":"))
+    cache_identity = json.dumps(["day-v3", date, timezone_name, source, provider], separators=(",", ":"))
     cache_key = "day:" + hashlib.sha256(cache_identity.encode()).hexdigest()
     watermark = store.analysis_watermark(start, end, source)
     cached = store.cached_analysis(cache_key, watermark)
@@ -361,9 +365,10 @@ def day_summary(store, date, timezone_name="UTC", source=None):
         cluster["first_seen"] = min(cluster.get("first_seen", first), first)
     visited_places = sorted(clusters, key=lambda item: item["first_seen"])
     for place in visited_places:
-        place["address"] = address_for_coordinate(store, place["lat"], place["lon"])
-        if not place["name"] and place["address"]:
-            place["name"] = place["address"]
+        found = place_for_coordinate(store, place["lat"], place["lon"])
+        place["address"] = found["address"]
+        if not place["name"] and (found["name"] or found["address"]):
+            place["name"] = found["name"] or found["address"]
     for stay in day_stays:
         place = by_cluster[mapping[stay["id"]]]
         stay["display_name"] = place["name"] or place["display_name"]

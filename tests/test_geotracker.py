@@ -120,9 +120,11 @@ class StoreTests(unittest.TestCase):
             {"source": "phone", "timestamp": "2026-09-25T10:00:00Z", "lat": 41, "lon": -87.9, "accuracy_m": 5},
             {"source": "phone", "timestamp": "2026-09-25T10:06:00Z", "lat": 41, "lon": -87.9, "accuracy_m": 5},
         ])
-        with patch("geotracker.analysis.address_for_coordinate", return_value="12801 South University Avenue") as reverse:
+        found = {"name": "University of Arkansas at Little Rock", "address": "2801 South University Avenue"}
+        with patch("geotracker.analysis.place_for_coordinate", return_value=found) as reverse:
             day = day_summary(self.store, "2026-09-25", "UTC")
-        self.assertEqual(day["visited_places"][0]["name"], "12801 South University Avenue")
+        self.assertEqual(day["visited_places"][0]["name"], "University of Arkansas at Little Rock")
+        self.assertEqual(day["visited_places"][0]["address"], "2801 South University Avenue")
         self.assertEqual(day["stays"][0]["display_name"], day["visited_places"][0]["name"])
         reverse.assert_called_once()
 
@@ -435,9 +437,10 @@ class StoreTests(unittest.TestCase):
 
     def test_geocode_bias_uses_latest_fix_and_cache_is_area_specific(self):
         self.store.ingest({"source": "phone", "timestamp": "2026-09-25T10:00:00Z", "lat": 41, "lon": -87.9})
-        response = {"results": [{"formatted": "Nearby market", "lat": 41.01, "lon": -87.9}]}
+        response = {"results": [{"name": "Neighborhood Market", "formatted": "Neighborhood Market, 1200 Main Street", "lat": 41.01, "lon": -87.9}]}
         with patch.dict(os.environ, {"GEOAPIFY_API_KEY": "test", "GEOTRACKER_PHOTON_URL": ""}), patch("geotracker.core.provider_request", return_value=response) as request:
-            self.assertEqual(geocode(self.store, "market")[0]["name"], "Nearby market")
+            self.assertEqual(geocode(self.store, "market")[0]["name"], "Neighborhood Market")
+            self.assertEqual(geocode(self.store, "market")[0]["address"], "Neighborhood Market, 1200 Main Street")
             self.assertEqual(request.call_args.args[1]["bias"], "proximity:-87.9,41.0")
             geocode(self.store, "market")
             self.assertEqual(request.call_count, 1)
@@ -452,6 +455,28 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(first["address"], "Market Street")
             self.assertEqual(second["address"], "Market Street")
             self.assertEqual(request.call_count, 1)
+
+    def test_geoapify_reverse_prefers_place_name_and_keeps_address(self):
+        response = {"results": [{"name": "War Memorial Park",
+                                  "formatted": "War Memorial Park, 5511 West Markham Street, Little Rock, AR",
+                                  "address_line1": "War Memorial Park", "result_type": "amenity",
+                                  "category": "leisure.park", "distance": 8}]}
+        with patch.dict(os.environ, {"GEOAPIFY_API_KEY": "test", "GEOTRACKER_PHOTON_URL": ""}), patch("geotracker.core.provider_request", return_value=response) as request:
+            result = reverse_geocode(self.store, 34.749, -92.332)
+            nearby = reverse_geocode(self.store, 34.74903, -92.332)
+        self.assertEqual(result["name"], "War Memorial Park")
+        self.assertEqual(result["place_name"], "War Memorial Park")
+        self.assertEqual(result["address"], "War Memorial Park, 5511 West Markham Street, Little Rock, AR")
+        self.assertEqual(nearby["name"], "War Memorial Park")
+        self.assertEqual(nearby["cache"], "region")
+        self.assertEqual(request.call_count, 1)
+
+    def test_geoapify_reverse_uses_address_when_place_is_unnamed(self):
+        response = {"results": [{"formatted": "1200 Main Street, Little Rock, AR", "result_type": "building"}]}
+        with patch.dict(os.environ, {"GEOAPIFY_API_KEY": "test", "GEOTRACKER_PHOTON_URL": ""}), patch("geotracker.core.provider_request", return_value=response):
+            result = reverse_geocode(self.store, 34.74, -92.27)
+        self.assertEqual(result["name"], "1200 Main Street, Little Rock, AR")
+        self.assertEqual(result["place_name"], "")
 
     def test_webhook_uses_hermes_compatible_hmac_v2_signature(self):
         event = {"id": 99, "text": "Pick up salt", "place": "Walmart"}

@@ -135,7 +135,7 @@ The browser's arrival inbox persists events. Browser notifications work while th
 
 ## Geocoding
 
--   Set `GEOAPIFY_API_KEY` to enable address search and reverse geocoding. [Geoapify's free plan](https://www.geoapify.com/pricing/) currently lists 3,000 credits/day; creating an API key requires an account. Address searches favor the latest recorded fix. Saved and confirmed visited places are reverse geocoded through the cache; raw GPS fixes are never automatically reverse geocoded.
+-   Set `GEOAPIFY_API_KEY` to enable place/address search and reverse geocoding. [Geoapify's free plan](https://www.geoapify.com/pricing/) currently lists 3,000 credits/day; creating an API key requires an account. Address searches favor the latest recorded fix. Reverse results use Geoapify's named venue, amenity, or building when available and retain the formatted street address as a fallback. Saved and confirmed visited places are reverse geocoded through the regional cache; raw GPS fixes are never automatically reverse geocoded.
 -   Set `GEOTRACKER_PHOTON_URL` to use your own [Photon](https://github.com/komoot/photon/blob/master/docs/api-v1.md) instance for forward/reverse geocoding. This takes precedence over Geoapify for geocoding.
 
 Saved places, raw paths, trip estimates, reminders, and MCP history work without any provider key. The browser loads Leaflet from its CDN and OpenStreetMap map tiles, so map browsing sends viewport/tile requests to those services. It does not send your stored GPS history to the tile service.

@@ -906,7 +906,28 @@ def photon_result(feature):
     props = feature.get("properties", {})
     lon, lat = feature["geometry"]["coordinates"][:2]
     label = ", ".join(str(props[k]) for k in ("name", "street", "city", "state", "country") if props.get(k))
-    return {"name": label or "Unknown place", "lat": lat, "lon": lon, "address": label}
+    place_name = str(props.get("name") or "").strip()
+    return {"name": label or "Unknown place", "place_name": place_name,
+            "lat": lat, "lon": lon, "address": label}
+
+
+def geoapify_reverse_result(value, lat, lon):
+    """Keep Geoapify's place name separate from its formatted address."""
+    address = str(value.get("formatted") or "").strip()
+    if not address:
+        address = ", ".join(str(value.get(key)).strip() for key in ("address_line1", "address_line2") if value.get(key))
+    place_name = str(value.get("name") or "").strip()
+    datasource = value.get("datasource") if isinstance(value.get("datasource"), dict) else {}
+    raw = datasource.get("raw") if isinstance(datasource.get("raw"), dict) else {}
+    if not place_name:
+        place_name = str(raw.get("name") or "").strip()
+    # Geoapify documents address_line1 as the amenity name for amenity results.
+    if not place_name and value.get("result_type") == "amenity":
+        place_name = str(value.get("address_line1") or "").strip()
+    return {"name": place_name or address or "Unknown place",
+            "place_name": place_name, "address": address, "lat": lat, "lon": lon,
+            "result_type": value.get("result_type"), "category": value.get("category"),
+            "distance_m": value.get("distance")}
 
 
 def geocode(store, query, lat=None, lon=None):
@@ -940,7 +961,9 @@ def geocode(store, query, lat=None, lon=None):
         if bias:
             params["bias"] = f"proximity:{bias[1]},{bias[0]}"
         data = provider_request("/v1/geocode/search", params)
-        value = [{"name": r.get("formatted", query), "lat": r["lat"], "lon": r["lon"], "address": r.get("formatted", "")} for r in data.get("results", [])]
+        value = [{"name": r.get("name") or r.get("formatted") or query,
+                  "place_name": r.get("name") or "", "lat": r["lat"], "lon": r["lon"],
+                  "address": r.get("formatted", "")} for r in data.get("results", [])]
     store.cache(key, provider, value)
     return value
 
@@ -950,7 +973,9 @@ def reverse_geocode(store, lat, lon):
     if not (-90 <= lat <= 90 and -180 <= lon <= 180):
         raise ValueError("invalid coordinates")
     photon = os.environ.get("GEOTRACKER_PHOTON_URL", "").rstrip("/")
-    provider = "photon:" + photon if photon else "geoapify"
+    # Version the reverse cache because older rows stored the formatted address
+    # as `name`, even when Geoapify supplied a named venue or amenity.
+    provider = "photon:v2:" + photon if photon else "geoapify:v2"
     # A lock coalesces simultaneous browser/MCP requests within this process.
     with _reverse_lock:
         cached = store.reverse_region(provider, lat, lon)
@@ -960,25 +985,32 @@ def reverse_geocode(store, lat, lon):
         if photon:
             data = json_get(photon + "/reverse?" + urllib.parse.urlencode({"lat": lat, "lon": lon, "limit": 1}))
             feature = data["features"][0] if data.get("features") else None
-            value = photon_result(feature) if feature else {"name": "Unknown address", "address": ""}
+            value = photon_result(feature) if feature else {"name": "Unknown place", "place_name": "", "address": ""}
             kind = (feature or {}).get("properties", {}).get("type") or (feature or {}).get("properties", {}).get("osm_key")
-            result = {**value, "lat": lat, "lon": lon}
+            result = {**value, "name": value.get("place_name") or value.get("address") or "Unknown place",
+                      "lat": lat, "lon": lon}
         else:
             data = provider_request("/v1/geocode/reverse", {"lat": lat, "lon": lon, "format": "json"})
             value = (data.get("results") or [{}])[0]
             kind = value.get("result_type")
-            result = {"name": value.get("formatted", "Unknown address"), "address": value.get("formatted", ""), "lat": lat, "lon": lon}
+            result = geoapify_reverse_result(value, lat, lon)
         store.save_reverse_region(provider, lat, lon, reverse_cache_radius(kind), result)
         return {**result, "cache": "provider", "approximate": False}
 
 
-def address_for_coordinate(store, lat, lon):
-    """Use the reverse cache first, then the configured provider when available."""
+def place_for_coordinate(store, lat, lon):
+    """Return the best cached/provider place label plus its full address."""
     try:
         value = reverse_geocode(store, lat, lon)
-        return str(value.get("address") or "")[:300]
+        return {"name": str(value.get("place_name") or value.get("name") or value.get("address") or "")[:300],
+                "address": str(value.get("address") or "")[:300]}
     except (ValueError, OSError, KeyError):
-        return ""
+        return {"name": "", "address": ""}
+
+
+def address_for_coordinate(store, lat, lon):
+    """Use the reverse cache first, then the configured provider when available."""
+    return place_for_coordinate(store, lat, lon)["address"]
 
 
 def deliver_webhook(store, events):

@@ -43,8 +43,8 @@ TOOLS = [
     {"name": "set_reminder_active", "description": "Enable or disable a location reminder.", "inputSchema": schema({"id": INTEGER, "active": {"type": "boolean"}}, ["id", "active"])},
     {"name": "list_reminder_events", "description": "Triggered reminder inbox for delivery/notification workflows.", "inputSchema": schema({"since_id": INTEGER, "limit": INTEGER})},
     {"name": "ingest_location", "description": "Store one location from any source and evaluate arrival reminders. Location sources may also use POST /api/points.", "inputSchema": schema({"lat": NUMBER, "lon": NUMBER, "timestamp": STRING, "source": STRING, "external_id": STRING, "accuracy_m": NUMBER, "speed_mps": NUMBER}, ["lat", "lon"])},
-    {"name": "geocode_address", "description": "Search an address near the latest recorded fix with the configured Geoapify or Photon provider; results are cached by area.", "inputSchema": schema({"query": STRING, "lat": NUMBER, "lon": NUMBER}, ["query"])},
-    {"name": "reverse_geocode", "description": "Look up an address for coordinates with the configured Geoapify or Photon provider; results are cached.", "inputSchema": schema({"lat": NUMBER, "lon": NUMBER}, ["lat", "lon"])},
+    {"name": "geocode_address", "description": "Search for a place or address near the latest recorded fix with the configured Geoapify or Photon provider; results are cached by area.", "inputSchema": schema({"query": STRING, "lat": NUMBER, "lon": NUMBER}, ["query"])},
+    {"name": "reverse_geocode", "description": "Look up a named place for coordinates with the configured Geoapify or Photon provider, falling back to the formatted address; results are cached.", "inputSchema": schema({"lat": NUMBER, "lon": NUMBER}, ["lat", "lon"])},
 ]
 
 
