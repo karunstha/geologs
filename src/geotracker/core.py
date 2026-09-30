@@ -14,12 +14,13 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .postgres import PostgresConnection
 
 
 _reverse_lock = threading.Lock()
-DEFAULT_SETTINGS = {"speed_strategy": "reported", "reported_speed_offset_kmh": 0.0}
+DEFAULT_SETTINGS = {"speed_strategy": "reported", "reported_speed_offset_kmh": 0.0, "timezone": "UTC"}
 MAX_CONNECTED_GAP_SECONDS = 900
 MAX_PLAUSIBLE_SPEED_MPS = 55.6
 
@@ -189,7 +190,7 @@ def _trips_for_source(points):
             if not held:
                 run = [point]
                 edge_seconds = []
-        elif last_moving_at and not held and (datetime.fromisoformat(point["timestamp"]) - last_moving_at).total_seconds() >= 300:
+        elif last_moving_at and (datetime.fromisoformat(point["timestamp"]) - last_moving_at).total_seconds() >= 300:
             stationary = run.pop()
             edge_seconds.pop()
             finish()
@@ -298,6 +299,16 @@ class Store:
             cache_key TEXT PRIMARY KEY, watermark TEXT NOT NULL,
             value TEXT NOT NULL, created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS daily_summaries (
+            id INTEGER PRIMARY KEY, summary_date TEXT NOT NULL, timezone TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT '', watermark TEXT NOT NULL,
+            points INTEGER NOT NULL, distance_km REAL NOT NULL,
+            trip_count INTEGER NOT NULL, place_count INTEGER NOT NULL,
+            reminder_count INTEGER NOT NULL, summary TEXT NOT NULL,
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+            UNIQUE(summary_date,timezone,source)
+        );
+        CREATE INDEX IF NOT EXISTS daily_summaries_date ON daily_summaries(summary_date DESC,timezone);
         CREATE TABLE IF NOT EXISTS places (
             id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE COLLATE NOCASE,
             lat REAL NOT NULL, lon REAL NOT NULL, radius_m REAL NOT NULL DEFAULT 150,
@@ -307,14 +318,16 @@ class Store:
             id INTEGER PRIMARY KEY, text TEXT NOT NULL, place_id INTEGER NOT NULL REFERENCES places(id),
             active INTEGER NOT NULL DEFAULT 1, repeat INTEGER NOT NULL DEFAULT 0,
             cooldown_minutes INTEGER NOT NULL DEFAULT 1440,
-            created_at TEXT NOT NULL, last_triggered_at TEXT,
+            created_at TEXT NOT NULL, last_triggered_at TEXT, cancelled_at TEXT,
             FOREIGN KEY(place_id) REFERENCES places(id)
         );
+        CREATE INDEX IF NOT EXISTS reminders_active_created ON reminders(active,created_at);
         CREATE TABLE IF NOT EXISTS events (
             id INTEGER PRIMARY KEY, reminder_id INTEGER NOT NULL REFERENCES reminders(id),
             point_id INTEGER NOT NULL REFERENCES points(id), triggered_at TEXT NOT NULL,
             acknowledged_at TEXT, webhook_status TEXT DEFAULT 'pending'
         );
+        CREATE INDEX IF NOT EXISTS events_triggered ON events(triggered_at);
         CREATE TABLE IF NOT EXISTS source_state (
             source TEXT PRIMARY KEY, point_id INTEGER NOT NULL REFERENCES points(id)
         );
@@ -340,6 +353,7 @@ class Store:
             point_count INTEGER NOT NULL, ongoing INTEGER NOT NULL DEFAULT 1
         );
         CREATE INDEX IF NOT EXISTS observed_stays_v2_time ON observed_stays_v2(started_at);
+        CREATE INDEX IF NOT EXISTS observed_stays_v2_source_time ON observed_stays_v2(source,started_at,ended_at);
         CREATE TABLE IF NOT EXISTS stay_observation_state (
             source TEXT PRIMARY KEY, last_observation_id INTEGER NOT NULL,
             last_timestamp TEXT NOT NULL, candidate TEXT NOT NULL
@@ -393,6 +407,16 @@ class Store:
                         AND (julianday(timestamp)-julianday(prev_timestamp))*86400 > 0
                         AND (julianday(timestamp)-julianday(prev_timestamp))*86400 <= 900)""")
                 self.db.execute("PRAGMA user_version=3")
+            if version < 6:
+                # Location reminders are one-shot. Preserve already-triggered
+                # repeating reminders as history instead of rearming them.
+                self.db.execute("UPDATE reminders SET active=0 WHERE repeat=1 AND last_triggered_at IS NOT NULL")
+                self.db.execute("UPDATE reminders SET repeat=0")
+            if version < 7:
+                reminder_columns = {row[1] for row in self.db.execute("PRAGMA table_info(reminders)")}
+                if "cancelled_at" not in reminder_columns:
+                    self.db.execute("ALTER TABLE reminders ADD COLUMN cancelled_at TEXT")
+                self.db.execute("UPDATE reminders SET cancelled_at=created_at WHERE active=0 AND last_triggered_at IS NULL AND cancelled_at IS NULL")
         if self.postgres and not self.db.execute("SELECT 1 FROM schema_migrations WHERE version=5").fetchone():
             self.db.execute("SELECT pg_advisory_xact_lock(hashtext('geotracker:analysis:migration:5'))")
             if not self.db.execute("SELECT 1 FROM schema_migrations WHERE version=5").fetchone():
@@ -409,6 +433,8 @@ class Store:
             if not self.db.execute("SELECT 1 FROM stay_observation_state LIMIT 1").fetchone():
                 from .analysis import process_stays
                 process_stays(self)
+        if not self.postgres and version < 7:
+            self.db.execute("PRAGMA user_version=7")
         self.db.commit()
 
     def close(self):
@@ -419,6 +445,8 @@ class Store:
 
     def settings(self):
         values = dict(DEFAULT_SETTINGS)
+        if os.environ.get("GEOTRACKER_TIMEZONE"):
+            values["timezone"] = os.environ["GEOTRACKER_TIMEZONE"]
         for row in self._rows("SELECT key,value FROM app_settings"):
             if row["key"] in values:
                 try:
@@ -435,7 +463,13 @@ class Store:
         offset = float(raw.get("reported_speed_offset_kmh", current["reported_speed_offset_kmh"]))
         if not math.isfinite(offset) or not -100 <= offset <= 100:
             raise ValueError("reported_speed_offset_kmh must be between -100 and 100")
-        values = {"speed_strategy": strategy, "reported_speed_offset_kmh": round(offset, 2)}
+        timezone_name = str(raw.get("timezone", current["timezone"])).strip()
+        try:
+            ZoneInfo(timezone_name)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise ValueError("timezone must be a valid IANA timezone, such as America/Chicago") from exc
+        values = {"speed_strategy": strategy, "reported_speed_offset_kmh": round(offset, 2),
+                  "timezone": timezone_name}
         for key, value in values.items():
             self.db.execute("""INSERT INTO app_settings(key,value) VALUES (?,?)
                 ON CONFLICT(key) DO UPDATE SET value=excluded.value""", (key, json.dumps(value)))
@@ -468,6 +502,63 @@ class Store:
         self.db.execute("DELETE FROM analysis_cache")
         if commit:
             self.db.commit()
+
+    def daily_overview_watermark(self, start, end, source=None):
+        clauses = ["e.triggered_at>=?", "e.triggered_at<=?"]
+        args = [parse_time(start), parse_time(end)]
+        if source:
+            clauses.append("p.source=?")
+            args.append(source)
+        event_row = self.db.execute("""SELECT COUNT(*) AS count,COALESCE(MAX(e.id),0) AS max_id
+            FROM events e JOIN points p ON p.id=e.point_id WHERE """ + " AND ".join(clauses), args).fetchone()
+        places = self._rows("SELECT id,name,lat,lon,radius_m,address FROM places ORDER BY id")
+        reminders = self._rows("""SELECT id,text,place_id,active,created_at,last_triggered_at,cancelled_at
+            FROM reminders WHERE (created_at>=? AND created_at<=?)
+            OR (last_triggered_at>=? AND last_triggered_at<=?)
+            OR (cancelled_at>=? AND cancelled_at<=?)
+            OR (created_at<=? AND (last_triggered_at IS NULL OR last_triggered_at>?)
+                AND (cancelled_at IS NULL OR cancelled_at>?)) ORDER BY id""",
+            (parse_time(start), parse_time(end), parse_time(start), parse_time(end),
+             parse_time(start), parse_time(end), parse_time(end), parse_time(end), parse_time(end)))
+        value = [self.analysis_watermark(start, end, source), event_row["count"], event_row["max_id"], places, reminders]
+        return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+    def stored_daily_overview(self, date, timezone_name, source=None, watermark=None):
+        args = [date, timezone_name, source or ""]
+        where = "summary_date=? AND timezone=? AND source=?"
+        if watermark is not None:
+            where += " AND watermark=?"
+            args.append(watermark)
+        row = self.db.execute("SELECT summary FROM daily_summaries WHERE " + where, args).fetchone()
+        return json.loads(row["summary"]) if row else None
+
+    def save_daily_overview(self, value, watermark):
+        now = parse_time(None)
+        totals = value["totals"]
+        self.db.execute("""INSERT INTO daily_summaries
+            (summary_date,timezone,source,watermark,points,distance_km,trip_count,place_count,
+             reminder_count,summary,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(summary_date,timezone,source) DO UPDATE SET
+            watermark=excluded.watermark,points=excluded.points,distance_km=excluded.distance_km,
+            trip_count=excluded.trip_count,place_count=excluded.place_count,
+            reminder_count=excluded.reminder_count,summary=excluded.summary,updated_at=excluded.updated_at""",
+            (value["date"], value["timezone"], value.get("source") or "", watermark,
+             totals["raw_fixes"], totals["distance_km"], totals["trips"], totals["places"],
+             totals["reminders_triggered"], json.dumps(value, separators=(",", ":")), now, now))
+        self.db.commit()
+        return value
+
+    def daily_overviews(self, start=None, end=None, limit=90):
+        clauses, args = [], []
+        if start:
+            clauses.append("summary_date>=?"); args.append(str(start))
+        if end:
+            clauses.append("summary_date<=?"); args.append(str(end))
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        args.append(min(max(int(limit), 1), 1000))
+        return self._rows("""SELECT summary_date AS date,timezone,NULLIF(source,'') AS source,
+            points,distance_km,trip_count,place_count,reminder_count,created_at,updated_at
+            FROM daily_summaries""" + where + " ORDER BY summary_date DESC,source LIMIT ?", args)
 
     def ingest(self, payload, trigger_reminders=True, process_analysis=True):
         items = payload if isinstance(payload, list) else [payload]
@@ -564,11 +655,8 @@ class Store:
                 was_inside = recent_previous and metres(previous["lat"], previous["lon"], reminder["place_lat"], reminder["place_lon"]) <= reminder["radius_m"]
                 if not inside or was_inside:
                     continue
-                last = reminder["last_triggered_at"]
-                if last and (datetime.fromisoformat(timestamp) - datetime.fromisoformat(last)).total_seconds() < reminder["cooldown_minutes"] * 60:
-                    continue
                 event_id = self.db.execute("INSERT INTO events(reminder_id,point_id,triggered_at) VALUES (?,?,?) RETURNING id", (reminder["id"], point_id, timestamp)).fetchone()["id"]
-                self.db.execute("UPDATE reminders SET last_triggered_at=?,active=? WHERE id=?", (timestamp, int(bool(reminder["repeat"])), reminder["id"]))
+                self.db.execute("UPDATE reminders SET last_triggered_at=?,cancelled_at=NULL,active=0,repeat=0 WHERE id=?", (timestamp, reminder["id"]))
                 events.append({"id": event_id, "reminder_id": reminder["id"], "text": reminder["text"], "place": reminder["place_name"], "triggered_at": timestamp})
         if recorded and process_analysis:
             from .analysis import process_stays
@@ -702,7 +790,18 @@ class Store:
         return self._rows("SELECT id,name,lat,lon,radius_m,address FROM places WHERE id=?", (id_,))[0]
 
     def reminders(self):
-        return self._rows("""SELECT r.*, p.name AS place_name FROM reminders r JOIN places p ON p.id=r.place_id ORDER BY r.active DESC,r.id DESC""")
+        """Active one-shot reminders waiting for their next arrival."""
+        return self._rows("""SELECT r.*, p.name AS place_name FROM reminders r JOIN places p ON p.id=r.place_id
+            WHERE r.active=1 ORDER BY r.created_at DESC,r.id DESC""")
+
+    def reminder_history(self, limit=200):
+        return self._rows("""SELECT r.*,p.name AS place_name,e.id AS event_id,e.triggered_at,
+            e.acknowledged_at,e.webhook_status,
+            CASE WHEN r.last_triggered_at IS NULL THEN 'cancelled' ELSE 'triggered' END AS status
+            FROM reminders r JOIN places p ON p.id=r.place_id
+            LEFT JOIN events e ON e.id=(SELECT MAX(latest.id) FROM events latest WHERE latest.reminder_id=r.id)
+            WHERE r.active=0 ORDER BY COALESCE(r.last_triggered_at,r.cancelled_at,r.created_at) DESC,r.id DESC LIMIT ?""",
+            (min(max(int(limit), 1), 1000),))
 
     def create_reminder(self, raw):
         message = str(raw.get("text") or "").strip()
@@ -711,25 +810,51 @@ class Store:
         place_id = int(raw["place_id"])
         if not self.db.execute("SELECT 1 FROM places WHERE id=?", (place_id,)).fetchone():
             raise ValueError("place not found")
-        repeat = int(bool(raw.get("repeat", False)))
-        cooldown = int(raw.get("cooldown_minutes", 1440))
-        if not 1 <= cooldown <= 525600:
-            raise ValueError("cooldown_minutes must be 1–525600")
-        id_ = self.db.execute("INSERT INTO reminders(text,place_id,repeat,cooldown_minutes,created_at) VALUES (?,?,?,?,?) RETURNING id", (message, place_id, repeat, cooldown, parse_time(None))).fetchone()["id"]
+        id_ = self.db.execute("INSERT INTO reminders(text,place_id,repeat,cooldown_minutes,created_at) VALUES (?,?,0,1440,?) RETURNING id", (message, place_id, parse_time(None))).fetchone()["id"]
         self.db.commit()
         return self._rows("SELECT * FROM reminders WHERE id=?", (id_,))[0]
 
-    def set_reminder_active(self, id_, active):
-        result = self.db.execute("UPDATE reminders SET active=? WHERE id=?", (int(bool(active)), int(id_)))
+    def cancel_reminder(self, id_):
+        result = self.db.execute("UPDATE reminders SET active=0,cancelled_at=? WHERE id=? AND active=1", (parse_time(None), int(id_)))
         self.db.commit()
         if not result.rowcount:
-            raise ValueError("reminder not found")
+            raise ValueError("active reminder not found")
         return {"updated": result.rowcount}
 
     def events(self, since_id=0, limit=100):
         return self._rows("""SELECT e.*, r.text, p.name AS place_name FROM events e
             JOIN reminders r ON r.id=e.reminder_id JOIN places p ON p.id=r.place_id
             WHERE e.id>? ORDER BY e.id DESC LIMIT ?""", (int(since_id), min(int(limit), 500)))
+
+    def reminder_events(self, start, end, source=None):
+        clauses = ["e.triggered_at>=?", "e.triggered_at<=?"]
+        args = [parse_time(start), parse_time(end)]
+        if source:
+            clauses.append("pnt.source=?")
+            args.append(source)
+        return self._rows("""SELECT e.id,e.reminder_id,e.triggered_at,e.acknowledged_at,e.webhook_status,
+            r.text,p.name AS place_name FROM events e JOIN reminders r ON r.id=e.reminder_id
+            JOIN places p ON p.id=r.place_id JOIN points pnt ON pnt.id=e.point_id WHERE """
+            + " AND ".join(clauses) + " ORDER BY e.triggered_at", args)
+
+    def reminders_created(self, start, end):
+        return self._rows("""SELECT r.id,r.text,r.created_at,r.active,r.last_triggered_at,p.name AS place_name
+            FROM reminders r JOIN places p ON p.id=r.place_id
+            WHERE r.created_at>=? AND r.created_at<=? ORDER BY r.created_at""",
+            (parse_time(start), parse_time(end)))
+
+    def reminders_cancelled(self, start, end):
+        return self._rows("""SELECT r.id,r.text,r.cancelled_at,p.name AS place_name
+            FROM reminders r JOIN places p ON p.id=r.place_id
+            WHERE r.cancelled_at>=? AND r.cancelled_at<=? ORDER BY r.cancelled_at""",
+            (parse_time(start), parse_time(end)))
+
+    def reminders_active_at(self, timestamp):
+        at = parse_time(timestamp)
+        return self._rows("""SELECT r.id,r.text,r.created_at,p.name AS place_name
+            FROM reminders r JOIN places p ON p.id=r.place_id WHERE r.created_at<=?
+            AND (r.last_triggered_at IS NULL OR r.last_triggered_at>?)
+            AND (r.cancelled_at IS NULL OR r.cancelled_at>?) ORDER BY r.created_at""", (at, at, at))
 
     def acknowledge(self, id_):
         result = self.db.execute("UPDATE events SET acknowledged_at=? WHERE id=?", (parse_time(None), int(id_)))
@@ -880,7 +1005,7 @@ class Store:
 def reverse_cache_radius(result_type):
     """Only reuse precise addresses nearby; a city bounding box is not a safe boundary."""
     kind = str(result_type or "").lower()
-    if kind in ("building", "house", "amenity"):
+    if kind in ("building", "house", "amenity", "place"):
         return 15
     if kind == "street":
         return 30
@@ -930,6 +1055,33 @@ def geoapify_reverse_result(value, lat, lon):
             "distance_m": value.get("distance")}
 
 
+def geoapify_place_details_result(data, lat, lon):
+    """Extract a named place from a coordinate based Place Details response."""
+    for feature in data.get("features", []) if isinstance(data, dict) else []:
+        props = feature.get("properties") if isinstance(feature, dict) else None
+        if not isinstance(props, dict) or props.get("feature_type") not in (None, "details"):
+            continue
+        name = str(props.get("name") or "").strip()
+        datasource = props.get("datasource") if isinstance(props.get("datasource"), dict) else {}
+        raw = datasource.get("raw") if isinstance(datasource.get("raw"), dict) else {}
+        if not name:
+            name = str(raw.get("name") or "").strip()
+        if not name:
+            continue
+        address = str(props.get("formatted") or "").strip()
+        if not address:
+            address = ", ".join(str(props.get(key)).strip() for key in ("address_line1", "address_line2") if props.get(key))
+        categories = props.get("categories") if isinstance(props.get("categories"), list) else []
+        return {
+            "name": name, "place_name": name, "address": address,
+            "lat": lat, "lon": lon,
+            "result_type": "place", "category": categories[0] if categories else None,
+            "categories": categories, "provider_place_id": props.get("place_id"),
+            "source": "geoapify_place_details",
+        }
+    return None
+
+
 def geocode(store, query, lat=None, lon=None):
     query = query.strip()
     if not query or len(query) > 200:
@@ -975,7 +1127,10 @@ def reverse_geocode(store, lat, lon):
     photon = os.environ.get("GEOTRACKER_PHOTON_URL", "").rstrip("/")
     # Version the reverse cache because older rows stored the formatted address
     # as `name`, even when Geoapify supplied a named venue or amenity.
-    provider = "photon:v2:" + photon if photon else "geoapify:v2"
+    if photon:
+        provider = "photon:v2:" + photon
+    else:
+        provider = "geoapify:place-details-v1"
     # A lock coalesces simultaneous browser/MCP requests within this process.
     with _reverse_lock:
         cached = store.reverse_region(provider, lat, lon)
@@ -990,10 +1145,20 @@ def reverse_geocode(store, lat, lon):
             result = {**value, "name": value.get("place_name") or value.get("address") or "Unknown place",
                       "lat": lat, "lon": lon}
         else:
-            data = provider_request("/v1/geocode/reverse", {"lat": lat, "lon": lon, "format": "json"})
-            value = (data.get("results") or [{}])[0]
-            kind = value.get("result_type")
-            result = geoapify_reverse_result(value, lat, lon)
+            try:
+                place_data = provider_request("/v2/place-details", {
+                    "lat": lat, "lon": lon, "features": "details",
+                })
+                result = geoapify_place_details_result(place_data, lat, lon)
+            except (OSError, TypeError, KeyError, ValueError):
+                result = None
+            if result is not None:
+                kind = "place"
+            else:
+                data = provider_request("/v1/geocode/reverse", {"lat": lat, "lon": lon, "format": "json"})
+                value = (data.get("results") or [{}])[0]
+                kind = value.get("result_type")
+                result = {**geoapify_reverse_result(value, lat, lon), "source": "geoapify_reverse"}
         store.save_reverse_region(provider, lat, lon, reverse_cache_radius(kind), result)
         return {**result, "cache": "provider", "approximate": False}
 
@@ -1006,6 +1171,23 @@ def place_for_coordinate(store, lat, lon):
                 "address": str(value.get("address") or "")[:300]}
     except (ValueError, OSError, KeyError):
         return {"name": "", "address": ""}
+
+
+def current_location(store):
+    """Most recent fix enriched with a saved or reverse-geocoded place name."""
+    point = store.latest()
+    if not point:
+        return None
+    matches = [(metres(point["lat"], point["lon"], place["lat"], place["lon"]), place)
+               for place in store.places()]
+    matches = [(distance, place) for distance, place in matches if distance <= place["radius_m"]]
+    if matches:
+        place = min(matches, key=lambda item: item[0])[1]
+        point.update({"place_id": place["id"], "place_name": place["name"], "address": place["address"] or ""})
+    else:
+        found = place_for_coordinate(store, point["lat"], point["lon"])
+        point.update({"place_id": None, "place_name": found["name"], "address": found["address"]})
+    return point
 
 
 def address_for_coordinate(store, lat, lon):

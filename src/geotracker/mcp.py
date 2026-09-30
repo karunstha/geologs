@@ -2,8 +2,8 @@
 import json
 import sqlite3
 
-from .core import deliver_webhook, geocode, reverse_geocode
-from .analysis import day_summary, place_patterns, predict_next, stays, transitions, visited_places
+from .core import current_location, deliver_webhook, geocode, reverse_geocode
+from .analysis import daily_overview, day_summary, place_patterns, predict_next, stays, transitions, visited_places
 from .postgres import INTEGRITY_ERRORS
 
 DB_INPUT_ERRORS = (ValueError, KeyError, TypeError, sqlite3.IntegrityError) + INTEGRITY_ERRORS
@@ -18,7 +18,7 @@ NUMBER = {"type": "number"}
 STRING = {"type": "string"}
 INTEGER = {"type": "integer"}
 TOOLS = [
-    {"name": "get_current_location", "description": "Most recent GPS point with fix age, stale flag, speed and detected movement mode.", "inputSchema": schema({})},
+    {"name": "get_current_location", "description": "Most recent GPS point with saved or reverse-geocoded place name, copyable coordinates, fix age, stale flag, speed, and detected movement mode.", "inputSchema": schema({})},
     {"name": "get_location_history", "description": "GPS samples in a time window (ISO 8601 timestamps).", "inputSchema": schema({"start": STRING, "end": STRING, "source": STRING, "limit": INTEGER})},
     {"name": "get_raw_observations", "description": "Paginated received coordinate and accuracy versions with receipt time; exact retransmissions are coalesced.", "inputSchema": schema({"start": STRING, "end": STRING, "source": STRING, "limit": INTEGER, "offset": INTEGER})},
     {"name": "get_compact_timeline", "description": "Informational fixes: movement samples plus arrival and departure edges, with stationary repetition removed.", "inputSchema": schema({"start": STRING, "end": STRING, "source": STRING, "limit": INTEGER})},
@@ -30,27 +30,30 @@ TOOLS = [
     {"name": "get_place_visits", "description": "Observed visits to a saved place, split by exits or gaps over 30 minutes.", "inputSchema": schema({"place_id": INTEGER, "start": STRING, "end": STRING}, ["place_id"])},
     {"name": "get_stays", "description": "Observed stops of at least five minutes within 50 m, with optional saved place labels. Sparse GPS cannot prove time in gaps.", "inputSchema": schema({"start": STRING, "end": STRING, "source": STRING, "limit": INTEGER})},
     {"name": "get_frequent_places", "description": "Saved and suggested places ranked by observed stop time and visits; unlabeled clusters can be named with save_place.", "inputSchema": schema({"limit": INTEGER})},
-    {"name": "get_visited_places", "description": "Saved and unsaved observed places ranked by total sampled time, with cache-first address labels.", "inputSchema": schema({"limit": INTEGER})},
+    {"name": "get_visited_places", "description": "Saved and unsaved observed places except Home, ranked by total sampled time, with cache-first place labels.", "inputSchema": schema({"limit": INTEGER})},
     {"name": "get_unlabeled_frequent_places", "description": "Frequent observed stop clusters that do not yet match a saved place.", "inputSchema": schema({"limit": INTEGER})},
     {"name": "get_time_at_place", "description": "Observed visit count and sampled duration at a saved place; unobserved gaps are excluded.", "inputSchema": schema({"place_id": INTEGER, "start": STRING, "end": STRING}, ["place_id"])},
-    {"name": "get_day_summary", "description": "Daily fixes, movement runs, observed visited places, and coverage for a local calendar day.", "inputSchema": schema({"date": STRING, "timezone": STRING, "source": STRING}, ["date"])},
+    {"name": "get_day_summary", "description": "Detailed daily fixes, movement runs, observed visited places excluding Home, and coverage for a local calendar day.", "inputSchema": schema({"date": STRING, "timezone": STRING, "source": STRING}, ["date"])},
+    {"name": "get_daily_overview", "description": "Compact persisted overview for one local day: places including Home and time at each, trips, distances, fixes, activity counts, and reminder activity. Designed for efficient LLM retrieval.", "inputSchema": schema({"date": STRING, "timezone": STRING, "source": STRING}, ["date"])},
+    {"name": "list_daily_overviews", "description": "List persisted daily overview records and totals without loading every full summary.", "inputSchema": schema({"start": STRING, "end": STRING, "limit": INTEGER})},
     {"name": "get_place_transitions", "description": "Observed transitions between stop clusters, counted by source and grouped across visits.", "inputSchema": schema({"limit": INTEGER})},
     {"name": "predict_next_destination", "description": "Evidence-based next place estimate from at least three observed departures; may return no prediction.", "inputSchema": schema({})},
     {"name": "list_places", "description": "Saved named places and geofence radii. Use this first to resolve a place_id for a location reminder.", "inputSchema": schema({})},
     {"name": "save_place", "description": "Create or edit a named place and arrival geofence.", "inputSchema": schema({"id": INTEGER, "name": STRING, "lat": NUMBER, "lon": NUMBER, "radius_m": NUMBER, "address": STRING}, ["name", "lat", "lon"])},
-    {"name": "list_reminders", "description": "Location-triggered reminders with active state.", "inputSchema": schema({})},
-    {"name": "create_reminder", "description": "Create a location-based reminder for the next arrival at a saved place; resolve place_id with list_places, or geocode_address and save_place first. One-shot by default; repeat supports a cooldown. Do not replace an arrival request with a time-based reminder.", "inputSchema": schema({"text": STRING, "place_id": INTEGER, "repeat": {"type": "boolean"}, "cooldown_minutes": INTEGER}, ["text", "place_id"])},
-    {"name": "set_reminder_active", "description": "Enable or disable a location reminder.", "inputSchema": schema({"id": INTEGER, "active": {"type": "boolean"}}, ["id", "active"])},
+    {"name": "list_reminders", "description": "Active one-shot location reminders waiting for arrival.", "inputSchema": schema({})},
+    {"name": "list_reminder_history", "description": "Past triggered or cancelled location reminders.", "inputSchema": schema({"limit": INTEGER})},
+    {"name": "create_reminder", "description": "Create a one-shot location reminder for the next arrival at a saved place; resolve place_id with list_places, or geocode_address and save_place first.", "inputSchema": schema({"text": STRING, "place_id": INTEGER}, ["text", "place_id"])},
+    {"name": "cancel_reminder", "description": "Cancel an active location reminder. Cancelled reminders remain in history and cannot be re-enabled.", "inputSchema": schema({"id": INTEGER}, ["id"])},
     {"name": "list_reminder_events", "description": "Triggered reminder inbox for delivery/notification workflows.", "inputSchema": schema({"since_id": INTEGER, "limit": INTEGER})},
     {"name": "ingest_location", "description": "Store one location from any source and evaluate arrival reminders. Location sources may also use POST /api/points.", "inputSchema": schema({"lat": NUMBER, "lon": NUMBER, "timestamp": STRING, "source": STRING, "external_id": STRING, "accuracy_m": NUMBER, "speed_mps": NUMBER}, ["lat", "lon"])},
     {"name": "geocode_address", "description": "Search for a place or address near the latest recorded fix with the configured Geoapify or Photon provider; results are cached by area.", "inputSchema": schema({"query": STRING, "lat": NUMBER, "lon": NUMBER}, ["query"])},
-    {"name": "reverse_geocode", "description": "Look up a named place for coordinates with the configured Geoapify or Photon provider, falling back to the formatted address; results are cached.", "inputSchema": schema({"lat": NUMBER, "lon": NUMBER}, ["lat", "lon"])},
+    {"name": "reverse_geocode", "description": "Look up Geoapify place details at coordinates, falling back to reverse geocoding for an address; Photon installations use Photon reverse geocoding. Results are spatially cached.", "inputSchema": schema({"lat": NUMBER, "lon": NUMBER}, ["lat", "lon"])},
 ]
 
 
 def call_tool(store, name, args):
     if name == "get_current_location":
-        return store.latest()
+        return current_location(store)
     if name == "get_location_history":
         return store.points(args.get("start"), args.get("end"), args.get("source"), args.get("limit", 5000))
     if name == "get_raw_observations":
@@ -80,7 +83,11 @@ def call_tool(store, name, args):
     if name == "get_time_at_place":
         return store.place_visits(args["place_id"], args.get("start"), args.get("end"))
     if name == "get_day_summary":
-        return day_summary(store, args["date"], args.get("timezone", "UTC"), args.get("source"))
+        return day_summary(store, args["date"], args.get("timezone") or store.settings()["timezone"], args.get("source"))
+    if name == "get_daily_overview":
+        return daily_overview(store, args["date"], args.get("timezone"), args.get("source"))
+    if name == "list_daily_overviews":
+        return store.daily_overviews(args.get("start"), args.get("end"), args.get("limit", 90))
     if name == "get_place_transitions":
         return transitions(store, args.get("limit", 50))
     if name == "predict_next_destination":
@@ -91,10 +98,12 @@ def call_tool(store, name, args):
         return store.save_place(args)
     if name == "list_reminders":
         return store.reminders()
+    if name == "list_reminder_history":
+        return store.reminder_history(args.get("limit", 200))
     if name == "create_reminder":
         return store.create_reminder(args)
-    if name == "set_reminder_active":
-        return store.set_reminder_active(args["id"], args["active"])
+    if name == "cancel_reminder":
+        return store.cancel_reminder(args["id"])
     if name == "list_reminder_events":
         return store.events(args.get("since_id", 0), args.get("limit", 100))
     if name == "ingest_location":

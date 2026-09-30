@@ -1,5 +1,5 @@
 const $ = id => document.getElementById(id);
-const state = {points:[],timeline:[],places:[],visitedPlaces:[],reminders:[],events:[],day:null,lastEventId:0,insights:null,settings:null,followToday:true,focusPlace:null,coverage:null,current:null,sampleView:'timeline',rawPage:0,rawPageSize:50,rawTotal:0};
+const state = {points:[],timeline:[],places:[],visitedPlaces:[],reminders:[],reminderHistory:[],events:[],dailySummaries:[],day:null,lastEventId:0,insights:null,settings:null,followToday:true,focusPlace:null,coverage:null,current:null,sampleView:'timeline',rawPage:0,rawPageSize:50,rawTotal:0};
 let map, pathLayer, placeLayer, currentMarker, searchLayer;
 let authDismissed=false;
 let exploreRequest=0;
@@ -10,7 +10,12 @@ function formatTime(value){return value?new Date(value).toLocaleString(): '—'}
 function modeName(mode){return mode==='running_cycling'?'Running / cycling':mode?mode[0].toUpperCase()+mode.slice(1):'Unknown'}
 function roleName(role){return ({arrival:'Arrival',departure:'Departure',latest:'Latest at stop',movement:'Movement'})[role]||'Raw sample'}
 function kmh(point){return point?.speed_mps==null?'—':`${(point.speed_mps*3.6).toFixed(1)} km/h`}
-function localDateKey(date=new Date()){return [date.getFullYear(),String(date.getMonth()+1).padStart(2,'0'),String(date.getDate()).padStart(2,'0')].join('-')}
+function localDateKey(date=new Date()){
+  const timezone=state.settings?.timezone;
+  if(timezone){try{const parts=Object.fromEntries(new Intl.DateTimeFormat('en-US',{timeZone:timezone,year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(date).map(part=>[part.type,part.value]));return `${parts.year}-${parts.month}-${parts.day}`}catch(_error){}}
+  return [date.getFullYear(),String(date.getMonth()+1).padStart(2,'0'),String(date.getDate()).padStart(2,'0')].join('-');
+}
+function shiftDateKey(value,offset){const [year,month,day]=value.split('-').map(Number);const date=new Date(Date.UTC(year,month-1,day+offset));return [date.getUTCFullYear(),String(date.getUTCMonth()+1).padStart(2,'0'),String(date.getUTCDate()).padStart(2,'0')].join('-')}
 function params(){const [year,month,day]=$('day-date').value.split('-').map(Number);const start=new Date(year,month-1,day);const end=new Date(year,month-1,day+1);const q=new URLSearchParams({start:start.toISOString(),end:new Date(end.getTime()-1).toISOString()});if($('source').value)q.set('source',$('source').value);return q}
 function openAuth(message=''){if(authDismissed)return;$('auth-error').textContent=message;$('auth-panel').hidden=false;$('auth-token').focus()}
 async function api(path,options={}){
@@ -130,6 +135,15 @@ function renderExplore(day,coverage){
   drawMap();
   if(map)setTimeout(()=>{map.invalidateSize();drawMap()},20);
 }
+function renderCurrent(){
+  const point=state.current;
+  $('current-location').hidden=!point;
+  if(!point)return;
+  $('current-place').textContent=point.place_name||point.address||'Unknown place';
+  const age=point.age_seconds<60?'just now':point.age_seconds<3600?`${Math.floor(point.age_seconds/60)} min ago`:`${Math.floor(point.age_seconds/3600)} hr ago`;
+  $('current-updated').textContent=`Updated ${formatTime(point.timestamp)} · ${age}${point.stale?' · stale':''}`;
+  $('current-coordinates').textContent=`${Number(point.lat).toFixed(6)}, ${Number(point.lon).toFixed(6)}`;
+}
 function fillPlaceSelectors(){const select=$('reminder-place'),value=select.value;select.innerHTML='<option value="">Select a place</option>'+state.places.map(p=>`<option value="${p.id}">${safe(p.name)}</option>`).join('');select.value=value}
 function openPlaceDialog(place={}){
   $('place-form').reset();$('search-results').innerHTML='';$('search').value='';$('place-id').value=place.id||'';$('place-name').value=place.name||'';$('place-lat').value=place.lat??'';$('place-lon').value=place.lon??'';$('place-radius').value=place.radius_m||150;$('place-address').value=place.address||'';$('place-dialog-title').textContent=place.id?'Edit place':'Add place';$('place-dialog').showModal();
@@ -147,12 +161,19 @@ function renderPlaces(){
   $('all-visited-places').querySelectorAll('[data-save-visited]').forEach(button=>button.onclick=()=>{const place=state.visitedPlaces[+button.dataset.saveVisited];openPlaceDialog({name:place.name||place.display_name||'',lat:place.lat,lon:place.lon,radius_m:75,address:place.address||''})});
   $('all-visited-places').querySelectorAll('[data-edit-visited]').forEach(button=>button.onclick=()=>{const visited=state.visitedPlaces[+button.dataset.editVisited];openPlaceDialog(state.places.find(place=>place.id===visited.place_id))});
 }
-function renderReminders(){$('arrival-inbox').hidden=!state.events.length;$('reminders-list').innerHTML=state.reminders.map(r=>`<div class="list-item"><div><strong>${safe(r.text)}</strong><small>At ${safe(r.place_name)} · ${r.repeat?'Repeats':'Once'} · ${r.active?'Active':'Inactive'}</small></div><button data-reminder="${r.id}" data-active="${r.active}">${r.active?'Pause':'Enable'}</button></div>`).join('')||'<div class="empty">No reminders yet. Save a place, then create one here.</div>';$('reminders-list').querySelectorAll('[data-reminder]').forEach(b=>b.onclick=async()=>{try{await post('/api/reminders/active',{id:+b.dataset.reminder,active:b.dataset.active==='0'});await refreshMeta()}catch(e){toast(e.message)}});const unread=state.events.filter(e=>!e.acknowledged_at);$('event-count').hidden=!unread.length;$('event-count').textContent=unread.length;$('events-list').innerHTML=state.events.map(e=>`<div class="list-item ${e.acknowledged_at?'':'unread'}"><div><strong>${safe(e.text)}</strong><small>${safe(e.place_name)} · ${safe(formatTime(e.triggered_at))}</small></div>${e.acknowledged_at?'':`<button data-ack="${e.id}">Done</button>`}</div>`).join('')||'<div class="empty">Arrival events will appear here.</div>';$('events-list').querySelectorAll('[data-ack]').forEach(b=>b.onclick=async()=>{try{await post('/api/events/ack',{id:+b.dataset.ack});await refreshMeta()}catch(e){toast(e.message)}})}
+function renderReminders(){
+  $('reminders-list').innerHTML=state.reminders.map(r=>`<div class="list-item"><div><strong>${safe(r.text)}</strong><small>At ${safe(r.place_name)} · Created ${safe(formatTime(r.created_at))}</small></div><button data-cancel-reminder="${r.id}">Cancel</button></div>`).join('')||'<div class="empty">No active reminders.</div>';
+  $('reminders-list').querySelectorAll('[data-cancel-reminder]').forEach(button=>button.onclick=async()=>{try{await post('/api/reminders/cancel',{id:+button.dataset.cancelReminder});await refreshMeta();toast('Reminder cancelled')}catch(error){toast(error.message)}});
+  const unread=state.events.filter(event=>!event.acknowledged_at);
+  $('event-count').hidden=!unread.length;$('event-count').textContent=unread.length;
+  $('reminder-history').innerHTML=state.reminderHistory.map(item=>`<div class="list-item ${item.event_id&&!item.acknowledged_at?'unread':''}"><div><strong>${safe(item.text)}</strong><small>${safe(item.place_name)} · ${item.status==='triggered'?'Triggered '+safe(formatTime(item.triggered_at)):'Cancelled '+safe(formatTime(item.cancelled_at||item.created_at))}</small></div>${item.event_id&&!item.acknowledged_at?`<button data-ack="${item.event_id}">Done</button>`:''}</div>`).join('')||'<div class="empty">Triggered and cancelled reminders will appear here.</div>';
+  $('reminder-history').querySelectorAll('[data-ack]').forEach(button=>button.onclick=async()=>{try{await post('/api/events/ack',{id:+button.dataset.ack});await refreshMeta()}catch(error){toast(error.message)}});
+}
 function renderStays(rows){$('stays').innerHTML=rows.slice(0,10).map(s=>`<div class="list-item"><div><strong>${safe(s.display_name||s.place_name||`${s.lat.toFixed(5)}, ${s.lon.toFixed(5)}`)} · ${s.observed_minutes.toFixed(0)} min</strong><small>${safe(formatTime(s.started_at))} · ${s.point_count} samples${s.ongoing?' · ongoing':''}</small></div><button data-stay="${s.id}">Map</button></div>`).join('')||'<div class="empty">No confirmed stays on this date. A stay needs nearby accurate samples spanning five minutes, with no gap over 30 minutes.</div>';$('stays').querySelectorAll('[data-stay]').forEach(button=>button.onclick=()=>{const s=rows.find(row=>row.id===+button.dataset.stay);focusPlaceOnMap({...s,display_name:s.display_name||s.place_name||'Observed stay'})})}
 function renderInsights(){const data=state.insights;if(!data)return;const prediction=data.prediction;$('prediction').textContent=prediction.prediction?`Likely next from ${prediction.from}: ${prediction.prediction} (${Math.round(prediction.frequency*100)}% of ${prediction.observations} observed departures).${prediction.current_fix_stale?' Latest location is stale; verify before acting.':''}`:`Next place: insufficient evidence (${prediction.reason}).`;$('pattern-places').innerHTML=data.frequent_places.slice(0,8).map((place,index)=>`<div class="list-item"><div><strong>${safe(place.display_name)}</strong><small>${place.visits} visit${place.visits===1?'':'s'} · ${place.observed_minutes.toFixed(0)} min observed</small></div><button data-pattern-place="${index}">Map</button></div>`).join('')||'<div class="empty">Common places appear after confirmed stays.</div>';$('pattern-places').querySelectorAll('[data-pattern-place]').forEach(button=>button.onclick=()=>focusPlaceOnMap(data.frequent_places[+button.dataset.patternPlace]));$('transitions').innerHTML=data.transitions.slice(0,8).map((t,index)=>`<div class="list-item"><div><strong>${safe(t.from_name)} → ${safe(t.to_name)}</strong><small>${t.count} observed transition${t.count===1?'':'s'}</small></div><button data-transition="${index}">Map arrival</button></div>`).join('')||'<div class="empty">Transitions appear after visits to two or more places.</div>';$('transitions').querySelectorAll('[data-transition]').forEach(button=>button.onclick=()=>{const transition=data.transitions[+button.dataset.transition];focusPlaceOnMap({lat:transition.to_lat,lon:transition.to_lon,display_name:transition.to_name})})}
 async function refreshCoverage(){const data=await api('/api/coverage');$('coverage').innerHTML=data.sources.map(s=>`<div class="list-item"><div><strong>${safe(s.source)} · ${s.points.toLocaleString()} fixes</strong><small>${safe(formatTime(s.first))} → ${safe(formatTime(s.last))}</small></div></div>`).join('')+(data.gaps_over_24h.length?`<p class="muted">${data.gaps_over_24h.length} gaps over 24 hours. Missing coverage cannot establish where you were.</p>`:'')||'<div class="empty">No source data yet.</div>'}
 async function refreshInsights(){state.insights=await api('/api/insights?limit=50');renderInsights()}
-async function refreshMeta(){[state.places,state.visitedPlaces,state.reminders,state.events]=await Promise.all([api('/api/places'),api('/api/visited-places?limit=100'),api('/api/reminders'),api('/api/events')]);renderPlaces();renderReminders();drawMap()}
+async function refreshMeta(){[state.places,state.visitedPlaces,state.reminders,state.reminderHistory,state.events]=await Promise.all([api('/api/places'),api('/api/visited-places?limit=100'),api('/api/reminders'),api('/api/reminder-history?limit=200'),api('/api/events')]);renderPlaces();renderReminders();drawMap()}
 async function refreshRawPage(){
   const query=params();
   query.set('limit',state.rawPageSize);
@@ -165,7 +186,7 @@ async function refreshExplore(resetRawPage=true){
   if(resetRawPage)state.rawPage=0;
   const date=$('day-date').value;
   const source=$('source').value;
-  const timezone=Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC';
+  const timezone=state.settings?.timezone||Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC';
   const dayQuery=new URLSearchParams({date,timezone});
   if(source)dayQuery.set('source',source);
   const query=params();
@@ -187,9 +208,11 @@ async function refreshExplore(resetRawPage=true){
   renderExplore(day,coverage);
   renderStays(day.stays);
 }
-function renderSettings(){if(!state.settings)return;$('speed-strategy').value=state.settings.speed_strategy;$('speed-offset').value=state.settings.reported_speed_offset_kmh;updateSpeedSettingsVisibility()}
+function renderDailySummaries(){$('daily-summaries').innerHTML=state.dailySummaries.slice(0,10).map(item=>`<div class="list-item"><div><strong>${safe(item.date)}</strong><small>${item.trip_count} trips · ${Number(item.distance_km).toFixed(1)} km · ${item.place_count} places · ${item.reminder_count} reminders</small></div></div>`).join('')||'<div class="empty">A summary will be saved after the first completed day.</div>'}
+function renderSettings(){if(!state.settings)return;$('summary-timezone').value=state.settings.timezone;$('speed-strategy').value=state.settings.speed_strategy;$('speed-offset').value=state.settings.reported_speed_offset_kmh;updateSpeedSettingsVisibility();renderDailySummaries()}
 function updateSpeedSettingsVisibility(){const reported=$('speed-strategy').value==='reported';$('speed-offset').disabled=!reported;$('speed-offset-field').classList.toggle('disabled-field',!reported)}
-async function refreshAll(){try{const [status,current,settings]=await Promise.all([api('/api/status'),api('/api/current'),api('/api/settings')]);state.current=current;state.settings=settings;renderSettings();$('connection').textContent='Connected';$('geocode-hint').textContent=status.geocoding?(current?'Results favor your last recorded location.':'Searches are worldwide until a location is recorded.'):'Address search needs a geocoding provider.';await refreshMeta();await Promise.all([refreshExplore(),refreshInsights(),refreshCoverage()])}catch(e){toast(e.message)}}
+async function refreshCurrent(){state.current=await api('/api/current');renderCurrent()}
+async function refreshAll(){try{const [status,current,settings,dailySummaries]=await Promise.all([api('/api/status'),api('/api/current'),api('/api/settings'),api('/api/daily-summaries?limit=10')]);state.current=current;state.settings=settings;state.dailySummaries=dailySummaries;if(state.followToday)$('day-date').value=localDateKey();renderCurrent();renderSettings();$('connection').textContent='Connected';$('geocode-hint').textContent=status.geocoding?(current?'Results favor your last recorded location.':'Searches are worldwide until a location is recorded.'):'Place search needs a geocoding provider.';await refreshMeta();await Promise.all([refreshExplore(),refreshInsights(),refreshCoverage()])}catch(e){toast(e.message)}}
 async function pollEvents(){try{const events=await api('/api/events?since_id='+state.lastEventId);const newest=events.reduce((max,e)=>Math.max(max,e.id),state.lastEventId);if(state.lastEventId&&events.length){for(const event of events.reverse()){toast(`${event.text} · ${event.place_name}`);if(Notification.permission==='granted')new Notification('Location reminder',{body:`${event.text} · ${event.place_name}`})}}state.lastEventId=newest;if(events.length)await refreshMeta()}catch(e){/* Connection errors are surfaced on explicit actions. */}}
 $('auth-cancel').onclick=()=>{authDismissed=true;$('auth-panel').hidden=true;$('auth-token').value=''};
 $('auth-form').onsubmit=async event=>{event.preventDefault();const token=$('auth-token').value.trim();try{const response=await fetch('/api/session',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({token})});const result=await response.json();if(!response.ok)throw Error(result.error||'Access token rejected');sessionStorage.removeItem('geotracker-token');$('auth-token').value='';$('auth-panel').hidden=true;authDismissed=false;await refreshAll()}catch(error){$('auth-error').textContent=error.message}};
@@ -200,8 +223,7 @@ $('raw-next').onclick=async()=>{if((state.rawPage+1)*state.rawPageSize<state.raw
 document.querySelectorAll('[data-places-tab]').forEach(button=>button.onclick=()=>{const tab=button.dataset.placesTab;document.querySelectorAll('[data-places-tab]').forEach(item=>{const active=item===button;item.classList.toggle('active',active);item.setAttribute('aria-selected',String(active))});document.querySelectorAll('[data-places-panel]').forEach(panel=>panel.classList.toggle('active',panel.dataset.placesPanel===tab))});
 function moveDay(offset){
   state.focusPlace=null;
-  const [year,month,day]=$('day-date').value.split('-').map(Number);
-  $('day-date').value=localDateKey(new Date(year,month-1,day+offset,12));
+  $('day-date').value=shiftDateKey($('day-date').value,offset);
   state.followToday=$('day-date').value===localDateKey();
   refreshExplore().catch(error=>toast(error.message));
 }
@@ -213,6 +235,7 @@ $('next-day').onclick=()=>moveDay(1);
 $('today').onclick=()=>{state.focusPlace=null;$('day-date').value=localDateKey();state.followToday=true;refreshExplore().catch(error=>toast(error.message))};
 $('source').onchange=()=>{state.focusPlace=null;refreshExplore().catch(error=>toast(error.message))};
 $('locate').onclick=()=>{const point=state.day?.last_location;if(point&&map)map.setView([point.lat,point.lon],15)};
+$('current-coordinates').onclick=async()=>{if(!state.current)return;const value=`${state.current.lat}, ${state.current.lon}`;try{await navigator.clipboard.writeText(value);toast('Coordinates copied')}catch(_error){toast(value)}};
 $('export').onclick=async()=>{try{const q=params().toString();const data=await api('/api/export.geojson'+(q?'?'+q:''));const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/geo+json'});const link=document.createElement('a');link.href=URL.createObjectURL(blob);link.download='geotracker-export.geojson';link.click();setTimeout(()=>URL.revokeObjectURL(link.href),1000)}catch(e){toast(e.message)}};
 $('search-form').onsubmit=async e=>{e.preventDefault();try{const q=new URLSearchParams({q:$('search').value});state.current=await api('/api/current');if(state.current){q.set('lat',state.current.lat);q.set('lon',state.current.lon)}const results=await api('/api/geocode?'+q);$('search-results').innerHTML=results.map((p,i)=>`<div class="result-item"><div><strong>${safe(p.name)}</strong><span>${safe(p.address||'')} · ${Number(p.lat).toFixed(5)}, ${Number(p.lon).toFixed(5)}</span></div><button data-search="${i}">Use</button></div>`).join('')||'<p class="empty">No matches.</p>';$('search-results').querySelectorAll('[data-search]').forEach(b=>b.onclick=()=>{const p=results[+b.dataset.search];$('place-id').value='';$('place-name').value=p.name.slice(0,120);$('place-lat').value=p.lat;$('place-lon').value=p.lon;$('place-address').value=p.address||''});if(map&&results[0]){searchLayer.clearLayers();L.marker([results[0].lat,results[0].lon]).addTo(searchLayer);map.setView([results[0].lat,results[0].lon],13)}}catch(err){toast(err.message)}};
 $('place-form').onsubmit=async e=>{e.preventDefault();try{await post('/api/places',{...($('place-id').value?{id:+$('place-id').value}:{}),name:$('place-name').value,lat:+$('place-lat').value,lon:+$('place-lon').value,radius_m:+$('place-radius').value,address:$('place-address').value});$('place-dialog').close();await refreshMeta();await Promise.all([refreshExplore(),refreshInsights()]);toast('Place saved')}catch(err){toast(err.message)}};
@@ -221,8 +244,8 @@ $('add-place').onclick=()=>openPlaceDialog();
 $('close-place-dialog').onclick=$('cancel-place').onclick=()=>$('place-dialog').close();
 $('place-dialog').addEventListener('click',event=>{if(event.target===$('place-dialog'))$('place-dialog').close()});
 $('speed-strategy').onchange=updateSpeedSettingsVisibility;
-$('settings-form').onsubmit=async event=>{event.preventDefault();try{state.settings=await post('/api/settings',{speed_strategy:$('speed-strategy').value,reported_speed_offset_kmh:+$('speed-offset').value});renderSettings();toast('Settings saved')}catch(error){toast(error.message)}};
+$('settings-form').onsubmit=async event=>{event.preventDefault();try{state.settings=await post('/api/settings',{timezone:$('summary-timezone').value.trim(),speed_strategy:$('speed-strategy').value,reported_speed_offset_kmh:+$('speed-offset').value});if(state.followToday)$('day-date').value=localDateKey();renderSettings();await refreshExplore();toast('Settings saved')}catch(error){toast(error.message)}};
 $('day-date').value=localDateKey();
-$('reminder-repeat').onchange=()=>{$('reminder-cooldown-field').hidden=!$('reminder-repeat').checked};$('reminder-form').onsubmit=async e=>{e.preventDefault();try{await post('/api/reminders',{text:$('reminder-text').value,place_id:+$('reminder-place').value,repeat:$('reminder-repeat').checked,cooldown_minutes:+$('reminder-cooldown').value});$('reminder-form').reset();$('reminder-cooldown').value=1440;$('reminder-cooldown-field').hidden=true;await refreshMeta();toast('Reminder created')}catch(err){toast(err.message)}};
+$('reminder-form').onsubmit=async e=>{e.preventDefault();try{await post('/api/reminders',{text:$('reminder-text').value,place_id:+$('reminder-place').value});$('reminder-form').reset();await refreshMeta();toast('Reminder created')}catch(err){toast(err.message)}};
 $('notifications').onclick=async()=>{if(!('Notification' in window)){toast('Browser notifications are unavailable');return}const permission=await Notification.requestPermission();toast(permission==='granted'?'Browser alerts enabled':'Browser alerts were not enabled')};
-initMap();refreshAll().then(()=>{state.lastEventId=state.events.reduce((max,e)=>Math.max(max,e.id),0)});setInterval(pollEvents,10000);setInterval(()=>{if(state.followToday&&$('day-date').value!==localDateKey())$('day-date').value=localDateKey();refreshExplore(false).catch(()=>{})},60000);setInterval(()=>refreshInsights().catch(()=>{}),300000);
+initMap();refreshAll().then(()=>{state.lastEventId=state.events.reduce((max,e)=>Math.max(max,e.id),0)});setInterval(pollEvents,10000);setInterval(()=>{if(state.followToday&&$('day-date').value!==localDateKey())$('day-date').value=localDateKey();refreshCurrent().catch(()=>{});refreshExplore(false).catch(()=>{})},60000);setInterval(()=>refreshInsights().catch(()=>{}),300000);

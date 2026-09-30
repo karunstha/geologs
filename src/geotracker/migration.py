@@ -11,7 +11,7 @@ TABLES = {
     "points": "id source external_id timestamp lat lon accuracy_m speed_mps speed_origin mode",
     "point_observations": "id point_id legacy_point_id source timestamp lat lon accuracy_m speed_mps speed_origin received_at fingerprint",
     "places": "id name lat lon radius_m address",
-    "reminders": "id text place_id active repeat cooldown_minutes created_at last_triggered_at",
+    "reminders": "id text place_id active repeat cooldown_minutes created_at last_triggered_at cancelled_at",
     "events": "id reminder_id point_id triggered_at acknowledged_at webhook_status",
     "source_state": "source point_id",
     "observed_stays": "id source start_point_id end_point_id started_at ended_at lat lon point_count ongoing",
@@ -20,10 +20,11 @@ TABLES = {
     "stay_observation_state": "source last_observation_id last_timestamp candidate",
     "app_settings": "key value",
     "analysis_cache": "cache_key watermark value created_at",
+    "daily_summaries": "id summary_date timezone source watermark points distance_km trip_count place_count reminder_count summary created_at updated_at",
     "geocode_cache": "cache_key provider value created_at",
     "reverse_regions": "id provider center_lat center_lon radius_m value created_at expires_at",
 }
-IDENTITY_TABLES = ("points", "point_observations", "places", "reminders", "events", "observed_stays", "observed_stays_v2", "reverse_regions")
+IDENTITY_TABLES = ("points", "point_observations", "places", "reminders", "events", "observed_stays", "observed_stays_v2", "daily_summaries", "reverse_regions")
 
 
 def migrate_sqlite(sqlite_path, postgres_url):
@@ -42,7 +43,7 @@ def migrate_sqlite(sqlite_path, postgres_url):
             if target.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone():
                 raise ValueError("PostGIS target must be empty before migration")
         for table, names in TABLES.items():
-            if table in ("point_observations", "observed_stays_v2", "stay_observation_state", "app_settings", "analysis_cache") and table not in source_tables:
+            if table in ("point_observations", "observed_stays_v2", "stay_observation_state", "app_settings", "analysis_cache", "daily_summaries") and table not in source_tables:
                 continue
             columns = names.split()
             source_columns = {row[1] for row in source.execute(f"PRAGMA table_info({table})")}
@@ -55,6 +56,9 @@ def migrate_sqlite(sqlite_path, postgres_url):
                     cursor.executemany(statement, [tuple(row) for row in batch])
                     count += len(batch)
             counts[table] = count
+        target.execute("UPDATE reminders SET active=0 WHERE repeat=1 AND last_triggered_at IS NOT NULL")
+        target.execute("UPDATE reminders SET repeat=0")
+        target.execute("UPDATE reminders SET cancelled_at=created_at WHERE active=0 AND last_triggered_at IS NULL AND cancelled_at IS NULL")
         if "point_observations" not in source_tables:
             target.execute("""INSERT INTO point_observations
                 (point_id,legacy_point_id,source,timestamp,lat,lon,accuracy_m,speed_mps,speed_origin,received_at)

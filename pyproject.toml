@@ -3,6 +3,7 @@ name = "geotracker"
 version = "0.1.0"
 description = "Source-independent personal location memory, reminders, and MCP tools"
 requires-python = ">=3.11"
+dependencies = ["tzdata>=2025.1"]
 
 [project.optional-dependencies]
 postgres = ["psycopg[binary]>=3.2,<4"]

@@ -1,6 +1,11 @@
 services:
   db:
-    image: postgis/postgis:17-3.5
+    build:
+        context: .
+        dockerfile: db.Dockerfile
+        platform: linux/amd64
+    container_name: geotracker-db
+    image: geotracker-db
     platform: linux/amd64
     environment:
       POSTGRES_DB: geotracker
@@ -14,6 +19,8 @@ services:
       timeout: 3s
       retries: 20
     restart: unless-stopped
+    ports:
+      - "0.0.0.0:15432:5432"
 
   app:
     build: .
@@ -25,6 +32,7 @@ services:
       PGPASSWORD: ${POSTGRES_PASSWORD}
       GEOTRACKER_TOKEN: ${GEOTRACKER_TOKEN:?Set GEOTRACKER_TOKEN in .env}
       GEOTRACKER_TOKEN_FILE: /config/.env
+      GEOTRACKER_TIMEZONE: ${GEOTRACKER_TIMEZONE:-UTC}
       GEOAPIFY_API_KEY: ${GEOAPIFY_API_KEY:-}
       GEOTRACKER_PHOTON_URL: ${GEOTRACKER_PHOTON_URL:-}
       GEOTRACKER_WEBHOOK_URL: ${GEOTRACKER_WEBHOOK_URL:-}

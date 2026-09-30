@@ -29,6 +29,11 @@
         <label id="source-filter">Source<select id="source"><option value="">All sources</option></select></label>
       </div>
 
+      <section id="current-location" class="current-location" hidden>
+        <div><span>Current location</span><strong id="current-place">Unknown place</strong><small id="current-updated"></small></div>
+        <button id="current-coordinates" class="coordinate-copy" type="button" title="Copy coordinates"></button>
+      </section>
+
       <div id="summary" class="metrics" hidden>
         <div><span>Driving trips</span><strong id="stat-driving">0</strong></div>
         <div><span>Walking trips</span><strong id="stat-walking">0</strong></div>
@@ -80,15 +85,15 @@
 
     <section id="reminders-view" class="view">
       <div class="page-head"><h1>Reminders</h1><button id="notifications" class="outline-button">Enable browser alerts</button></div>
-      <div class="reminders-layout"><section class="surface"><h2>New reminder</h2><form id="reminder-form" class="form-stack"><label>Remind me to<input id="reminder-text" required maxlength="500" placeholder="Pick up salt"></label><label>When I arrive at<select id="reminder-place" required></select></label><label class="check"><input id="reminder-repeat" type="checkbox"> Repeat on future visits</label><label id="reminder-cooldown-field" hidden>Repeat cooldown (minutes)<input id="reminder-cooldown" type="number" min="1" max="525600" value="1440"></label><button class="primary-button align-start">Create reminder</button></form></section><section class="surface"><h2>Active and past reminders</h2><div id="reminders-list" class="list"></div></section></div>
-      <section id="arrival-inbox" class="surface arrival-inbox" hidden><h2>Arrival events</h2><div id="events-list" class="list"></div></section>
+      <div class="reminders-layout"><section class="surface"><h2>New reminder</h2><form id="reminder-form" class="form-stack"><label>Remind me to<input id="reminder-text" required maxlength="500" placeholder="Pick up salt"></label><label>When I arrive at<select id="reminder-place" required></select></label><p class="section-note">The reminder is completed after it triggers once.</p><button class="primary-button align-start">Create reminder</button></form></section><section class="surface"><h2>Active reminders</h2><div id="reminders-list" class="list"></div></section></div>
+      <section class="surface arrival-inbox"><h2>Reminder history</h2><div id="reminder-history" class="list"></div></section>
     </section>
 
     <section id="settings-view" class="view">
       <div class="page-head"><h1>Settings</h1></div>
       <div class="settings-layout">
-        <section class="surface"><h2>Speed</h2><form id="settings-form" class="form-stack"><label>Speed source<select id="speed-strategy"><option value="reported">Use source speed, calculate when missing</option><option value="calculated">Always calculate from coordinates</option></select></label><label id="speed-offset-field">Source speed adjustment (km/h)<input id="speed-offset" type="number" min="-100" max="100" step="0.1" value="0"><span class="field-help">Use a negative value when the source consistently reports too high.</span></label><p class="section-note">Changes apply to newly received samples. Calculated speed uses distance and elapsed time between consecutive accurate fixes.</p><button class="primary-button align-start">Save settings</button></form></section>
-        <section class="surface"><h2>Analysis timing</h2><div class="settings-copy"><p>Raw samples and arrival reminders are stored immediately.</p><p>Stay candidates update incrementally and become visible only after nearby fixes span at least five minutes. A day's routes and trips are saved after the first calculation and reused until new raw data, a saved-place edit, or an analysis rebuild invalidates them. Place patterns are derived from confirmed stays when requested.</p></div></section>
+        <section class="surface"><h2>Location analysis</h2><form id="settings-form" class="form-stack"><label>Timezone<input id="summary-timezone" required maxlength="80" placeholder="America/Chicago"><span class="field-help">Defines calendar days and when the previous day's summary is finalized.</span></label><label>Speed source<select id="speed-strategy"><option value="reported">Use source speed, calculate when missing</option><option value="calculated">Always calculate from coordinates</option></select></label><label id="speed-offset-field">Source speed adjustment (km/h)<input id="speed-offset" type="number" min="-100" max="100" step="0.1" value="0"><span class="field-help">Use a negative value when the source consistently reports too high.</span></label><p class="section-note">Speed changes apply to newly received samples.</p><button class="primary-button align-start">Save settings</button></form></section>
+        <section class="surface"><h2>Daily summaries</h2><div class="settings-copy"><p>The completed day is summarized after midnight in the configured timezone. Each record includes places and observed time, including Home, trips, distance, fixes, activity, and reminder activity.</p><p>These structured records are available through the MCP daily overview tools.</p></div><div id="daily-summaries" class="list summary-list"></div></section>
       </div>
     </section>
   </main>

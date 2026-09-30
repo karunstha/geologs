@@ -4,14 +4,15 @@ import hmac
 import os
 import secrets
 import sqlite3
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from http.cookies import SimpleCookie
 from importlib.resources import files
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from .core import Store, deliver_webhook, geocode, reverse_geocode
-from .analysis import day_summary, insights, place_patterns, predict_next, stays, transitions, visited_places
+from .core import Store, current_location, deliver_webhook, geocode, reverse_geocode
+from .analysis import daily_overview, day_summary, finalize_previous_day, insights, place_patterns, predict_next, stays, transitions, visited_places
 from .mcp import SUPPORTED_VERSIONS, dispatch
 from .postgres import INTEGRITY_ERRORS
 
@@ -156,7 +157,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if url.path == "/api/status":
                 value = {"ok": True, "geocoding": bool(os.environ.get("GEOAPIFY_API_KEY") or os.environ.get("GEOTRACKER_PHOTON_URL")), "geocoder": "photon" if os.environ.get("GEOTRACKER_PHOTON_URL") else "geoapify" if os.environ.get("GEOAPIFY_API_KEY") else None, "auth": bool(active_token())}
-            elif url.path == "/api/current": value = store.latest()
+            elif url.path == "/api/current": value = current_location(store)
             elif url.path == "/api/points": value = store.points(q.get("start"), q.get("end"), q.get("source"), q.get("limit", 5000))
             elif url.path == "/api/observations": value = store.observations(q.get("start"), q.get("end"), q.get("source"), q.get("limit", 5000), q.get("offset", 0))
             elif url.path == "/api/timeline": value = store.timeline(q.get("start"), q.get("end"), q.get("source"), q.get("limit", 5000))
@@ -172,9 +173,12 @@ class Handler(BaseHTTPRequestHandler):
             elif url.path == "/api/transitions": value = transitions(store, q.get("limit", 50))
             elif url.path == "/api/predict-next": value = predict_next(store)
             elif url.path == "/api/insights": value = insights(store, min(int(q.get("limit", 50)), 100))
-            elif url.path == "/api/day": value = day_summary(store, q["date"], q.get("timezone", "UTC"), q.get("source"))
+            elif url.path == "/api/day": value = day_summary(store, q["date"], q.get("timezone") or store.settings()["timezone"], q.get("source"))
+            elif url.path == "/api/daily-summary": value = daily_overview(store, q["date"], q.get("timezone"), q.get("source"))
+            elif url.path == "/api/daily-summaries": value = store.daily_overviews(q.get("start"), q.get("end"), q.get("limit", 90))
             elif url.path == "/api/places": value = store.places(enrich=True)
             elif url.path == "/api/reminders": value = store.reminders()
+            elif url.path == "/api/reminder-history": value = store.reminder_history(q.get("limit", 200))
             elif url.path == "/api/events": value = store.events(q.get("since_id", 0), q.get("limit", 100))
             elif url.path == "/api/geocode": value = geocode(store, q.get("q", ""), q.get("lat"), q.get("lon"))
             elif url.path == "/api/reverse": value = reverse_geocode(store, q["lat"], q["lon"])
@@ -261,7 +265,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/settings": result = store.save_settings(payload)
             elif path == "/api/places": result = store.save_place(payload)
             elif path == "/api/reminders": result = store.create_reminder(payload)
-            elif path == "/api/reminders/active": result = store.set_reminder_active(payload["id"], payload["active"])
+            elif path == "/api/reminders/cancel": result = store.cancel_reminder(payload["id"])
             elif path == "/api/events/ack": result = store.acknowledge(payload["id"])
             else:
                 self.error_json(404, "not found"); return
@@ -285,14 +289,33 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(200, {"ok": True}, {"Set-Cookie": self.session_cookie("", 0)})
 
 
+def _daily_summary_worker(stop):
+    while not stop.is_set():
+        store = None
+        try:
+            store = Store()
+            finalize_previous_day(store)
+        except Exception as exc:
+            print("Geotracker daily summary: " + str(exc), flush=True)
+        finally:
+            if store is not None:
+                store.close()
+        stop.wait(60)
+
+
 def serve(host="127.0.0.1", port=8765):
     if host not in ("127.0.0.1", "localhost", "::1") and not active_token():
         raise ValueError("GEOTRACKER_TOKEN is required when binding beyond loopback")
     server = ThreadingHTTPServer((host, int(port)), Handler)
+    summary_stop = threading.Event()
+    summary_thread = threading.Thread(target=_daily_summary_worker, args=(summary_stop,), daemon=True)
+    summary_thread.start()
     print(f"Geotracker browser: http://{host}:{port}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        summary_stop.set()
+        summary_thread.join(timeout=2)
         server.server_close()

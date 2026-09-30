@@ -10,8 +10,8 @@ from email.message import Message
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from geotracker.core import Store, deliver_webhook, geocode, mode_for, reverse_cache_radius, reverse_geocode, route_segments_from_points, smooth_route_segment
-from geotracker.analysis import day_summary, insights, place_patterns, predict_next, stays, transitions, visited_places
+from geotracker.core import Store, current_location, deliver_webhook, geocode, mode_for, reverse_cache_radius, reverse_geocode, route_segments_from_points, smooth_route_segment
+from geotracker.analysis import daily_overview, day_summary, insights, place_patterns, predict_next, stays, transitions, visited_places
 from geotracker.imports import import_takeout
 from geotracker.mcp import dispatch
 from geotracker.cli import load_env_file, poll_home_assistant
@@ -39,9 +39,10 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(self.store.ingest(inside)["duplicates"], 1)
         self.assertEqual(len(self.store.observations()), 2)
         self.assertEqual(len(self.store.events()), 1)
-        self.assertEqual(self.store.reminders()[0]["active"], 0)
+        self.assertEqual(self.store.reminders(), [])
+        self.assertEqual(self.store.reminder_history()[0]["status"], "triggered")
 
-    def test_repeat_requires_reentry_and_cooldown(self):
+    def test_reminders_are_one_shot_even_if_old_repeat_fields_are_sent(self):
         place = self.store.save_place({"name": "Campus", "lat": 41, "lon": -87.9})
         self.store.create_reminder({"text": "Call friend", "place_id": place["id"], "repeat": True, "cooldown_minutes": 60})
         base = datetime.now(timezone.utc)-timedelta(minutes=25)
@@ -52,6 +53,20 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(len(put(3, 10, 41)["events"]), 0)
         put(4, 15, 41.01)
         self.assertEqual(len(put(5, 20, 41)["events"]), 0)
+        self.assertEqual(len(self.store.events()), 1)
+        self.assertEqual(self.store.reminders(), [])
+
+    def test_cancelled_reminder_moves_to_history_without_reenable(self):
+        place = self.store.save_place({"name": "Market", "lat": 41, "lon": -87.9})
+        reminder = self.store.create_reminder({"text": "Buy salt", "place_id": place["id"]})
+        self.assertEqual(len(self.store.reminders()), 1)
+        self.store.cancel_reminder(reminder["id"])
+        self.assertEqual(self.store.reminders(), [])
+        history = self.store.reminder_history()
+        self.assertEqual(history[0]["status"], "cancelled")
+        self.assertIsNotNone(history[0]["cancelled_at"])
+        with self.assertRaisesRegex(ValueError, "active reminder"):
+            self.store.cancel_reminder(reminder["id"])
 
     def test_stale_and_cross_source_segments_do_not_inflate_distance(self):
         self.store.ingest({"source": "one", "timestamp": "2026-09-26T10:00:00Z", "lat": 41, "lon": -87})
@@ -169,6 +184,18 @@ class StoreTests(unittest.TestCase):
         calculated = self.store.observations(source="calculated", limit=1)[0]
         self.assertEqual(calculated["speed_origin"], "estimated")
         self.assertLess(calculated["speed_mps"], 3)
+
+    def test_timezone_setting_is_validated(self):
+        value = self.store.save_settings({"timezone": "America/Chicago"})
+        self.assertEqual(value["timezone"], "America/Chicago")
+        self.assertEqual(self.store.settings()["timezone"], "America/Chicago")
+        with self.assertRaisesRegex(ValueError, "IANA timezone"):
+            self.store.save_settings({"timezone": "not/a-zone"})
+
+    def test_query_paths_have_storage_indexes(self):
+        indexes = {row["name"] for row in self.store._rows("SELECT name FROM sqlite_master WHERE type='index'")}
+        self.assertTrue({"point_observations_source_time", "observed_stays_v2_source_time",
+                         "reminders_active_created", "events_triggered", "daily_summaries_date"}.issubset(indexes))
 
     def test_trip_classification_uses_connected_trip_context(self):
         self.store.ingest([
@@ -355,6 +382,44 @@ class StoreTests(unittest.TestCase):
         trips = list(reversed(day_summary(self.store, "2026-09-25", "UTC")["trips"]))
         self.assertEqual([trip["mode"] for trip in trips], ["driving", "walking"])
 
+    def test_held_home_assistant_stop_splits_separate_trips(self):
+        base = datetime(2026, 9, 25, 10, tzinfo=timezone.utc)
+        fixes = [(0, 41.000, "start", 0), (1, 41.010, "drive-a", 15), (2, 41.020, "stop", 15),
+                 (3, 41.020, "held", 0), (8, 41.020, "held", 0),
+                 (9, 41.030, "drive-b", 15), (10, 41.040, "finish", 15)]
+        self.store.ingest([{"source": "home_assistant:phone", "external_id": external_id,
+                            "timestamp": (base + timedelta(minutes=minute)).isoformat(),
+                            "lat": lat, "lon": -87.9, "speed_mps": speed, "accuracy_m": 5}
+                           for minute, lat, external_id, speed in fixes])
+        trips = list(reversed(day_summary(self.store, "2026-09-25", "UTC")["trips"]))
+        self.assertEqual(len(trips), 2)
+        self.assertEqual([trip["mode"] for trip in trips], ["driving", "driving"])
+
+    def test_home_is_hidden_from_visited_list_but_kept_in_daily_overview(self):
+        home = self.store.save_place({"name": "Home", "lat": 41, "lon": -87.9, "radius_m": 150})
+        campus = self.store.save_place({"name": "Campus", "lat": 41.02, "lon": -87.9, "radius_m": 150})
+        base = datetime(2026, 9, 25, 10, tzinfo=timezone.utc)
+        fixes = [(0, 41), (6, 41), (7, 41.005), (8, 41.01), (10, 41.02), (16, 41.02)]
+        self.store.ingest([{"source": "phone", "timestamp": (base + timedelta(minutes=minute)).isoformat(),
+                            "lat": lat, "lon": -87.9, "accuracy_m": 5}
+                           for minute, lat in fixes])
+        reminder = self.store.create_reminder({"text": "Call friend", "place_id": campus["id"]})
+        point_id = self.store.points(limit=1)[0]["id"]
+        triggered_at = (base + timedelta(minutes=16)).isoformat()
+        self.store.db.execute("INSERT INTO events(reminder_id,point_id,triggered_at) VALUES (?,?,?)",
+                              (reminder["id"], point_id, triggered_at))
+        self.store.db.execute("UPDATE reminders SET active=0,last_triggered_at=? WHERE id=?", (triggered_at, reminder["id"]))
+        self.store.db.commit()
+        day = day_summary(self.store, "2026-09-25", "UTC")
+        self.assertEqual([place["name"] for place in day["visited_places"]], ["Campus"])
+        self.assertEqual({place["name"] for place in day["places_including_home"]}, {"Home", "Campus"})
+        summary = daily_overview(self.store, "2026-09-25", "UTC")
+        self.assertEqual({place["name"] for place in summary["places"]}, {"Home", "Campus"})
+        self.assertTrue(next(place for place in summary["places"] if place["name"] == "Home")["home"])
+        self.assertEqual(summary["totals"]["reminders_triggered"], 1)
+        self.assertEqual(len(self.store.daily_overviews()), 1)
+        self.assertEqual(current_location(self.store)["place_name"], "Campus")
+
     def test_csv_import_and_mcp(self):
         csv = "timestamp,lat,lon,accuracy_m,speed_mps\n2026-09-26T10:00:00Z,41,-87.9,,\n"
         self.assertEqual(self.store.import_csv(csv)["inserted"], 1)
@@ -365,6 +430,9 @@ class StoreTests(unittest.TestCase):
         self.assertIn("get_current_location", tool_names)
         self.assertIn("get_compact_timeline", tool_names)
         self.assertIn("get_visited_places", tool_names)
+        self.assertIn("get_daily_overview", tool_names)
+        self.assertIn("list_reminder_history", tool_names)
+        self.assertNotIn("set_reminder_active", tool_names)
         self.assertNotIn("plan_route", tool_names)
         result = dispatch(self.store, {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "get_current_location", "arguments": {}}})
         self.assertEqual(result["result"]["structuredContent"]["result"]["lat"], 41)
@@ -454,7 +522,46 @@ class StoreTests(unittest.TestCase):
             second = self.store.save_place({"name": "Office", "lat": 41.00003, "lon": -87.9})
             self.assertEqual(first["address"], "Market Street")
             self.assertEqual(second["address"], "Market Street")
-            self.assertEqual(request.call_count, 1)
+            self.assertEqual(request.call_count, 2)
+
+    def test_geoapify_place_details_wins_and_nearby_lookup_uses_cache(self):
+        response = {"features": [
+            {"geometry": {"type": "Polygon", "coordinates": []},
+             "properties": {"feature_type": "details", "name": "War Memorial Park",
+                            "formatted": "War Memorial Park, Little Rock",
+                            "categories": ["leisure.park"], "place_id": "park"}},
+        ]}
+        env = {"GEOAPIFY_API_KEY": "test", "GEOTRACKER_PHOTON_URL": ""}
+        with patch.dict(os.environ, env), patch("geotracker.core.provider_request", return_value=response) as request:
+            result = reverse_geocode(self.store, 34.749, -92.332)
+            cached = reverse_geocode(self.store, 34.74903, -92.332)
+        self.assertEqual(result["place_name"], "War Memorial Park")
+        self.assertEqual(result["address"], "War Memorial Park, Little Rock")
+        self.assertEqual(result["provider_place_id"], "park")
+        self.assertEqual(result["source"], "geoapify_place_details")
+        self.assertEqual(result["cache"], "provider")
+        self.assertEqual(cached["cache"], "region")
+        self.assertTrue(cached["approximate"])
+        self.assertEqual(request.call_count, 1)
+        path, params = request.call_args.args
+        self.assertEqual(path, "/v2/place-details")
+        self.assertEqual(params, {"lat": 34.749, "lon": -92.332, "features": "details"})
+
+    def test_unnamed_geoapify_place_details_falls_back_to_reverse_address(self):
+        details = {"features": [
+            {"geometry": {"type": "Polygon", "coordinates": []},
+             "properties": {"feature_type": "details", "formatted": "Unnamed nearby object"}},
+        ]}
+        reverse = {"results": [{"formatted": "5511 West Markham Street, Little Rock, AR",
+                                  "result_type": "building"}]}
+        responses = lambda path, params: details if path == "/v2/place-details" else reverse
+        env = {"GEOAPIFY_API_KEY": "test", "GEOTRACKER_PHOTON_URL": ""}
+        with patch.dict(os.environ, env), patch("geotracker.core.provider_request", side_effect=responses) as request:
+            result = reverse_geocode(self.store, 34.749, -92.332)
+        self.assertEqual(result["name"], "5511 West Markham Street, Little Rock, AR")
+        self.assertEqual(result["place_name"], "")
+        self.assertEqual(result["source"], "geoapify_reverse")
+        self.assertEqual([call.args[0] for call in request.call_args_list], ["/v2/place-details", "/v1/geocode/reverse"])
 
     def test_geoapify_reverse_prefers_place_name_and_keeps_address(self):
         response = {"results": [{"name": "War Memorial Park",
@@ -469,7 +576,8 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(result["address"], "War Memorial Park, 5511 West Markham Street, Little Rock, AR")
         self.assertEqual(nearby["name"], "War Memorial Park")
         self.assertEqual(nearby["cache"], "region")
-        self.assertEqual(request.call_count, 1)
+        self.assertEqual(result["source"], "geoapify_reverse")
+        self.assertEqual(request.call_count, 2)
 
     def test_geoapify_reverse_uses_address_when_place_is_unnamed(self):
         response = {"results": [{"formatted": "1200 Main Street, Little Rock, AR", "result_type": "building"}]}
@@ -477,6 +585,7 @@ class StoreTests(unittest.TestCase):
             result = reverse_geocode(self.store, 34.74, -92.27)
         self.assertEqual(result["name"], "1200 Main Street, Little Rock, AR")
         self.assertEqual(result["place_name"], "")
+        self.assertEqual(result["source"], "geoapify_reverse")
 
     def test_webhook_uses_hermes_compatible_hmac_v2_signature(self):
         event = {"id": 99, "text": "Pick up salt", "place": "Walmart"}

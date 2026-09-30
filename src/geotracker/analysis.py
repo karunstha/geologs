@@ -175,6 +175,10 @@ def _matching_place(lat, lon, places):
     return min(matches, key=lambda item: item[0])[1] if matches else None
 
 
+def _is_home_place(place):
+    return str(place.get("name") or place.get("display_name") or "").strip().casefold() in ("home", "my home")
+
+
 def stays(store, start=None, end=None, source=None, limit=500):
     clauses, args = [], []
     if start:
@@ -246,14 +250,17 @@ def visited_places(store, limit=500):
     clusters, _ = place_patterns(store, limit=None)
     saved = {place["id"]: place for place in store.places(enrich=True)}
     result = []
-    for cluster in clusters[:min(max(int(limit), 1), 5000)]:
+    for cluster in clusters:
         place = saved.get(cluster["place_id"])
         found = ({"name": place["name"], "address": place["address"]} if place
                  else place_for_coordinate(store, cluster["lat"], cluster["lon"]))
         resolved_name = cluster["name"] or found["name"] or found["address"]
-        result.append({**cluster, "name": resolved_name, "address": found["address"],
-                       "display_name": resolved_name or cluster["display_name"],
-                       "saved": bool(place)})
+        item = {**cluster, "name": resolved_name, "address": found["address"],
+                "display_name": resolved_name or cluster["display_name"], "saved": bool(place)}
+        if not _is_home_place(item):
+            result.append(item)
+        if len(result) >= min(max(int(limit), 1), 5000):
+            break
     return result
 
 
@@ -346,7 +353,7 @@ def day_summary(store, date, timezone_name="UTC", source=None):
     start = day_start.isoformat()
     end = (day_end - timedelta(microseconds=1)).isoformat()
     provider = "photon:" + os.environ.get("GEOTRACKER_PHOTON_URL", "") if os.environ.get("GEOTRACKER_PHOTON_URL") else "geoapify:" + str(bool(os.environ.get("GEOAPIFY_API_KEY")))
-    cache_identity = json.dumps(["day-v3", date, timezone_name, source, provider], separators=(",", ":"))
+    cache_identity = json.dumps(["day-v4", date, timezone_name, source, provider], separators=(",", ":"))
     cache_key = "day:" + hashlib.sha256(cache_identity.encode()).hexdigest()
     watermark = store.analysis_watermark(start, end, source)
     cached = store.cached_analysis(cache_key, watermark)
@@ -359,16 +366,22 @@ def day_summary(store, date, timezone_name="UTC", source=None):
         stay["observed_minutes"] = round(max(0, (last - first).total_seconds()) / 60, 1)
     clusters, mapping = place_patterns(store, limit=None, rows=day_stays)
     by_cluster = {cluster["cluster_id"]: cluster for cluster in clusters}
+    for cluster in clusters:
+        cluster["first_seen"] = None
+        cluster["last_seen"] = None
     for stay in day_stays:
         cluster = by_cluster[mapping[stay["id"]]]
         first = max(datetime.fromisoformat(stay["started_at"]), day_start).isoformat()
-        cluster["first_seen"] = min(cluster.get("first_seen", first), first)
-    visited_places = sorted(clusters, key=lambda item: item["first_seen"])
-    for place in visited_places:
+        last = min(datetime.fromisoformat(stay["ended_at"]), day_end).isoformat()
+        cluster["first_seen"] = min(cluster["first_seen"] or first, first)
+        cluster["last_seen"] = max(cluster["last_seen"] or last, last)
+    places_including_home = sorted(clusters, key=lambda item: item["first_seen"])
+    for place in places_including_home:
         found = place_for_coordinate(store, place["lat"], place["lon"])
         place["address"] = found["address"]
         if not place["name"] and (found["name"] or found["address"]):
             place["name"] = found["name"] or found["address"]
+    visited_places = [place for place in places_including_home if not _is_home_place(place)]
     for stay in day_stays:
         place = by_cluster[mapping[stay["id"]]]
         stay["display_name"] = place["name"] or place["display_name"]
@@ -384,7 +397,7 @@ def day_summary(store, date, timezone_name="UTC", source=None):
     stats["timeline_points"] = len(chronological)
     result = {"date": date, "timezone": timezone_name, "source": source, "points": len(points), "stays": day_stays,
             "unique_points": len(chronological), "timeline_points": len(chronological), "stats": stats, "trips": trips, "route_segments": route_segments, "activity_counts": activity_counts,
-            "visited_places": visited_places,
+            "visited_places": visited_places, "places_including_home": places_including_home,
             "first_fix": points[-1]["timestamp"] if points else None,
             "last_fix": points[0]["timestamp"] if points else None,
             "first_location": {"lat": points[-1]["lat"], "lon": points[-1]["lon"]} if points else None,
@@ -392,3 +405,76 @@ def day_summary(store, date, timezone_name="UTC", source=None):
             "coverage_note": "Stays are observed from samples; time in unobserved gaps is unknown"}
     store.save_analysis(cache_key, watermark, result)
     return result
+
+
+def daily_overview(store, date, timezone_name=None, source=None):
+    """Materialize a compact, structured record intended for API and LLM use."""
+    timezone_name = timezone_name or store.settings()["timezone"]
+    try:
+        zone = ZoneInfo(timezone_name)
+        local_start = datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=zone)
+    except ZoneInfoNotFoundError as exc:
+        raise ValueError("unknown timezone") from exc
+    except ValueError as exc:
+        raise ValueError("date must be YYYY-MM-DD") from exc
+    day_start = local_start.astimezone(timezone.utc)
+    day_end = (local_start + timedelta(days=1)).astimezone(timezone.utc)
+    start = day_start.isoformat()
+    end = (day_end - timedelta(microseconds=1)).isoformat()
+    watermark = store.daily_overview_watermark(start, end, source)
+    cached = store.stored_daily_overview(date, timezone_name, source, watermark)
+    if cached is not None:
+        return cached
+    day = day_summary(store, date, timezone_name, source)
+    reminder_events = store.reminder_events(start, end, source)
+    reminders_created = store.reminders_created(start, end)
+    reminders_cancelled = store.reminders_cancelled(start, end)
+    reminders_active_at_end = store.reminders_active_at(end)
+    places = [{"name": place.get("name") or place.get("display_name"),
+               "address": place.get("address") or "", "home": _is_home_place(place),
+               "lat": place["lat"], "lon": place["lon"],
+               "visits": place["visits"], "observed_minutes": place["observed_minutes"],
+               "first_seen": place.get("first_seen"), "last_seen": place.get("last_seen")}
+              for place in day["places_including_home"]]
+    def endpoint_name(coordinate):
+        if not coordinate:
+            return None
+        matches = [(metres(coordinate[1], coordinate[0], place["lat"], place["lon"]), place["name"])
+                   for place in places]
+        matches = [match for match in matches if match[0] <= 100]
+        return min(matches, default=(0, None), key=lambda match: match[0])[1]
+    trips = []
+    for trip in day["trips"]:
+        duration = max(0, (datetime.fromisoformat(trip["end"]) - datetime.fromisoformat(trip["start"])).total_seconds())
+        trips.append({"start": trip["start"], "end": trip["end"], "duration_minutes": round(duration / 60, 1),
+                      "mode": trip["mode"], "distance_km": trip["distance_km"],
+                      "from": endpoint_name(trip["coordinates"][0] if trip["coordinates"] else None),
+                      "to": endpoint_name(trip["coordinates"][-1] if trip["coordinates"] else None)})
+    totals = {"raw_fixes": day["points"], "timeline_fixes": day["timeline_points"],
+              "distance_km": day["stats"]["distance_km"], "moving_hours": day["stats"]["moving_hours"],
+              "trips": len(trips), "places": len(places),
+              "reminders_created": len(reminders_created), "reminders_triggered": len(reminder_events),
+              "reminders_cancelled": len(reminders_cancelled),
+              "active_reminders_at_end": len(reminders_active_at_end)}
+    overview = (f"{len(trips)} trips covering {totals['distance_km']:.2f} km; "
+                f"{len(places)} observed places; {len(reminder_events)} reminders triggered; "
+                f"{day['points']} raw fixes.")
+    value = {"schema_version": 1, "date": date, "timezone": timezone_name, "source": source,
+             "overview": overview, "totals": totals, "activity_counts": day["activity_counts"],
+             "places": places, "trips": trips, "reminders_created": reminders_created,
+             "reminders_triggered": reminder_events, "reminders_cancelled": reminders_cancelled,
+             "active_reminders_at_end": reminders_active_at_end, "first_fix": day["first_fix"],
+             "last_fix": day["last_fix"], "coverage_note": day["coverage_note"],
+             "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    return store.save_daily_overview(value, watermark)
+
+
+def finalize_previous_day(store, now=None):
+    timezone_name = store.settings()["timezone"]
+    try:
+        zone = ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError as exc:
+        raise ValueError("unknown configured timezone") from exc
+    local_now = (now or datetime.now(timezone.utc)).astimezone(zone)
+    date = (local_now.date() - timedelta(days=1)).isoformat()
+    return daily_overview(store, date, timezone_name)
