@@ -3,7 +3,6 @@ services:
     build:
         context: .
         dockerfile: db.Dockerfile
-        platform: linux/amd64
     container_name: geotracker-db
     image: geotracker-db
     platform: linux/amd64
