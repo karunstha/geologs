@@ -11,7 +11,7 @@ from importlib.resources import files
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from .core import Store, current_location, deliver_webhook, geocode, reverse_geocode
+from .core import PLACES_PROVIDERS, Store, configured_places_providers, current_location, deliver_webhook, geocode, places_provider, reverse_geocode
 from .analysis import daily_overview, day_summary, finalize_previous_day, insights, place_patterns, predict_next, resolve_place_patterns, search_visits, stays, transitions, visited_places
 from .mcp import SUPPORTED_VERSIONS, dispatch
 from .postgres import INTEGRITY_ERRORS
@@ -156,7 +156,11 @@ class Handler(BaseHTTPRequestHandler):
         store = Store()
         try:
             if url.path == "/api/status":
-                value = {"ok": True, "geocoding": bool(os.environ.get("GEOAPIFY_API_KEY") or os.environ.get("GEOTRACKER_PHOTON_URL")), "geocoder": "photon" if os.environ.get("GEOTRACKER_PHOTON_URL") else "geoapify" if os.environ.get("GEOAPIFY_API_KEY") else None, "auth": bool(active_token())}
+                active = places_provider(store)
+                configured = configured_places_providers()
+                value = {"ok": True, "geocoding": active is not None, "geocoder": active, "auth": bool(active_token()),
+                         "places_providers": [{"id": name, "label": info["label"], "env": info["env"], "configured": configured[name]}
+                                              for name, info in PLACES_PROVIDERS.items()]}
             elif url.path == "/api/current": value = current_location(store)
             elif url.path == "/api/points": value = store.points(q.get("start"), q.get("end"), q.get("source"), q.get("limit", 5000))
             elif url.path == "/api/observations": value = store.observations(q.get("start"), q.get("end"), q.get("source"), q.get("limit", 5000), q.get("offset", 0))

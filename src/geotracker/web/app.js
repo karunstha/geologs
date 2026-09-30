@@ -34,7 +34,7 @@ const placeIcons={
   home:'<svg viewBox="0 0 24 24"><path d="m3 11 9-8 9 8M5 10v11h14V10M9 21v-7h6v7"/></svg>',
   place:'<svg viewBox="0 0 24 24"><path d="M20 10c0 5-8 11-8 11S4 15 4 10a8 8 0 1 1 16 0Z"/><circle cx="12" cy="10" r="2.5"/></svg>'
 };
-function placeKind(place={}){const text=[place.category,...(place.categories||[]),place.name,place.display_name].join(' ').toLowerCase();if(/(^|\s)(home|my home)(\s|$)/.test(text))return'home';if(/walmart|supermarket|shopping|commercial|retail|convenience/.test(text))return'shopping';if(/hair|salon|beauty|barber/.test(text))return'salon';if(/lake|water|reservoir|river|natural\.water/.test(text))return'water';if(/university|college|school|education|academic/.test(text))return'education';if(/bar|pub|nightclub|biergarten/.test(text))return'bar';if(/restaurant|cafe|food|catering/.test(text))return'food';if(/park|garden|nature|leisure/.test(text))return'park';if(/hospital|clinic|pharmacy|healthcare/.test(text))return'health';return'place'}
+function placeKind(place={}){const text=[place.category,...(place.categories||[]),place.name,place.display_name].join(' ').toLowerCase();if(/(^|\s)(home|my home)(\s|$)/.test(text))return'home';if(/walmart|supermarket|shopping|commercial|retail|convenience|grocery|department_store|shop\b|store\b/.test(text))return'shopping';if(/hair|salon|beauty|barber/.test(text))return'salon';if(/lake|water|reservoir|river|natural\.water/.test(text))return'water';if(/university|college|school|education|academic/.test(text))return'education';if(/bar|pub|nightclub|biergarten/.test(text))return'bar';if(/restaurant|cafe|coffee|food|catering|bakery|fast_food/.test(text))return'food';if(/park|garden|nature|leisure/.test(text))return'park';if(/hospital|clinic|pharmacy|healthcare|doctor|dentist|medical/.test(text))return'health';return'place'}
 function placeIcon(place){const kind=placeKind(place);return `<span class="place-icon ${kind}" title="${safe(kind)}" aria-hidden="true">${placeIcons[kind]}</span>`}
 function populateTimezones(selected){const select=$('summary-timezone');let zones=[];try{zones=Intl.supportedValuesOf('timeZone')}catch(_error){zones=['America/Chicago','America/Denver','America/Los_Angeles','America/New_York','America/Phoenix','America/Toronto','America/Vancouver','Europe/London','Europe/Paris','Asia/Kolkata','Asia/Tokyo','Australia/Sydney']};zones=[...new Set(['UTC',...zones,selected].filter(Boolean))];select.innerHTML='';const groups=new Map();for(const zone of zones){const area=zone.includes('/')?zone.split('/')[0]:'General';if(!groups.has(area))groups.set(area,[]);groups.get(area).push(zone)}for(const [area,items] of groups){const group=document.createElement('optgroup');group.label=area;for(const zone of items.sort()){const option=document.createElement('option');option.value=zone;option.textContent=zone.replaceAll('_',' ');group.appendChild(option)}select.appendChild(group)}select.value=selected||'UTC'}
 function localDateKey(date=new Date()){
@@ -395,10 +395,25 @@ async function refreshExplore(resetRawPage=true){
   renderExplore(day,coverage);
 }
 function renderDailySummaries(){$('daily-summaries').innerHTML=state.dailySummaries.slice(0,10).map(item=>`<div class="list-item"><div><strong>${safe(item.date)}</strong><small>${item.trip_count} trips · ${Number(item.distance_km).toFixed(1)} km · ${item.place_count} places · ${item.reminder_count} reminders</small></div></div>`).join('')||'<div class="empty">A summary will be saved after the first completed day.</div>'}
-function renderSettings(){if(!state.settings)return;populateTimezones(state.settings.timezone);$('speed-strategy').value=state.settings.speed_strategy;$('speed-offset').value=state.settings.reported_speed_offset_kmh;updateSpeedSettingsVisibility();renderDailySummaries()}
+function renderPlacesProvider(){
+  const providers=state.status?.places_providers||[],chosen=state.settings?.places_provider||'';
+  const select=$('places-provider');
+  select.innerHTML='<option value="">Automatic · first configured</option>'+providers.map(provider=>
+    `<option value="${safe(provider.id)}"${provider.configured||provider.id===chosen?'':' disabled'}>${safe(provider.label)}${provider.configured?'':' · set '+safe(provider.env)}</option>`).join('');
+  select.value=chosen;
+  const active=providers.find(provider=>provider.id===state.status?.geocoder);
+  $('places-provider-help').textContent=active?`Currently using ${active.label}.`:'No provider is configured; set an API key in .env and restart the server.';
+  updateProviderNotice();
+}
+function updateProviderNotice(){
+  // Automatic resolves to whatever the server chose, so check that too.
+  const value=$('places-provider').value||state.status?.geocoder;
+  $('mapbox-terms').hidden=value!=='mapbox';
+}
+function renderSettings(){if(!state.settings)return;renderPlacesProvider();populateTimezones(state.settings.timezone);$('speed-strategy').value=state.settings.speed_strategy;$('speed-offset').value=state.settings.reported_speed_offset_kmh;updateSpeedSettingsVisibility();renderDailySummaries()}
 function updateSpeedSettingsVisibility(){const reported=$('speed-strategy').value==='reported';$('speed-offset').disabled=!reported;$('speed-offset-field').classList.toggle('disabled-field',!reported)}
 async function refreshCurrent(){state.current=await api('/api/current');renderCurrent();drawMap()}
-async function refreshAll(){try{const [status,current,settings,dailySummaries]=await Promise.all([api('/api/status'),api('/api/current'),api('/api/settings'),api('/api/daily-summaries?limit=10')]);state.current=current;state.settings=settings;state.dailySummaries=dailySummaries;if(state.followToday)$('day-date').value=localDateKey();renderCurrent();renderSettings();$('connection').textContent='Connected';$('geocode-hint').textContent=status.geocoding?(current?'Results favor your last recorded location.':'Searches are worldwide until a location is recorded.'):'Place search needs a geocoding provider.';await refreshMeta();await Promise.all([refreshExplore(),refreshInsights(),refreshCoverage()])}catch(e){toast(e.message)}}
+async function refreshAll(){try{const [status,current,settings,dailySummaries]=await Promise.all([api('/api/status'),api('/api/current'),api('/api/settings'),api('/api/daily-summaries?limit=10')]);state.status=status;state.current=current;state.settings=settings;state.dailySummaries=dailySummaries;if(state.followToday)$('day-date').value=localDateKey();renderCurrent();renderSettings();$('connection').textContent='Connected';$('geocode-hint').textContent=status.geocoding?(current?'Results favor your last recorded location.':'Searches are worldwide until a location is recorded.'):'Place search needs a geocoding provider.';await refreshMeta();await Promise.all([refreshExplore(),refreshInsights(),refreshCoverage()])}catch(e){toast(e.message)}}
 async function pollEvents(){try{const events=await api('/api/events?since_id='+state.lastEventId);const newest=events.reduce((max,e)=>Math.max(max,e.id),state.lastEventId);if(state.lastEventId&&events.length){for(const event of events.reverse()){toast(`${event.text} · ${event.place_name}`);if(Notification.permission==='granted')new Notification('Location reminder',{body:`${event.text} · ${event.place_name}`})}}state.lastEventId=newest;if(events.length)await refreshMeta()}catch(e){/* Connection errors are surfaced on explicit actions. */}}
 $('auth-cancel').onclick=()=>{authDismissed=true;$('auth-panel').hidden=true;$('auth-token').value=''};
 $('auth-form').onsubmit=async event=>{event.preventDefault();const token=$('auth-token').value.trim();try{const response=await fetch('/api/session',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({token})});const result=await response.json();if(!response.ok)throw Error(result.error||'Access token rejected');sessionStorage.removeItem('geotracker-token');$('auth-token').value='';$('auth-panel').hidden=true;authDismissed=false;await refreshAll()}catch(error){$('auth-error').textContent=error.message}};
@@ -430,6 +445,18 @@ $('add-place').onclick=()=>openPlaceDialog();
 $('close-place-dialog').onclick=$('cancel-place').onclick=()=>$('place-dialog').close();
 $('place-dialog').addEventListener('click',event=>{if(event.target===$('place-dialog'))$('place-dialog').close()});
 $('speed-strategy').onchange=updateSpeedSettingsVisibility;
+$('places-provider').onchange=updateProviderNotice;
+$('places-form').onsubmit=async event=>{
+  event.preventDefault();
+  try{
+    state.settings=await post('/api/settings',{places_provider:$('places-provider').value});
+    state.status=await api('/api/status');
+    renderSettings();
+    toast('Places provider saved');
+    // Names can change with the provider; refresh what shows them.
+    await refreshMeta();await Promise.all([refreshExplore(false),refreshInsights()]);
+  }catch(error){toast(error.message)}
+};
 $('settings-form').onsubmit=async event=>{event.preventDefault();try{state.settings=await post('/api/settings',{timezone:$('summary-timezone').value.trim(),speed_strategy:$('speed-strategy').value,reported_speed_offset_kmh:+$('speed-offset').value});if(state.followToday)$('day-date').value=localDateKey();renderSettings();await refreshExplore();toast('Settings saved')}catch(error){toast(error.message)}};
 $('day-date').value=localDateKey();
 $('reminder-place').onchange=toggleReminderDestination;

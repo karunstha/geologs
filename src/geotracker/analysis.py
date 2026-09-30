@@ -4,13 +4,13 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import os
 import re
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .core import (MAX_CONNECTED_GAP_SECONDS, MAX_PLAUSIBLE_SPEED_MPS, MAX_SAMPLE_GAP_SECONDS, MOVEMENT_MODES,
-                   classify_motion, is_excursion, went_elsewhere_between, metres, parse_time, place_for_coordinate, reported_speed,
+                   classify_motion, is_excursion, went_elsewhere_between, metres, parse_time, place_for_coordinate,
+                   places_provider_identity, reported_speed,
                    route_segments_from_points, smooth_route_segment, stats_from_points, trips_between_stays)
 
 
@@ -959,8 +959,9 @@ def day_summary(store, date, timezone_name="UTC", source=None):
     day_end = (day + timedelta(days=1)).astimezone(timezone.utc)
     start = day_start.isoformat()
     end = (day_end - timedelta(microseconds=1)).isoformat()
-    provider = "photon:" + os.environ.get("GEOTRACKER_PHOTON_URL", "") if os.environ.get("GEOTRACKER_PHOTON_URL") else "geoapify:" + str(bool(os.environ.get("GEOAPIFY_API_KEY")))
-    cache_identity = json.dumps(["day-v9", date, timezone_name, source, provider], separators=(",", ":"))
+    # Switching the places provider in Settings re-resolves every day's names.
+    provider = places_provider_identity(store)
+    cache_identity = json.dumps(["day-v10", date, timezone_name, source, provider], separators=(",", ":"))
     cache_key = "day:" + hashlib.sha256(cache_identity.encode()).hexdigest()
     watermark = store.analysis_watermark(start, end, source)
     cached = store.cached_analysis(cache_key, watermark)

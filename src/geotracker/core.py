@@ -20,7 +20,9 @@ from .postgres import PostgresConnection
 
 
 _reverse_lock = threading.Lock()
-DEFAULT_SETTINGS = {"speed_strategy": "reported", "reported_speed_offset_kmh": 0.0, "timezone": "UTC"}
+# An empty places_provider means the first configured provider (see places_provider()).
+DEFAULT_SETTINGS = {"speed_strategy": "reported", "reported_speed_offset_kmh": 0.0, "timezone": "UTC",
+                    "places_provider": ""}
 MAX_CONNECTED_GAP_SECONDS = 900
 MAX_PLAUSIBLE_SPEED_MPS = 55.6
 MOVEMENT_MODES = ("driving", "cycling", "running", "walking")
@@ -670,8 +672,13 @@ class Store:
             ZoneInfo(timezone_name)
         except (ZoneInfoNotFoundError, ValueError) as exc:
             raise ValueError("timezone must be a valid IANA timezone, such as America/Chicago") from exc
+        provider = str(raw.get("places_provider", current["places_provider"]) or "").strip()
+        if provider and provider not in PLACES_PROVIDERS:
+            raise ValueError("places_provider must be one of: " + ", ".join(PLACES_PROVIDERS))
+        if provider and provider != current["places_provider"] and not configured_places_providers()[provider]:
+            raise ValueError(f"Set {PLACES_PROVIDERS[provider]['env']} to use {PLACES_PROVIDERS[provider]['label']}")
         values = {"speed_strategy": strategy, "reported_speed_offset_kmh": round(offset, 2),
-                  "timezone": timezone_name}
+                  "timezone": timezone_name, "places_provider": provider}
         for key, value in values.items():
             self.db.execute("""INSERT INTO app_settings(key,value) VALUES (?,?)
                 ON CONFLICT(key) DO UPDATE SET value=excluded.value""", (key, json.dumps(value)))
@@ -1265,7 +1272,7 @@ class Store:
 def reverse_cache_radius(result_type):
     """Only reuse precise addresses nearby; a city bounding box is not a safe boundary."""
     kind = str(result_type or "").lower()
-    if kind in ("building", "house", "amenity", "place"):
+    if kind in ("building", "house", "amenity", "place", "address"):
         return 15
     if kind == "street":
         return 30
@@ -1323,11 +1330,17 @@ def geoapify_reverse_result(value, lat, lon):
 
 # Place types a person visits. Roads, parking, transit stops, boundaries, and
 # street furniture would otherwise be "nearest" to almost every stay.
-NEAREST_PLACE_CATEGORIES = ",".join((
-    "accommodation", "activity", "adult", "airport", "beach", "building", "camping", "catering", "childcare",
-    "commercial", "education", "emergency", "entertainment", "healthcare", "heritage", "leisure", "memorial",
-    "national_park", "natural", "office", "pet", "production", "religion", "rental", "service", "ski", "sport",
-    "tourism"))
+#
+# Geoapify cannot mix these two groups in one request: adding any category of
+# the second group made it drop the first entirely (a Kroger 558 m away and the
+# park the point was in both vanished, even inside a circle filter). Each group
+# is therefore its own request, and the nearest named place of both wins.
+NEAREST_PLACE_CATEGORY_GROUPS = (
+    ",".join(("activity", "adult", "building", "camping", "catering", "childcare", "commercial", "education",
+              "emergency", "entertainment", "healthcare", "heritage", "leisure", "memorial", "natural", "office",
+              "pet", "production", "religion", "rental", "service", "ski")),
+    ",".join(("accommodation", "airport", "beach", "national_park", "sport", "tourism")),
+)
 SKIPPED_PLACE_SUFFIXES = (".atm", ".vending_machine", ".charging_station", ".bicycle_parking", ".post_box")
 # Search radii, smallest first. A stay's averaged position is searched within
 # the smallest radius that covers its extent; 150 m covers a big-box store
@@ -1366,6 +1379,128 @@ def geoapify_nearest_result(data, lat, lon):
     return None
 
 
+PLACES_PROVIDERS = {
+    "geoapify": {"label": "Geoapify", "env": "GEOAPIFY_API_KEY"},
+    "mapbox": {"label": "Mapbox", "env": "MAPBOX_ACCESS_TOKEN"},
+    "photon": {"label": "Photon (self-hosted)", "env": "GEOTRACKER_PHOTON_URL"},
+}
+# Without a choice in Settings, the first configured provider is used; a
+# self-hosted Photon keeps the precedence it always had.
+PLACES_PROVIDER_ORDER = ("photon", "geoapify", "mapbox")
+# Mapbox POI categories that would otherwise name almost every stay.
+MAPBOX_SKIPPED_CATEGORIES = {"atm", "parking", "parking_lot", "parking_garage", "bus_stop", "bus_station",
+                             "ev_charging_station", "charging_station", "post_box", "vending_machine"}
+
+
+def configured_places_providers():
+    return {name: bool(os.environ.get(info["env"], "").strip()) for name, info in PLACES_PROVIDERS.items()}
+
+
+def places_provider(store):
+    """The provider chosen in Settings when it is configured, else the first configured one."""
+    configured = configured_places_providers()
+    chosen = store.settings().get("places_provider")
+    if chosen and configured.get(chosen):
+        return chosen
+    return next((name for name in PLACES_PROVIDER_ORDER if configured[name]), None)
+
+
+def places_provider_identity(store):
+    """Changes whenever place names could change: the provider, and Photon's server."""
+    name = places_provider(store)
+    return f"photon:{os.environ.get('GEOTRACKER_PHOTON_URL', '').rstrip('/')}" if name == "photon" else str(name)
+
+
+def _require_provider(store):
+    name = places_provider(store)
+    if name is None:
+        raise ValueError("Set GEOAPIFY_API_KEY, MAPBOX_ACCESS_TOKEN, or GEOTRACKER_PHOTON_URL for place names and "
+                         "search; saved places and recorded paths work without one")
+    return name
+
+
+def mapbox_request(path, params):
+    token = os.environ.get("MAPBOX_ACCESS_TOKEN", "").strip()
+    if not token:
+        raise ValueError("Set MAPBOX_ACCESS_TOKEN to use Mapbox")
+    return json_get("https://api.mapbox.com" + path + "?" + urllib.parse.urlencode({**params, "access_token": token}))
+
+
+def _mapbox_position(feature):
+    props = feature.get("properties") or {}
+    coordinates = props.get("coordinates") if isinstance(props.get("coordinates"), dict) else {}
+    if coordinates.get("latitude") is not None and coordinates.get("longitude") is not None:
+        return float(coordinates["latitude"]), float(coordinates["longitude"])
+    lon, lat = (feature.get("geometry") or {}).get("coordinates", [None, None])[:2]
+    return (float(lat), float(lon)) if lat is not None and lon is not None else (None, None)
+
+
+def mapbox_place(feature):
+    """A Search Box feature in the shape the rest of Geotracker uses."""
+    props = feature.get("properties") or {}
+    lat, lon = _mapbox_position(feature)
+    name = str(props.get("name") or "").strip()
+    address = str(props.get("full_address") or "").strip() or ", ".join(
+        part for part in (name, str(props.get("place_formatted") or "").strip()) if part)
+    category_ids = [str(item) for item in props.get("poi_category_ids") or []]
+    categories = list(dict.fromkeys(category_ids + [str(item) for item in props.get("poi_category") or []]))
+    is_poi = props.get("feature_type") == "poi"
+    return {"name": name or address or "Unknown place", "place_name": name if is_poi else "",
+            "lat": lat, "lon": lon, "address": address,
+            "category": category_ids[0] if category_ids else (props.get("feature_type") or None),
+            "categories": categories, "provider_place_id": props.get("mapbox_id"),
+            "result_type": props.get("feature_type")}
+
+
+def mapbox_nearest_result(data, lat, lon, radius):
+    """The nearest named POI within `radius`; Search Box /reverse takes no radius and states no order."""
+    candidates = []
+    for feature in data.get("features", []) if isinstance(data, dict) else []:
+        place = mapbox_place(feature)
+        if not place["place_name"] or place["lat"] is None:
+            continue
+        if MAPBOX_SKIPPED_CATEGORIES & set(place["categories"]):
+            continue
+        distance = metres(lat, lon, place["lat"], place["lon"])
+        if distance <= radius:
+            candidates.append((distance, place))
+    if not candidates:
+        return None
+    distance, place = min(candidates, key=lambda item: item[0])
+    return {**place, "lat": lat, "lon": lon, "result_type": "place", "distance_m": round(distance),
+            "source": "mapbox_searchbox"}
+
+
+def _geoapify_search(query, bias):
+    params = {"text": query, "limit": 5, "format": "json"}
+    if bias:
+        params["bias"] = f"proximity:{bias[1]},{bias[0]}"
+    data = provider_request("/v1/geocode/search", params)
+    return [{"name": r.get("name") or r.get("formatted") or query,
+             "place_name": r.get("name") or "", "lat": r["lat"], "lon": r["lon"],
+             "address": r.get("formatted", ""),
+             "category": r.get("category") or ((r.get("categories") or [None])[0]),
+             "categories": r.get("categories") if isinstance(r.get("categories"), list) else [],
+             "provider_place_id": r.get("place_id")} for r in data.get("results", [])]
+
+
+def _photon_search(query, bias):
+    photon = os.environ.get("GEOTRACKER_PHOTON_URL", "").rstrip("/")
+    params = {"q": query, "limit": 5}
+    if bias:
+        params.update({"lat": bias[0], "lon": bias[1]})
+    data = json_get(photon + "/api?" + urllib.parse.urlencode(params))
+    return [photon_result(r) for r in data.get("features", [])]
+
+
+def _mapbox_search(query, bias):
+    params = {"q": query[:256], "limit": 5}
+    if bias:
+        params["proximity"] = f"{bias[1]},{bias[0]}"
+    data = mapbox_request("/search/searchbox/v1/forward", params)
+    return [place for place in (mapbox_place(feature) for feature in data.get("features", [])) if place["lat"] is not None]
+
+
 def geocode(store, query, lat=None, lon=None):
     query = query.strip()
     if not query or len(query) > 200:
@@ -1379,85 +1514,105 @@ def geocode(store, query, lat=None, lon=None):
     else:
         latest = store.latest()
         bias = (float(latest["lat"]), float(latest["lon"])) if latest else None
+    name = _require_provider(store)
     # Cache by nearby search area; a result from another city must not win later.
     key = "search:" + query.casefold() + (f":{bias[0]:.2f}:{bias[1]:.2f}" if bias else ":unbiased")
-    photon = os.environ.get("GEOTRACKER_PHOTON_URL", "").rstrip("/")
-    provider = "photon:" + photon if photon else "geoapify"
+    provider = {"photon": "photon:" + os.environ.get("GEOTRACKER_PHOTON_URL", "").rstrip("/"),
+                "geoapify": "geoapify", "mapbox": "mapbox:searchbox-v1"}[name]
     cached = store.cached(key, provider)
     if cached is not None:
         return cached
-    if photon:
-        params = {"q": query, "limit": 5}
-        if bias:
-            params.update({"lat": bias[0], "lon": bias[1]})
-        data = json_get(photon + "/api?" + urllib.parse.urlencode(params))
-        value = [photon_result(r) for r in data.get("features", [])]
-    else:
-        params = {"text": query, "limit": 5, "format": "json"}
-        if bias:
-            params["bias"] = f"proximity:{bias[1]},{bias[0]}"
-        data = provider_request("/v1/geocode/search", params)
-        value = [{"name": r.get("name") or r.get("formatted") or query,
-                  "place_name": r.get("name") or "", "lat": r["lat"], "lon": r["lon"],
-                  "address": r.get("formatted", ""),
-                  "category": r.get("category") or ((r.get("categories") or [None])[0]),
-                  "categories": r.get("categories") if isinstance(r.get("categories"), list) else [],
-                  "provider_place_id": r.get("place_id")} for r in data.get("results", [])]
+    value = {"photon": _photon_search, "geoapify": _geoapify_search, "mapbox": _mapbox_search}[name](query, bias)
     store.cache(key, provider, value)
     return value
+
+
+def _photon_lookup(lat, lon, radius):
+    photon = os.environ.get("GEOTRACKER_PHOTON_URL", "").rstrip("/")
+    data = json_get(photon + "/reverse?" + urllib.parse.urlencode(
+        {"lat": lat, "lon": lon, "radius": radius / 1000, "limit": 10}))
+    features = data.get("features") or []
+    named = next((feature for feature in features
+                  if (feature.get("properties") or {}).get("name")
+                  and (feature.get("properties") or {}).get("osm_key") not in PHOTON_UNNAMED_KEYS), None)
+    feature = named or (features[0] if features else None)
+    value = photon_result(feature) if feature else {"name": "Unknown place", "place_name": "", "address": ""}
+    if named is None:
+        value["place_name"] = ""
+    kind = "place" if named else (feature or {}).get("properties", {}).get("type")
+    return {**value, "name": value.get("place_name") or value.get("address") or "Unknown place",
+            "lat": lat, "lon": lon}, kind
+
+
+def _geoapify_lookup(lat, lon, radius):
+    features = []
+    for categories in NEAREST_PLACE_CATEGORY_GROUPS:
+        try:
+            data = provider_request("/v2/places", {
+                "categories": categories, "conditions": "named",
+                "filter": f"circle:{lon},{lat},{radius}", "bias": f"proximity:{lon},{lat}", "limit": 20,
+            })
+        except (OSError, TypeError, KeyError, ValueError):
+            continue  # the other group, or the address fallback, still names the point
+        if isinstance(data, dict):
+            features.extend(data.get("features") or [])
+    # Each group arrives ordered by distance; merge so the nearest of both comes first.
+    features.sort(key=lambda feature: (((feature or {}).get("properties") or {}).get("distance") is None,
+                                       ((feature or {}).get("properties") or {}).get("distance") or 0))
+    result = geoapify_nearest_result({"features": features}, lat, lon)
+    if result is not None:
+        return result, "place"
+    data = provider_request("/v1/geocode/reverse", {"lat": lat, "lon": lon, "format": "json"})
+    value = (data.get("results") or [{}])[0]
+    return {**geoapify_reverse_result(value, lat, lon), "source": "geoapify_reverse"}, value.get("result_type")
+
+
+def _mapbox_lookup(lat, lon, radius):
+    try:
+        result = mapbox_nearest_result(mapbox_request("/search/searchbox/v1/reverse", {
+            "longitude": lon, "latitude": lat, "types": "poi", "limit": 10}), lat, lon, radius)
+    except (OSError, TypeError, KeyError, ValueError):
+        result = None
+    if result is not None:
+        return result, "place"
+    data = mapbox_request("/search/searchbox/v1/reverse", {
+        "longitude": lon, "latitude": lat, "types": "address,street", "limit": 1})
+    feature = (data.get("features") or [None])[0]
+    if feature is None:
+        return {"name": "Unknown place", "place_name": "", "address": "", "lat": lat, "lon": lon,
+                "source": "mapbox_searchbox"}, None
+    place = mapbox_place(feature)
+    return {**place, "name": place["address"] or place["name"], "place_name": "", "lat": lat, "lon": lon,
+            "source": "mapbox_searchbox"}, place["result_type"]
 
 
 def reverse_geocode(store, lat, lon, radius_m=None):
     """Name a position after the nearest named place, else its street address.
 
     Callers pass the averaged position of a stay and, for an area stay, its
-    extent as `radius_m`. Geoapify's Places API returns named places inside the
-    search circle ordered by distance; Photon's reverse endpoint does the same
-    with a radius. Only when nothing named is nearby does the result fall back
-    to reverse geocoding, whose name is then the address.
+    extent as `radius_m`. The provider chosen in Settings is asked for named
+    places within the search radius: Geoapify's Places API and Photon's reverse
+    endpoint take the radius directly; Mapbox's Search Box reverse lookup does
+    not, so its POIs are filtered by distance here. Only when nothing named is
+    nearby does the result fall back to the street address.
     """
     lat, lon = float(lat), float(lon)
     if not (-90 <= lat <= 90 and -180 <= lon <= 180):
         raise ValueError("invalid coordinates")
     radius = nearest_place_radius(radius_m)
-    photon = os.environ.get("GEOTRACKER_PHOTON_URL", "").rstrip("/")
-    # The provider key versions the cache and keeps each search radius apart.
-    provider = (f"photon:nearest-v1:{photon}" if photon else "geoapify:nearest-v1") + f":r{radius}"
+    name = _require_provider(store)
+    # The provider key versions the cache and keeps providers and radii apart.
+    # Geoapify v2 drops lookups made with the single mixed-category request,
+    # which cached street addresses where named places existed.
+    provider = {"photon": "photon:nearest-v1:" + os.environ.get("GEOTRACKER_PHOTON_URL", "").rstrip("/"),
+                "geoapify": "geoapify:nearest-v2", "mapbox": "mapbox:nearest-v1"}[name] + f":r{radius}"
     # A lock coalesces simultaneous browser/MCP requests within this process.
     with _reverse_lock:
         cached = store.reverse_region(provider, lat, lon)
         if cached is not None:
             approximate = metres(lat, lon, cached["lat"], cached["lon"]) > 0.5
             return {**cached, "lat": lat, "lon": lon, "cache": "region", "approximate": approximate}
-        if photon:
-            data = json_get(photon + "/reverse?" + urllib.parse.urlencode(
-                {"lat": lat, "lon": lon, "radius": radius / 1000, "limit": 10}))
-            features = data.get("features") or []
-            named = next((feature for feature in features
-                          if (feature.get("properties") or {}).get("name")
-                          and (feature.get("properties") or {}).get("osm_key") not in PHOTON_UNNAMED_KEYS), None)
-            feature = named or (features[0] if features else None)
-            value = photon_result(feature) if feature else {"name": "Unknown place", "place_name": "", "address": ""}
-            if named is None:
-                value["place_name"] = ""
-            kind = "place" if named else (feature or {}).get("properties", {}).get("type")
-            result = {**value, "name": value.get("place_name") or value.get("address") or "Unknown place",
-                      "lat": lat, "lon": lon}
-        else:
-            try:
-                result = geoapify_nearest_result(provider_request("/v2/places", {
-                    "categories": NEAREST_PLACE_CATEGORIES, "conditions": "named",
-                    "filter": f"circle:{lon},{lat},{radius}", "bias": f"proximity:{lon},{lat}", "limit": 20,
-                }), lat, lon)
-            except (OSError, TypeError, KeyError, ValueError):
-                result = None
-            if result is not None:
-                kind = "place"
-            else:
-                data = provider_request("/v1/geocode/reverse", {"lat": lat, "lon": lon, "format": "json"})
-                value = (data.get("results") or [{}])[0]
-                kind = value.get("result_type")
-                result = {**geoapify_reverse_result(value, lat, lon), "source": "geoapify_reverse"}
+        result, kind = {"photon": _photon_lookup, "geoapify": _geoapify_lookup, "mapbox": _mapbox_lookup}[name](lat, lon, radius)
         store.save_reverse_region(provider, lat, lon, reverse_cache_radius(kind), result)
         return {**result, "cache": "provider", "approximate": False}
 

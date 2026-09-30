@@ -11,7 +11,7 @@ from email.message import Message
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from geotracker.core import Store, classify_motion, current_location, deliver_webhook, geocode, mode_for, reverse_cache_radius, reverse_geocode, route_segments_from_points, smooth_route_segment
+from geotracker.core import Store, classify_motion, current_location, deliver_webhook, geocode, mode_for, places_provider, places_provider_identity, reverse_cache_radius, reverse_geocode, route_segments_from_points, smooth_route_segment
 from geotracker.analysis import daily_overview, day_summary, insights, place_patterns, predict_next, resolve_place_patterns, search_visits, stays, transitions, visited_places
 
 
@@ -633,33 +633,46 @@ class StoreTests(unittest.TestCase):
             second = self.store.save_place({"name": "Office", "lat": 41.00003, "lon": -87.9})
             self.assertEqual(first["address"], "Market Street")
             self.assertEqual(second["address"], "Market Street")
-            self.assertEqual(request.call_count, 2)
+            self.assertEqual(request.call_count, 3)
 
-    def test_nearest_named_place_from_places_api_names_a_position(self):
-        places = {"features": [
-            {"properties": {"name": "Bank ATM", "categories": ["service.financial.atm"], "distance": 12}},
-            {"properties": {"name": "Costco Wholesale", "formatted": "Costco Wholesale, 1 Warehouse Way",
-                            "categories": ["commercial", "commercial.supermarket"], "place_id": "costco", "distance": 48}},
-            {"properties": {"name": "Costco Gasoline", "categories": ["commercial.gas"], "place_id": "gas", "distance": 140}},
+    def test_nearest_named_place_across_both_category_groups_names_a_position(self):
+        # Mirrors a live Maumelle lookup: the point is inside a park; hotels are kilometres away.
+        everyday = {"features": [
+            {"properties": {"name": "Bank ATM", "categories": ["service.financial.atm"], "distance": 0}},
+            {"properties": {"name": "Lake Willastein Park", "formatted": "Lake Willastein Park, Maumelle, AR",
+                            "categories": ["leisure", "leisure.park"], "place_id": "park", "distance": 3}},
+            {"properties": {"name": "Kroger", "categories": ["building", "building.commercial"], "place_id": "kroger", "distance": 558}},
         ]}
+        travel = {"features": [{"properties": {"name": "Hampton Inn Maumelle", "categories": ["accommodation.hotel"],
+                                               "place_id": "hotel", "distance": 3170}}]}
+        responses = lambda path, params: travel if "accommodation" in params["categories"] else everyday
         env = {"GEOAPIFY_API_KEY": "test", "GEOTRACKER_PHOTON_URL": ""}
-        with patch.dict(os.environ, env), patch("geotracker.core.provider_request", return_value=places) as request:
-            result = reverse_geocode(self.store, 34.749, -92.332)
-            cached = reverse_geocode(self.store, 34.74903, -92.332)
-            wider = reverse_geocode(self.store, 34.749, -92.332, radius_m=515)
-        self.assertEqual((result["name"], result["place_name"]), ("Costco Wholesale", "Costco Wholesale"))
-        self.assertEqual(result["address"], "Costco Wholesale, 1 Warehouse Way")
-        self.assertEqual((result["category"], result["provider_place_id"], result["distance_m"]), ("commercial.supermarket", "costco", 48))
+        with patch.dict(os.environ, env), patch("geotracker.core.provider_request", side_effect=responses) as request:
+            result = reverse_geocode(self.store, 34.852116, -92.412809)
+            cached = reverse_geocode(self.store, 34.85214, -92.412809)
+            wider = reverse_geocode(self.store, 34.852116, -92.412809, radius_m=515)
+        self.assertEqual((result["name"], result["category"], result["distance_m"]), ("Lake Willastein Park", "leisure.park", 3))
+        self.assertEqual(result["address"], "Lake Willastein Park, Maumelle, AR")
         self.assertEqual((cached["cache"], cached["approximate"]), ("region", True))
-        # Each search radius is its own lookup: an area stay searches its whole extent.
         self.assertEqual(wider["cache"], "provider")
-        self.assertEqual(request.call_count, 2)
-        path, params = request.call_args_list[0].args
-        self.assertEqual(path, "/v2/places")
-        self.assertEqual((params["filter"], params["bias"], params["conditions"], params["limit"]),
-                         ("circle:-92.332,34.749,150", "proximity:-92.332,34.749", "named", 20))
-        self.assertNotIn("highway", params["categories"].split(","))
-        self.assertEqual(request.call_args_list[1].args[1]["filter"], "circle:-92.332,34.749,600")
+        # Two requests per lookup, one per category group, never mixed in one request.
+        self.assertEqual(request.call_count, 4)
+        first, second = (call.args[1] for call in request.call_args_list[:2])
+        self.assertEqual({first["categories"].split(",")[0], second["categories"].split(",")[0]}, {"activity", "accommodation"})
+        self.assertFalse(set(first["categories"].split(",")) & set(second["categories"].split(",")))
+        for params in (first, second):
+            self.assertEqual((params["filter"], params["bias"], params["conditions"], params["limit"]),
+                             ("circle:-92.412809,34.852116,150", "proximity:-92.412809,34.852116", "named", 20))
+            self.assertNotIn("highway", params["categories"].split(","))
+        self.assertEqual(request.call_args_list[2].args[1]["filter"], "circle:-92.412809,34.852116,600")
+
+    def test_nearer_place_from_the_second_category_group_wins(self):
+        everyday = {"features": [{"properties": {"name": "Riverside Park", "categories": ["leisure.park"], "distance": 60}}]}
+        travel = {"features": [{"properties": {"name": "Planet Fitness", "categories": ["sport.fitness"], "distance": 20}}]}
+        responses = lambda path, params: travel if "sport" in params["categories"] else everyday
+        with patch.dict(os.environ, {"GEOAPIFY_API_KEY": "test", "GEOTRACKER_PHOTON_URL": ""}), \
+                patch("geotracker.core.provider_request", side_effect=responses):
+            self.assertEqual(reverse_geocode(self.store, 41, -87.9)["name"], "Planet Fitness")
 
     def test_no_named_place_nearby_falls_back_to_the_address(self):
         reverse = {"results": [{"formatted": "5511 West Markham Street, Little Rock, AR", "result_type": "building"}]}
@@ -670,7 +683,7 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(result["name"], "5511 West Markham Street, Little Rock, AR")
         self.assertEqual(result["place_name"], "")
         self.assertEqual(result["source"], "geoapify_reverse")
-        self.assertEqual([call.args[0] for call in request.call_args_list], ["/v2/places", "/v1/geocode/reverse"])
+        self.assertEqual([call.args[0] for call in request.call_args_list], ["/v2/places", "/v2/places", "/v1/geocode/reverse"])
 
     def test_photon_searches_its_radius_and_skips_streets(self):
         street = {"geometry": {"coordinates": [-87.9, 41]}, "properties": {"name": "Main Street", "osm_key": "highway"}}
@@ -680,6 +693,76 @@ class StoreTests(unittest.TestCase):
             result = reverse_geocode(self.store, 41, -87.9, radius_m=250)
         self.assertEqual(result["name"], "Corner Cafe")
         self.assertIn("radius=0.3", request.call_args.args[0])
+
+    def test_places_provider_follows_settings_when_configured(self):
+        only_geoapify = {"GEOAPIFY_API_KEY": "key", "MAPBOX_ACCESS_TOKEN": "", "GEOTRACKER_PHOTON_URL": ""}
+        both = {**only_geoapify, "MAPBOX_ACCESS_TOKEN": "token"}
+        with patch.dict(os.environ, only_geoapify):
+            self.assertEqual(places_provider(self.store), "geoapify")
+            with self.assertRaisesRegex(ValueError, "Set MAPBOX_ACCESS_TOKEN to use Mapbox"):
+                self.store.save_settings({"places_provider": "mapbox"})
+            with self.assertRaisesRegex(ValueError, "places_provider must be one of"):
+                self.store.save_settings({"places_provider": "google"})
+        with patch.dict(os.environ, both):
+            self.assertEqual(self.store.save_settings({"places_provider": "mapbox"})["places_provider"], "mapbox")
+            self.assertEqual((places_provider(self.store), places_provider_identity(self.store)), ("mapbox", "mapbox"))
+        # A chosen provider whose token was removed falls back to one that works.
+        with patch.dict(os.environ, only_geoapify):
+            self.assertEqual(places_provider(self.store), "geoapify")
+            self.assertEqual(self.store.save_settings({"timezone": "UTC"})["places_provider"], "mapbox")
+        with patch.dict(os.environ, {**only_geoapify, "GEOAPIFY_API_KEY": ""}):
+            self.assertIsNone(places_provider(self.store))
+            with self.assertRaisesRegex(ValueError, "MAPBOX_ACCESS_TOKEN"):
+                reverse_geocode(self.store, 41, -87.9)
+
+    def test_mapbox_names_a_position_after_the_nearest_poi_within_the_radius(self):
+        origin = (34.852116, -92.412809)
+        def poi(name, east_m, categories, feature_type="poi"):
+            lat, lon = shifted(origin, east_m, 0)
+            return {"type": "Feature", "geometry": {"type": "Point", "coordinates": [lon, lat]},
+                    "properties": {"name": name, "feature_type": feature_type, "mapbox_id": "id-" + name,
+                                   "full_address": name + ", Maumelle, Arkansas", "coordinates": {"latitude": lat, "longitude": lon},
+                                   "poi_category_ids": categories, "poi_category": [c.replace("_", " ") for c in categories]}}
+        pois = {"features": [poi("Kroger", 400, ["grocery"]), poi("Chase ATM", 10, ["atm"]),
+                             poi("Lake Willastein Park", 40, ["park"])]}
+        address = {"features": [poi("1 Lake Drive", 0, [], "address")]}
+        requests = []
+        def respond(url):
+            requests.append(url)
+            return pois if "types=poi" in url else address
+        env = {"MAPBOX_ACCESS_TOKEN": "token", "GEOAPIFY_API_KEY": "", "GEOTRACKER_PHOTON_URL": ""}
+        with patch.dict(os.environ, env), patch("geotracker.core.json_get", side_effect=respond):
+            park = reverse_geocode(self.store, *origin)
+            far = reverse_geocode(self.store, *shifted(origin, 0, 2000))
+        self.assertEqual((park["name"], park["category"], park["distance_m"], park["source"]),
+                         ("Lake Willastein Park", "park", 40, "mapbox_searchbox"))
+        self.assertEqual(park["provider_place_id"], "id-Lake Willastein Park")
+        self.assertEqual((far["name"], far["place_name"]), ("1 Lake Drive, Maumelle, Arkansas", ""))
+        self.assertTrue(requests[0].startswith("https://api.mapbox.com/search/searchbox/v1/reverse?"))
+        for part in ("longitude=-92.412809", "latitude=34.852116", "types=poi", "limit=10", "access_token=token"):
+            self.assertIn(part, requests[0])
+        self.assertIn("types=address%2Cstreet", requests[-1])
+
+    def test_mapbox_search_and_cache_are_separate_from_other_providers(self):
+        found = {"features": [{"type": "Feature", "geometry": {"type": "Point", "coordinates": [-92.3, 34.8]},
+                               "properties": {"name": "Costco Wholesale", "feature_type": "poi", "mapbox_id": "costco",
+                                              "full_address": "Costco Wholesale, 1 Warehouse Way",
+                                              "coordinates": {"latitude": 34.8, "longitude": -92.3},
+                                              "poi_category_ids": ["warehouse_store"], "poi_category": ["warehouse store"]}}]}
+        env = {"MAPBOX_ACCESS_TOKEN": "token", "GEOAPIFY_API_KEY": "key", "GEOTRACKER_PHOTON_URL": ""}
+        with patch.dict(os.environ, env), patch("geotracker.core.json_get", return_value=found) as request:
+            self.store.save_settings({"places_provider": "mapbox"})
+            results = geocode(self.store, "costco", 34.85, -92.41)
+            geocode(self.store, "costco", 34.85, -92.41)
+        self.assertEqual(request.call_count, 1)
+        self.assertIn("/search/searchbox/v1/forward?q=costco", request.call_args.args[0])
+        self.assertIn("proximity=-92.41%2C34.85", request.call_args.args[0])
+        self.assertEqual((results[0]["name"], results[0]["lat"], results[0]["provider_place_id"]), ("Costco Wholesale", 34.8, "costco"))
+        # Switching back to Geoapify asks Geoapify instead of reusing Mapbox's cached answer.
+        with patch.dict(os.environ, env), patch("geotracker.core.provider_request", return_value={"results": []}) as geoapify:
+            self.store.save_settings({"places_provider": "geoapify"})
+            self.assertEqual(geocode(self.store, "costco", 34.85, -92.41), [])
+        self.assertEqual(geoapify.call_count, 1)
 
     def test_geoapify_reverse_prefers_place_name_and_keeps_address(self):
         response = {"results": [{"name": "War Memorial Park",
@@ -695,7 +778,7 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(nearby["name"], "War Memorial Park")
         self.assertEqual(nearby["cache"], "region")
         self.assertEqual(result["source"], "geoapify_reverse")
-        self.assertEqual(request.call_count, 2)
+        self.assertEqual(request.call_count, 3)
 
     def test_geoapify_reverse_uses_address_when_place_is_unnamed(self):
         response = {"results": [{"formatted": "1200 Main Street, Little Rock, AR", "result_type": "building"}]}
