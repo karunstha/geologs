@@ -23,6 +23,11 @@ _reverse_lock = threading.Lock()
 DEFAULT_SETTINGS = {"speed_strategy": "reported", "reported_speed_offset_kmh": 0.0, "timezone": "UTC"}
 MAX_CONNECTED_GAP_SECONDS = 900
 MAX_PLAUSIBLE_SPEED_MPS = 55.6
+MOVEMENT_MODES = ("driving", "cycling", "running", "walking")
+# Travel that leaves and returns to one place is kept only when it really went somewhere;
+# smaller excursions are GPS drift between two halves of one stay.
+ROUND_TRIP_MIN_EXCURSION_M = 150
+ROUND_TRIP_MIN_DISTANCE_M = 300
 
 
 def database_path() -> str:
@@ -90,19 +95,77 @@ def _connected_elapsed(previous, point, held_since=None):
     if not accurate:
         return None
     current_at = datetime.fromisoformat(point["timestamp"])
-    elapsed = (current_at - datetime.fromisoformat(previous["timestamp"])).total_seconds()
-    distance = metres(previous["lat"], previous["lon"], point["lat"], point["lon"])
-    if 0 < elapsed <= MAX_CONNECTED_GAP_SECONDS and distance / elapsed <= MAX_PLAUSIBLE_SPEED_MPS:
-        return elapsed
     # Home Assistant may return one unchanged state for several polls while the
     # device is moving. The transition could have happened anywhere inside that
-    # short window, so use its first observation rather than the last poll.
+    # short window, so its first observation gives the conservative duration;
+    # timing from the last poll would turn a run into a drive.
+    starts = [previous]
     if held_since is not None and held_since is not previous and _same_source_state(held_since, previous):
-        elapsed = (current_at - datetime.fromisoformat(held_since["timestamp"])).total_seconds()
-        distance = metres(held_since["lat"], held_since["lon"], point["lat"], point["lon"])
+        starts.insert(0, held_since)
+    for start in starts:
+        elapsed = (current_at - datetime.fromisoformat(start["timestamp"])).total_seconds()
+        distance = metres(start["lat"], start["lon"], point["lat"], point["lon"])
         if 0 < elapsed <= MAX_CONNECTED_GAP_SECONDS and distance / elapsed <= MAX_PLAUSIBLE_SPEED_MPS:
             return elapsed
     return None
+
+
+def reported_speed(point):
+    """Source-reported speed only; stored estimates repeat the chord speed."""
+    if point.get("speed_origin") in ("reported", "reported_adjusted"):
+        return point.get("speed_mps")
+    return None
+
+
+def _weighted_percentile(samples, fraction):
+    """Percentile of (value, weight) pairs, so long moves outweigh short jitter."""
+    ordered = sorted(samples)
+    target = sum(weight for _, weight in ordered) * fraction
+    running = 0.0
+    for value, weight in ordered:
+        running += weight
+        if running >= target:
+            return value
+    return ordered[-1][0] if ordered else 0.0
+
+
+def classify_motion(moves):
+    """Estimate walking, running, cycling, or driving from connected moves.
+
+    `moves` holds (distance_m, seconds, reported_speed_mps or None). Speeds are
+    weighted by distance, so a single GPS jump cannot turn a walk into a drive.
+    Running and cycling overlap between about 12 and 16 km/h; the median speed
+    decides, which suits recreational runs and commuter cycling. A median of
+    25 km/h or more is treated as driving: city traffic sampled once a minute
+    averages about that, while few riders sustain it.
+    """
+    samples = []
+    for distance, seconds, reported in moves:
+        if seconds <= 0 or distance < 10:
+            continue
+        speed = max(distance / seconds, reported or 0)
+        samples.append((speed * 3.6, distance))
+    if not samples:
+        return None
+    total = sum(distance for _, distance in samples)
+    fast = sum(distance for kmh, distance in samples if kmh >= 35)
+    median = _weighted_percentile(samples, .5)
+    if fast >= 1000 or fast >= .35 * total or median >= 25:
+        mode = "driving"
+    elif median >= 15:
+        mode = "cycling"
+    elif median >= 6.5:
+        mode = "running"
+    else:
+        mode = "walking"
+    moving_seconds = sum(seconds for distance, seconds, _ in moves if seconds > 0 and distance >= 10)
+    return {"mode": mode, "median_kmh": round(median, 1), "distance_m": total, "moving_seconds": moving_seconds}
+
+
+def is_excursion(trip):
+    """True when a trip went far enough to matter even if it ended where it began."""
+    return (trip.get("max_excursion_m", 0) >= ROUND_TRIP_MIN_EXCURSION_M
+            and trip["distance_km"] * 1000 >= ROUND_TRIP_MIN_DISTANCE_M)
 
 
 def stats_from_points(points):
@@ -154,33 +217,44 @@ def trips_between_stays(points, stay_rows, start=None, end=None):
                            if departure <= datetime.fromisoformat(point["timestamp"]) <= arrival]
             if len(trip_points) < 2:
                 continue
-            moving, held_since = [], trip_points[0]
+            moves, held_since = [], trip_points[0]
             for previous, point in zip(trip_points, trip_points[1:]):
                 seconds = _connected_elapsed(previous, point, held_since)
                 distance = metres(previous["lat"], previous["lon"], point["lat"], point["lon"])
                 if seconds is not None and distance >= 10:
-                    moving.append((distance, max(distance / seconds, point.get("speed_mps") or 0)))
+                    moves.append((distance, seconds, reported_speed(point)))
                 if not _same_source_state(previous, point):
                     held_since = point
-            if not moving:
+            motion = classify_motion(moves)
+            if motion is None:
                 continue
-            distance_m = sum(distance for distance, _ in moving)
-            peak_kmh = max(speed for _, speed in moving) * 3.6
-            driving_evidence = any(distance >= 60 and speed * 3.6 >= 25 for distance, speed in moving)
-            mode = "driving" if driving_evidence else "running_cycling" if peak_kmh >= 7 else "walking"
-            route_segments = [smooth_route_segment(segment) for segment in route_segments_from_points(trip_points)]
-            trips.append({
+            # Area stays (a lake loop) have an extent; distance inside it is not an excursion.
+            origin_reach = origin.get("radius_m") or 0
+            destination_reach = destination.get("radius_m") or 0
+            excursion = max(metres(origin["lat"], origin["lon"], point["lat"], point["lon"]) for point in trip_points) - origin_reach
+            loop = (metres(origin["lat"], origin["lon"], destination["lat"], destination["lon"])
+                    <= max(100, origin_reach + 50, destination_reach + 50))
+            trip = {
                 "start": origin["ended_at"], "end": destination["started_at"],
-                "source": source, "distance_km": round(distance_m / 1000, 2),
-                "mode": mode, "modes": {mode: len(moving)},
+                "source": source, "distance_km": round(motion["distance_m"] / 1000, 2),
+                "duration_minutes": round((arrival - departure).total_seconds() / 60, 1),
+                "moving_minutes": round(motion["moving_seconds"] / 60, 1),
+                "median_kmh": motion["median_kmh"], "max_excursion_m": max(0, round(excursion)),
+                "mode": motion["mode"], "modes": {motion["mode"]: len(moves)}, "loop": loop,
                 "from_stay_id": origin["id"], "to_stay_id": destination["id"],
                 "from_name": origin.get("place_name"), "to_name": destination.get("place_name"),
                 "from_lat": origin["lat"], "from_lon": origin["lon"],
                 "to_lat": destination["lat"], "to_lon": destination["lon"],
-                "route_segments": route_segments,
-                "coordinates": route_segments[0] if len(route_segments) == 1 else [],
-                "recorded_points": len(trip_points), "coverage_complete": len(route_segments) == 1,
-            })
+                "recorded_points": len(trip_points),
+            }
+            # Two stays at one spot joined by GPS drift are one visit, not a trip.
+            if loop and not is_excursion(trip):
+                continue
+            route_segments = [smooth_route_segment(segment) for segment in route_segments_from_points(trip_points)]
+            trip.update({"route_segments": route_segments,
+                         "coordinates": route_segments[0] if len(route_segments) == 1 else [],
+                         "coverage_complete": len(route_segments) == 1})
+            trips.append(trip)
     return sorted(trips, key=lambda trip: trip["start"], reverse=True)
 
 
@@ -333,7 +407,8 @@ class Store:
             end_observation_id INTEGER NOT NULL REFERENCES point_observations(id),
             started_at TEXT NOT NULL, ended_at TEXT NOT NULL,
             lat REAL NOT NULL, lon REAL NOT NULL,
-            point_count INTEGER NOT NULL, ongoing INTEGER NOT NULL DEFAULT 1
+            point_count INTEGER NOT NULL, ongoing INTEGER NOT NULL DEFAULT 1,
+            kind TEXT NOT NULL DEFAULT 'stationary', activity TEXT, distance_m REAL, radius_m REAL
         );
         CREATE INDEX IF NOT EXISTS observed_stays_v2_time ON observed_stays_v2(started_at);
         CREATE INDEX IF NOT EXISTS observed_stays_v2_source_time ON observed_stays_v2(source,started_at,ended_at);
@@ -359,7 +434,7 @@ class Store:
             """)
         if not self.postgres:
             version = self.db.execute("PRAGMA user_version").fetchone()[0]
-            rebuild_analysis = version < 8
+            rebuild_analysis = version < 11
             if version < 1:
                 self.db.execute("UPDATE points SET mode='running_cycling' WHERE mode='cycling'")
             if version < 2:
@@ -422,22 +497,28 @@ class Store:
                 event_columns = {row[1] for row in self.db.execute("PRAGMA table_info(events)")}
                 if "acknowledged_at" in event_columns:
                     self.db.execute("ALTER TABLE events DROP COLUMN acknowledged_at")
-        if self.postgres and not self.db.execute("SELECT 1 FROM schema_migrations WHERE version=5").fetchone():
-            self.db.execute("SELECT pg_advisory_xact_lock(hashtext('geotracker:analysis:migration:5'))")
-            if not self.db.execute("SELECT 1 FROM schema_migrations WHERE version=5").fetchone():
+            if version < 11:
+                stay_columns = {row[1] for row in self.db.execute("PRAGMA table_info(observed_stays_v2)")}
+                for column, definition in (("kind", "TEXT NOT NULL DEFAULT 'stationary'"), ("activity", "TEXT"),
+                                           ("distance_m", "REAL"), ("radius_m", "REAL")):
+                    if column not in stay_columns:
+                        self.db.execute(f"ALTER TABLE observed_stays_v2 ADD COLUMN {column} {definition}")
+        # Stay algorithm versions: 5 and 8 changed stationary stays; 12 adds area
+        # stays (moving around one place) and stray-fix tolerance. One rebuild
+        # covers every missing version.
+        rebuild_versions = (5, 8, 12)
+        if self.postgres and self._missing_migrations(rebuild_versions):
+            self.db.execute("SELECT pg_advisory_xact_lock(hashtext('geotracker:stays:rebuild'))")
+            missing = self._missing_migrations(rebuild_versions)
+            if missing:
                 from .analysis import process_stays
                 process_stays(self, rebuild=True)
-                self.db.execute("INSERT INTO schema_migrations(version) VALUES(5)")
-        if self.postgres and not self.db.execute("SELECT 1 FROM schema_migrations WHERE version=8").fetchone():
-            self.db.execute("SELECT pg_advisory_xact_lock(hashtext('geotracker:stays:migration:8'))")
-            if not self.db.execute("SELECT 1 FROM schema_migrations WHERE version=8").fetchone():
-                from .analysis import process_stays
-                process_stays(self, rebuild=True)
-                self.db.execute("INSERT INTO schema_migrations(version) VALUES(8)")
+                for version_number in missing:
+                    self.db.execute("INSERT INTO schema_migrations(version) VALUES(?)", (version_number,))
         elif not self.postgres and rebuild_analysis:
             from .analysis import process_stays
             process_stays(self, rebuild=True)
-            self.db.execute("PRAGMA user_version=8")
+            self.db.execute("PRAGMA user_version=11")
         elif not self.db.execute("SELECT 1 FROM stay_observation_state LIMIT 1").fetchone() and self.db.execute("SELECT 1 FROM point_observations LIMIT 1").fetchone():
             if self.postgres:
                 self.db.execute("SELECT pg_advisory_xact_lock(hashtext('geotracker:stays:bootstrap'))")
@@ -449,12 +530,16 @@ class Store:
         if not self.postgres and version < 9:
             self.db.execute("DELETE FROM analysis_cache")
             self.db.execute("PRAGMA user_version=9")
-        if not self.postgres and version < 10:
-            self.db.execute("PRAGMA user_version=10")
+        if not self.postgres and version < 11:
+            self.db.execute("PRAGMA user_version=11")
         self.db.commit()
 
     def close(self):
         self.db.close()
+
+    def _missing_migrations(self, versions):
+        applied = {row["version"] for row in self._rows("SELECT version FROM schema_migrations")}
+        return [version for version in versions if version not in applied]
 
     def _rows(self, query, args=()):
         return [dict(row) for row in self.db.execute(query, args).fetchall()]
@@ -536,7 +621,7 @@ class Store:
                 AND (cancelled_at IS NULL OR cancelled_at>?)) ORDER BY id""",
             (parse_time(start), parse_time(end), parse_time(start), parse_time(end),
              parse_time(start), parse_time(end), parse_time(end), parse_time(end), parse_time(end)))
-        value = ["stay-trips-v2", self.analysis_watermark(start, end, source), event_row["count"], event_row["max_id"], places, reminders]
+        value = ["stay-trips-v3", self.analysis_watermark(start, end, source), event_row["count"], event_row["max_id"], places, reminders]
         return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
     def stored_daily_overview(self, date, timezone_name, source=None, watermark=None):
@@ -977,11 +1062,13 @@ class Store:
         place = self.db.execute("SELECT id,name,lat,lon,radius_m,address FROM places WHERE id=?", (int(place_id),)).fetchone()
         if not place:
             raise ValueError("place not found")
-        from .analysis import stays
+        from .analysis import merge_split_visits, stays
+        at_place = [s for s in reversed(stays(self, start, end, limit=None)) if s["place_id"] == int(place_id)]
         visits = [{"arrival": s["started_at"], "departure": s["ended_at"],
                    "observed_minutes": s["observed_minutes"], "points": s["point_count"],
-                   "ongoing": bool(s["ongoing"]), "source": s["source"]}
-                  for s in stays(self, start, end, limit=None) if s["place_id"] == int(place_id)]
+                   "ongoing": bool(s["ongoing"]), "source": s["source"],
+                   "kind": s["kind"], "activity": s["activity"]}
+                  for s in reversed(merge_split_visits(at_place, lambda s: s["place_id"]))]
         return {"place": dict(place), "visits": visits, "total_observed_minutes": round(sum(v["observed_minutes"] for v in visits), 1)}
 
     def near(self, lat, lon, radius_m=250, start=None, end=None, limit=100, source=None):

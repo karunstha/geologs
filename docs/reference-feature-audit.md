@@ -4,7 +4,7 @@ The four reference projects informed the product choices below. “Built” desc
 
 | Source | Valuable feature | Geotracker status | Decision |
 |---|---|---|---|
-| [location-history-mcp-server](https://github.com/lucas-1000/location-history-mcp-server) | Stay detection, visits, frequent places, manual labels | Built | Stays need two accurate samples spanning at least five minutes within 50 m. Repeat stops become place suggestions; saved places provide names and geofences. |
+| [location-history-mcp-server](https://github.com/lucas-1000/location-history-mcp-server) | Stay detection, visits, frequent places, manual labels | Built | Stationary stays need accurate samples spanning at least 15 minutes within 50 m; area stays cover 15 minutes or more moving around one place, such as a lake loop, with a walking, running, or cycling activity. Repeat stops become place suggestions; saved places provide names and geofences. |
 | Same | Spatial indexing with PostGIS | Built, testing underway | Docker Compose runs PostGIS. The alternate store has GiST indexes for points, places, and reverse cache centers; nearby and cache lookups use `ST_DWithin`. SQLite remains supported. |
 | [tars-location-mcp](https://github.com/michelgrolet/tars-location-mcp) | Coverage gaps and stale current fixes | Built | MCP exposes per-source coverage and gaps; current location includes fix age and a stale flag. |
 | Same | Overlapping historical imports | Partly built | Classic raw Takeout `locations` and CSV imports are idempotent. Semantic segment and `timelineObjects` visit/activity import remain planned. |
@@ -16,7 +16,7 @@ The four reference projects informed the product choices below. “Built” desc
 
 ## How the derived features work
 
-- **Observed stays:** incremental per-source analysis processes raw observations, including repeated Home Assistant polls. A late import rebuilds just its source. Gaps longer than 30 minutes split stays. Low-accuracy points do not support a stay. The result is observed time, not proof of where the person spent a gap.
+- **Observed stays:** incremental per-source analysis processes raw observations, including repeated Home Assistant polls. A late import rebuilds just its source. Gaps longer than 30 minutes split stays. Low-accuracy points neither support nor end a stay, and one or two stray fixes are ignored. Travel between stationary stays is searched for area stays, which are recomputed after the last settled stationary stay as new fixes arrive. The result is observed time, not proof of where the person spent a gap.
 - **Compact timeline:** raw observations remain intact. A materialized timeline keeps movement samples and only the arrival plus latest/departure edges of stationary periods. Normal ingestion updates only the affected source tail; full reconstruction is reserved for migrations and explicit rebuilds.
 - **Frequent places:** stays matching saved place radii are named. Unmatched stays within 75 m form suggestions that the user can name. Visible suggestions and visited places receive cache-first reverse geocoded addresses when a provider is configured.
 - **Transitions:** consecutive stays from the same source count as a transition when less than 24 hours apart. Scores decay with a 90-day half-life; raw counts remain available.

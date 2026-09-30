@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from .core import Store, current_location, deliver_webhook, geocode, reverse_geocode
-from .analysis import daily_overview, day_summary, finalize_previous_day, insights, place_patterns, predict_next, resolve_place_patterns, stays, transitions, visited_places
+from .analysis import daily_overview, day_summary, finalize_previous_day, insights, place_patterns, predict_next, resolve_place_patterns, search_visits, stays, transitions, visited_places
 from .mcp import SUPPORTED_VERSIONS, dispatch
 from .postgres import INTEGRITY_ERRORS
 
@@ -170,6 +170,7 @@ class Handler(BaseHTTPRequestHandler):
             elif url.path == "/api/stays": value = stays(store, q.get("start"), q.get("end"), q.get("source"), q.get("limit", 500))
             elif url.path == "/api/frequent-places": value = resolve_place_patterns(store, place_patterns(store, None))[0][:min(int(q.get("limit", 50)), 5000)]
             elif url.path == "/api/visited-places": value = visited_places(store, q.get("limit", 100))
+            elif url.path == "/api/visits": value = search_visits(store, q.get("q", ""), q.get("start"), q.get("end"), q.get("limit", 50), q.get("timezone"))
             elif url.path == "/api/transitions": value = transitions(store, q.get("limit", 50))
             elif url.path == "/api/predict-next": value = predict_next(store)
             elif url.path == "/api/insights": value = insights(store, min(int(q.get("limit", 50)), 100))

@@ -3,7 +3,7 @@ import json
 import sqlite3
 
 from .core import current_location, deliver_webhook, geocode, reverse_geocode
-from .analysis import daily_overview, day_summary, place_patterns, predict_next, resolve_place_patterns, stays, transitions, visited_places
+from .analysis import daily_overview, day_summary, place_patterns, predict_next, resolve_place_patterns, search_visits, stays, transitions, visited_places
 from .postgres import INTEGRITY_ERRORS
 
 DB_INPUT_ERRORS = (ValueError, KeyError, TypeError, sqlite3.IntegrityError) + INTEGRITY_ERRORS
@@ -25,16 +25,17 @@ TOOLS = [
     {"name": "get_location_at_time", "description": "Nearest recorded point to an ISO 8601 timestamp, including its time difference.", "inputSchema": schema({"timestamp": STRING}, ["timestamp"])},
     {"name": "search_locations_near", "description": "Recorded points within a radius of coordinates, optionally in a time window.", "inputSchema": schema({"lat": NUMBER, "lon": NUMBER, "radius_m": NUMBER, "start": STRING, "end": STRING, "source": STRING, "limit": INTEGER}, ["lat", "lon"])},
     {"name": "get_travel_stats", "description": "Sampled distance, movement hours, and mode counts for a time window.", "inputSchema": schema({"start": STRING, "end": STRING, "source": STRING})},
-    {"name": "get_trips", "description": "Trips between consecutive confirmed stays of at least 15 minutes, with route segments, distance, endpoints, coverage, and estimated transport mode.", "inputSchema": schema({"start": STRING, "end": STRING, "source": STRING})},
+    {"name": "get_trips", "description": "Trips between consecutive stays, with route segments, distance, duration, endpoints, coverage, and estimated mode (walking, running, cycling, or driving). Round trips that return to their starting place, such as a run from home, are included with loop=true.", "inputSchema": schema({"start": STRING, "end": STRING, "source": STRING})},
     {"name": "get_coverage", "description": "Source date ranges and gaps over 24 hours; use before drawing conclusions from missing location data.", "inputSchema": schema({})},
     {"name": "get_place_visits", "description": "Observed visits to a saved place, split by exits or gaps over 30 minutes.", "inputSchema": schema({"place_id": INTEGER, "start": STRING, "end": STRING}, ["place_id"])},
-    {"name": "get_stays", "description": "Observed stops of at least 15 minutes within 50 m, with optional saved place labels. Sparse GPS cannot prove time in gaps.", "inputSchema": schema({"start": STRING, "end": STRING, "source": STRING, "limit": INTEGER})},
+    {"name": "get_stays", "description": "Observed stays of at least 15 minutes, with optional saved place labels. kind=stationary is a stop within 50 m; kind=area is time moving around one place (a lake loop, park, or large store) with an activity of walking, running, or cycling, its distance_m, and radius_m. Sparse GPS cannot prove time in gaps.", "inputSchema": schema({"start": STRING, "end": STRING, "source": STRING, "limit": INTEGER})},
+    {"name": "search_visits", "description": "Answer questions like 'what day did I go to Costco?' or 'when was I last at the lake?'. Finds observed visits whose place name, address, or category contains every query word (word prefixes, case-insensitive), and returns matching places plus each visit's local date, weekday, arrival, departure, and duration, newest first. Matching is literal, not semantic: if nothing matches, retry with a brand, a place type such as 'supermarket', 'park', or 'water', or a street name.", "inputSchema": schema({"query": STRING, "start": STRING, "end": STRING, "limit": INTEGER, "timezone": STRING}, ["query"])},
     {"name": "get_frequent_places", "description": "Saved and suggested places ranked by observed stop time and visits; unlabeled clusters can be named with save_place.", "inputSchema": schema({"limit": INTEGER})},
     {"name": "get_visited_places", "description": "Saved and unsaved observed places except Home, ranked by total sampled time, with cache-first place labels.", "inputSchema": schema({"limit": INTEGER})},
     {"name": "get_unlabeled_frequent_places", "description": "Frequent observed stop clusters that do not yet match a saved place.", "inputSchema": schema({"limit": INTEGER})},
     {"name": "get_time_at_place", "description": "Observed visit count and sampled duration at a saved place; unobserved gaps are excluded.", "inputSchema": schema({"place_id": INTEGER, "start": STRING, "end": STRING}, ["place_id"])},
-    {"name": "get_day_summary", "description": "Detailed daily fixes, trips bounded by 15 minute stays, observed visited places excluding Home, and coverage for a local calendar day.", "inputSchema": schema({"date": STRING, "timezone": STRING, "source": STRING}, ["date"])},
-    {"name": "get_daily_overview", "description": "Compact persisted overview for one local day: places including Home and time at each, trips, distances, fixes, activity counts, and reminder activity. Designed for efficient LLM retrieval.", "inputSchema": schema({"date": STRING, "timezone": STRING, "source": STRING}, ["date"])},
+    {"name": "get_day_summary", "description": "Detailed daily fixes, stays (stationary and area), trips between them, activity totals, observed visited places excluding Home, and coverage for a local calendar day.", "inputSchema": schema({"date": STRING, "timezone": STRING, "source": STRING}, ["date"])},
+    {"name": "get_daily_overview", "description": "Compact persisted overview for one local day: chronological visits, places including Home and time at each, trips, distances, activity totals (walking, running, cycling, driving), fixes, and reminder activity. Designed for efficient LLM retrieval.", "inputSchema": schema({"date": STRING, "timezone": STRING, "source": STRING}, ["date"])},
     {"name": "list_daily_overviews", "description": "List persisted daily overview records and totals without loading every full summary.", "inputSchema": schema({"start": STRING, "end": STRING, "limit": INTEGER})},
     {"name": "get_place_transitions", "description": "Observed transitions between stop clusters, counted by source and grouped across visits.", "inputSchema": schema({"limit": INTEGER})},
     {"name": "predict_next_destination", "description": "Evidence-based next place estimate from at least three observed departures; may return no prediction.", "inputSchema": schema({})},
@@ -74,6 +75,8 @@ def call_tool(store, name, args):
         return store.place_visits(args["place_id"], args.get("start"), args.get("end"))
     if name == "get_stays":
         return stays(store, args.get("start"), args.get("end"), args.get("source"), args.get("limit", 500))
+    if name == "search_visits":
+        return search_visits(store, args["query"], args.get("start"), args.get("end"), args.get("limit", 50), args.get("timezone"))
     if name == "get_frequent_places":
         return resolve_place_patterns(store, place_patterns(store, None))[0][:min(int(args.get("limit", 50)), 5000)]
     if name == "get_visited_places":

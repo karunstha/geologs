@@ -88,7 +88,9 @@ CREATE TABLE IF NOT EXISTS observed_stays_v2 (
     end_observation_id BIGINT NOT NULL REFERENCES point_observations(id),
     started_at TEXT NOT NULL, ended_at TEXT NOT NULL,
     lat DOUBLE PRECISION NOT NULL, lon DOUBLE PRECISION NOT NULL,
-    point_count INTEGER NOT NULL, ongoing INTEGER NOT NULL DEFAULT 1
+    point_count INTEGER NOT NULL, ongoing INTEGER NOT NULL DEFAULT 1,
+    kind TEXT NOT NULL DEFAULT 'stationary', activity TEXT,
+    distance_m DOUBLE PRECISION, radius_m DOUBLE PRECISION
 );
 CREATE INDEX IF NOT EXISTS observed_stays_v2_time ON observed_stays_v2(started_at);
 CREATE INDEX IF NOT EXISTS observed_stays_v2_source_time ON observed_stays_v2(source,started_at,ended_at);
@@ -249,6 +251,14 @@ class PostgresConnection:
                         WHERE p.id=r.place_id AND r.destination_name IS NULL""")
                     self.connection.execute("ALTER TABLE events DROP COLUMN IF EXISTS acknowledged_at")
                     self.connection.execute("INSERT INTO schema_migrations(version) VALUES(10)")
+                if not self.connection.execute("SELECT 1 FROM schema_migrations WHERE version=11").fetchone():
+                    # Area stays; Store rebuilds existing stays under migration 12.
+                    self.connection.execute("""ALTER TABLE observed_stays_v2
+                        ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'stationary'""")
+                    self.connection.execute("ALTER TABLE observed_stays_v2 ADD COLUMN IF NOT EXISTS activity TEXT")
+                    self.connection.execute("ALTER TABLE observed_stays_v2 ADD COLUMN IF NOT EXISTS distance_m DOUBLE PRECISION")
+                    self.connection.execute("ALTER TABLE observed_stays_v2 ADD COLUMN IF NOT EXISTS radius_m DOUBLE PRECISION")
+                    self.connection.execute("INSERT INTO schema_migrations(version) VALUES(11)")
                 self.connection.commit()
                 _initialized_urls.add(url)
 

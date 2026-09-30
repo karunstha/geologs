@@ -23,9 +23,9 @@
 
   <main>
     <section id="explore-view" class="view active">
-      <div class="page-head"><h1 id="history-title">Today</h1><button id="export" class="outline-button" hidden>Export GeoJSON</button></div>
+      <div class="page-head"><div><h1 id="history-title">Today</h1><p id="day-context" class="page-subtitle" hidden></p></div><button id="export" class="outline-button" hidden>Export GeoJSON</button></div>
       <div id="history-filters" class="daybar" aria-label="Choose a day">
-        <div class="day-navigation"><button id="previous-day" class="day-arrow" type="button" aria-label="Previous day">‹</button><label>Day<input id="day-date" type="date" required></label><button id="next-day" class="day-arrow" type="button" aria-label="Next day">›</button><button id="today" class="text-button" type="button">Today</button></div>
+        <div class="day-navigation"><button id="previous-day" class="day-arrow" type="button" aria-label="Previous day" title="Previous day (←)">‹</button><label>Day<input id="day-date" type="date" required></label><button id="next-day" class="day-arrow" type="button" aria-label="Next day" title="Next day (→)">›</button><button id="today" class="text-button" type="button">Today</button></div>
         <label id="source-filter">Source<select id="source"><option value="">All sources</option></select></label>
       </div>
 
@@ -34,38 +34,37 @@
         <button id="current-coordinates" class="coordinate-copy" type="button" title="Copy coordinates"></button>
       </section>
 
-      <div id="summary" class="metrics" hidden>
-        <div><span>Driving trips</span><strong id="stat-driving">0</strong></div>
-        <div><span>Walking trips</span><strong id="stat-walking">0</strong></div>
-        <div><span>Running / cycling trips</span><strong id="stat-running-cycling">0</strong></div>
-        <div><span>Places visited</span><strong id="stat-places">0</strong></div>
-        <div><span>Timeline fixes</span><strong id="stat-points">0 key out of 0 raw</strong></div>
+      <div id="summary" class="summary" hidden>
+        <div class="metrics">
+          <div><span>Distance</span><strong id="stat-distance">0 km</strong></div>
+          <div><span>In motion</span><strong id="stat-moving">0 min</strong></div>
+          <div><span>Places visited</span><strong id="stat-places">0</strong></div>
+          <div><span>Trips</span><strong id="stat-trips">0</strong></div>
+        </div>
+        <div id="activity-chips" class="activity-chips" aria-label="Activity by mode"></div>
       </div>
-      <p id="day-context" class="day-context" hidden></p>
 
       <div id="history-layout" class="history-layout no-data">
         <section class="map-shell" aria-label="Recorded location map">
-          <div class="map-topline"><span id="map-note">Recorded route</span><button id="locate" class="small-button" hidden>Current location</button></div>
+          <div class="map-topline"><span id="map-note">Recorded route</span><div class="map-actions"><button id="fit-day" class="small-button" type="button" hidden>Whole day</button><button id="locate" class="small-button" type="button" hidden>Current location</button></div></div>
           <div class="map-stage"><div id="map" role="application" aria-label="Location map"></div><div id="history-empty" class="map-empty"><strong>No locations recorded for this day</strong><span>Choose another date to explore your history.</span></div></div>
-          <div id="map-footer" class="map-footer" hidden><span><i class="legend path"></i> Recorded GPS path</span><span>Gaps and implausible jumps are not connected</span></div>
+          <div id="map-footer" class="map-footer" hidden><span id="map-legend" class="map-legend"></span><span class="map-caveat">Gaps and implausible jumps are not connected</span></div>
         </section>
         <aside id="inspector" class="inspector" hidden>
-          <section><h2>Visited places</h2><div id="visited-places" class="list"></div></section>
-          <section id="map-detail-section" hidden><h2>Nearby points</h2><div id="map-detail" class="list"></div></section>
+          <section class="timeline-section"><div class="section-title"><h2>Day timeline</h2><span id="timeline-count" class="muted-count"></span></div><ol id="day-timeline" class="day-timeline"></ol></section>
+          <section id="map-detail-section" hidden><div class="section-title"><h2>Nearby points</h2><button id="close-map-detail" class="text-button" type="button">Close</button></div><div id="map-detail" class="list"></div></section>
         </aside>
       </div>
 
       <section id="history-details" class="history-details" hidden>
         <div class="detail-tabs" role="tablist" aria-label="History details">
-          <button class="detail-tab active" data-panel="trips" role="tab" aria-selected="true">Trips</button>
-          <button class="detail-tab" data-panel="stays" role="tab" aria-selected="false">Stays</button>
+          <button class="detail-tab active" data-panel="places" role="tab" aria-selected="true">Places</button>
           <button class="detail-tab" data-panel="speed" role="tab" aria-selected="false">Speed</button>
           <button class="detail-tab" data-panel="samples" role="tab" aria-selected="false">Samples</button>
           <button class="detail-tab" data-panel="patterns" role="tab" aria-selected="false">Patterns</button>
           <button class="detail-tab" data-panel="coverage" role="tab" aria-selected="false">Coverage</button>
         </div>
-        <div class="detail-panel active" data-panel-view="trips"><div id="trips" class="list"></div></div>
-        <div class="detail-panel" data-panel-view="stays"><div id="stays" class="list"></div></div>
+        <div class="detail-panel active" data-panel-view="places"><div id="visited-places" class="list"></div></div>
         <div class="detail-panel" data-panel-view="speed"><div id="speed-chart" class="chart-wrap"></div></div>
         <div class="detail-panel" data-panel-view="samples"><div class="sample-toolbar"><div class="mini-tabs"><button class="active" data-sample-view="timeline">Key fixes</button><button data-sample-view="raw">Raw samples</button></div><p id="sample-count" class="section-note"></p></div><div class="table-wrap"><table><thead><tr><th>Time</th><th>Type</th><th>Source</th><th>Mode</th><th>Speed</th><th>Coordinates</th><th>Accuracy</th><th></th></tr></thead><tbody id="points-table"></tbody></table></div><div id="raw-pagination" class="pagination" hidden><button id="raw-previous" class="outline-button">Previous</button><span id="raw-page"></span><button id="raw-next" class="outline-button">Next</button></div></div>
         <div class="detail-panel" data-panel-view="patterns"><p id="prediction" class="section-note"></p><div class="pattern-columns"><section><h3>Common places</h3><div id="pattern-places" class="list"></div></section><section><h3>Transitions</h3><div id="transitions" class="list"></div></section></div></div>
@@ -75,6 +74,11 @@
 
     <section id="places-view" class="view">
       <div class="page-head"><h1>Places</h1><button id="add-place" class="primary-button">Add place</button></div>
+      <section class="surface visit-search" aria-labelledby="visit-search-title">
+        <div class="section-heading"><div><h2 id="visit-search-title">Find a visit</h2><p>Search your history by place name, address, or type, such as Costco, lake, or supermarket.</p></div></div>
+        <form id="visit-search-form" class="search-row" role="search"><input id="visit-search" type="search" placeholder="When did I go to…" aria-label="Search visits" autocomplete="off"><button class="primary-button">Search</button></form>
+        <div id="visit-results" class="visit-results" aria-live="polite"></div>
+      </section>
       <div class="page-tabs" role="tablist" aria-label="Places">
         <button class="active" data-places-tab="saved" role="tab" aria-selected="true">Saved places</button>
         <button data-places-tab="visited" role="tab" aria-selected="false">Places visited</button>

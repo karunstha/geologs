@@ -1,13 +1,25 @@
 const $ = id => document.getElementById(id);
-const state = {points:[],timeline:[],places:[],visitedPlaces:[],reminders:[],reminderHistory:[],events:[],dailySummaries:[],day:null,lastEventId:0,insights:null,settings:null,followToday:true,focusPlace:null,coverage:null,current:null,sampleView:'timeline',rawPage:0,rawPageSize:50,rawTotal:0};
-let map, pathLayer, placeLayer, currentMarker, searchLayer;
+const state = {points:[],timeline:[],places:[],visitedPlaces:[],reminders:[],reminderHistory:[],events:[],dailySummaries:[],day:null,lastEventId:0,insights:null,settings:null,followToday:true,focusPlace:null,coverage:null,current:null,sampleView:'timeline',rawPage:0,rawPageSize:50,rawTotal:0,selected:null,fitKey:null,pendingStayId:null};
+let map, pathLayer, placeLayer, highlightLayer, currentMarker, searchLayer;
 let authDismissed=false;
 let exploreRequest=0;
 
 function toast(message){const box=$('toast');box.textContent=message;box.classList.add('show');clearTimeout(toast.timer);toast.timer=setTimeout(()=>box.classList.remove('show'),3800)}
 function safe(text){return String(text??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
-function formatTime(value){return value?new Date(value).toLocaleString(): '—'}
-function modeName(mode){return mode==='running_cycling'?'Running / cycling':mode?mode[0].toUpperCase()+mode.slice(1):'Unknown'}
+function zoneOptions(){const timeZone=state.settings?.timezone;if(!timeZone)return{};try{new Intl.DateTimeFormat(undefined,{timeZone});return{timeZone}}catch(_error){return{}}}
+function formatTime(value){return value?new Date(value).toLocaleString(undefined,zoneOptions()): '—'}
+function clock(value){return new Date(value).toLocaleTimeString([],{hour:'numeric',minute:'2-digit',...zoneOptions()})}
+function durationText(minutes){const total=Math.round(minutes||0);if(total<1)return'<1 min';const hours=Math.floor(total/60),rest=total%60;return hours?`${hours} h${rest?` ${rest} min`:''}`:`${rest} min`}
+function distanceText(km){return km>=10?`${km.toFixed(0)} km`:km>=.1?`${km.toFixed(1)} km`:`${Math.round(km*1000)} m`}
+const modeInfo={
+  driving:{label:'Drive',noun:'Driving',color:'#3567ad',icon:'<svg viewBox="0 0 24 24"><path d="M5 11l1.6-4.2A2 2 0 0 1 8.5 5.5h7a2 2 0 0 1 1.9 1.3L19 11"/><path d="M3.5 11h17v5.5h-17z"/><path d="M6 16.5v2M18 16.5v2"/><circle cx="7.5" cy="13.7" r=".6"/><circle cx="16.5" cy="13.7" r=".6"/></svg>'},
+  cycling:{label:'Ride',noun:'Cycling',color:'#8352bd',icon:'<svg viewBox="0 0 24 24"><circle cx="6" cy="16" r="3.5"/><circle cx="18" cy="16" r="3.5"/><path d="M6 16l3.5-7h6L18 16M9.5 9l3 7H6M14 5.5h2.5l-1 3.5"/></svg>'},
+  running:{label:'Run',noun:'Running',color:'#cf5f22',icon:'<svg viewBox="0 0 24 24"><circle cx="15.5" cy="4.5" r="1.8"/><path d="M5 20.5l3.5-.5 2.2-3.8M10.7 16.2l3.3 2.3v3M7 11.5l2.5-3.3 4.3.8 2.4 3.3 3 .7M10.8 16.2l2.9-7.2"/></svg>'},
+  walking:{label:'Walk',noun:'Walking',color:'#2d8a57',icon:'<svg viewBox="0 0 24 24"><circle cx="13" cy="4.5" r="1.8"/><path d="M10 21l1.8-6.2-2.3-2.3.9-4.3 3 .9 1.6 3 2.4.9M11.8 14.8l2.9 2.7.8 3.5M10.4 8.2L7.4 10v3"/></svg>'}
+};
+function modeName(mode){return mode==='running_cycling'?'Running / cycling':modeInfo[mode]?.noun||(mode?mode[0].toUpperCase()+mode.slice(1):'Unknown')}
+function modeIcon(mode){const info=modeInfo[mode];return info?`<span class="mode-icon" style="--mode:${info.color}" aria-hidden="true">${info.icon}</span>`:''}
+function stayActivityText(stay){if(stay.kind!=='area')return'';const distance=stay.distance_m?` · ${distanceText(stay.distance_m/1000)}`:'';return stay.activity?`${modeInfo[stay.activity]?.noun||stay.activity}${distance}`:'Moving around'}
 function roleName(role){return ({arrival:'Arrival',departure:'Departure',latest:'Latest at stop',movement:'Movement'})[role]||'Raw sample'}
 function kmh(point){return point?.speed_mps==null?'—':`${(point.speed_mps*3.6).toFixed(1)} km/h`}
 const placeIcons={
@@ -31,7 +43,18 @@ function localDateKey(date=new Date()){
   return [date.getFullYear(),String(date.getMonth()+1).padStart(2,'0'),String(date.getDate()).padStart(2,'0')].join('-');
 }
 function shiftDateKey(value,offset){const [year,month,day]=value.split('-').map(Number);const date=new Date(Date.UTC(year,month-1,day+offset));return [date.getUTCFullYear(),String(date.getUTCMonth()+1).padStart(2,'0'),String(date.getUTCDate()).padStart(2,'0')].join('-')}
-function params(){const [year,month,day]=$('day-date').value.split('-').map(Number);const start=new Date(year,month-1,day);const end=new Date(year,month-1,day+1);const q=new URLSearchParams({start:start.toISOString(),end:new Date(end.getTime()-1).toISOString()});if($('source').value)q.set('source',$('source').value);return q}
+function zonedMidnight(dateKey){
+  // Midnight of dateKey in the configured timezone, not the browser's.
+  const [year,month,day]=dateKey.split('-').map(Number);
+  const target=Date.UTC(year,month-1,day);
+  const timeZone=zoneOptions().timeZone;
+  if(!timeZone)return new Date(year,month-1,day);
+  const format=new Intl.DateTimeFormat('en-US',{timeZone,hourCycle:'h23',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  let guess=target;
+  for(let step=0;step<3;step++){const parts=Object.fromEntries(format.formatToParts(new Date(guess)).map(part=>[part.type,part.value]));const shown=Date.UTC(+parts.year,+parts.month-1,+parts.day,+parts.hour%24,+parts.minute,+parts.second);guess+=target-shown}
+  return new Date(guess);
+}
+function params(){const date=$('day-date').value;const start=zonedMidnight(date);const end=zonedMidnight(shiftDateKey(date,1));const q=new URLSearchParams({start:start.toISOString(),end:new Date(end.getTime()-1).toISOString()});if($('source').value)q.set('source',$('source').value);return q}
 function openAuth(message=''){if(authDismissed)return;$('auth-error').textContent=message;$('auth-panel').hidden=false;$('auth-token').focus()}
 async function api(path,options={}){
   const previousToken=sessionStorage.getItem('geotracker-token');
@@ -42,18 +65,50 @@ async function api(path,options={}){
 }
 async function post(path,body){return api(path,{method:'POST',body:JSON.stringify(body)})}
 function showView(view){document.querySelectorAll('.view').forEach(el=>el.classList.toggle('active',el.id===view+'-view'));document.querySelectorAll('.nav').forEach(el=>el.classList.toggle('active',el.dataset.view===view));if(view==='explore'&&map)setTimeout(()=>map.invalidateSize(),20)}
-function initMap(){if(!window.L){$('map').innerHTML='<div class="empty" style="padding:30px">Map library could not load. Check your internet connection.</div>';return}map=L.map('map',{zoomControl:false}).setView([39.5,-98.35],4);L.control.zoom({position:'bottomright'}).addTo(map);L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'&copy; OpenStreetMap contributors',maxZoom:19}).addTo(map);pathLayer=L.layerGroup().addTo(map);placeLayer=L.layerGroup().addTo(map);searchLayer=L.layerGroup().addTo(map);map.on('click',async e=>{const q=params();q.set('lat',e.latlng.lat);q.set('lon',e.latlng.lng);q.set('radius_m',250);q.set('limit',10);try{const rows=await api('/api/near?'+q);$('map-detail-section').hidden=false;$('map-detail').innerHTML=rows.map(p=>`<div class="list-item"><div><strong>${safe(formatTime(p.timestamp))}</strong><small>${safe(modeName(p.mode))} · ${safe(kmh(p))} · ${Math.round(p.distance_m)} m away</small></div></div>`).join('')||'<p class="empty">No recorded fixes within 250 m in this view.</p>'}catch(err){toast(err.message)}})}
-function drawMap(){
+function initMap(){
+  if(!window.L){$('map').innerHTML='<div class="empty" style="padding:30px">Map library could not load. Check your internet connection.</div>';return}
+  map=L.map('map',{zoomControl:false}).setView([39.5,-98.35],4);
+  L.control.zoom({position:'bottomright'}).addTo(map);
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'&copy; OpenStreetMap contributors',maxZoom:19}).addTo(map);
+  pathLayer=L.layerGroup().addTo(map);placeLayer=L.layerGroup().addTo(map);highlightLayer=L.layerGroup().addTo(map);searchLayer=L.layerGroup().addTo(map);
+  map.on('click',async e=>{const q=params();q.set('lat',e.latlng.lat);q.set('lon',e.latlng.lng);q.set('radius_m',250);q.set('limit',10);try{const rows=await api('/api/near?'+q);$('map-detail-section').hidden=false;$('map-detail').innerHTML=rows.map(p=>`<div class="list-item"><div><strong>${safe(formatTime(p.timestamp))}</strong><small>${safe(modeName(p.mode))} · ${safe(kmh(p))} · ${Math.round(p.distance_m)} m away</small></div></div>`).join('')||'<p class="empty">No recorded fixes within 250 m on this day.</p>'}catch(err){toast(err.message)}});
+}
+function mapPath(segment){return segment.map(c=>[c[1],c[0]])}
+function tripKey(trip){return `${trip.from_stay_id}-${trip.to_stay_id}`}
+function stayColor(stay){return modeInfo[stay.activity]?.color||'#176d69'}
+function selectedItem(){
+  const day=state.day,selected=state.selected;
+  if(!day||!selected)return null;
+  if(selected.type==='stay'){const stay=day.stays.find(item=>item.id===selected.key);return stay?{type:'stay',stay}:null}
+  const trip=day.trips.find(item=>tripKey(item)===selected.key);return trip?{type:'trip',trip}:null;
+}
+function dayBounds(){
+  const day=state.day,bounds=[];
+  for(const segment of day?.route_segments||[])bounds.push(...mapPath(segment));
+  for(const place of day?.places_including_home||[])bounds.push([place.lat,place.lon]);
+  if(state.current&&(day?.date===localDateKey()||!day?.points))bounds.push([state.current.lat,state.current.lon]);
+  return bounds;
+}
+function fitDay(){
   if(!map)return;
-  pathLayer.clearLayers();
-  placeLayer.clearLayers();
+  const bounds=dayBounds();
+  if(bounds.length)map.fitBounds(L.latLngBounds(bounds).pad(.12),{maxZoom:15});
+  else if(state.places.length)map.fitBounds(L.latLngBounds(state.places.map(p=>[p.lat,p.lon])).pad(.2),{maxZoom:13});
+}
+function drawMap(fit=false){
+  if(!map)return;
+  pathLayer.clearLayers();placeLayer.clearLayers();
   if(currentMarker){map.removeLayer(currentMarker);currentMarker=null}
   const day=state.day;
-  const bounds=[];
-  for(const segment of day?.route_segments||[]){
-    const coordinates=segment.map(c=>[c[1],c[0]]);
-    L.polyline(coordinates,{color:'#176d69',weight:4,opacity:.82}).addTo(pathLayer);
-    for(const coordinate of coordinates)bounds.push(coordinate);
+  // The whole recorded path sits underneath; trips and area stays draw over it in their mode colour.
+  for(const segment of day?.route_segments||[])L.polyline(mapPath(segment),{color:'#8ea8a2',weight:3,opacity:.7,interactive:false}).addTo(pathLayer);
+  for(const trip of day?.trips||[]){
+    for(const segment of trip.route_segments||[])L.polyline(mapPath(segment),{color:modeInfo[trip.mode]?.color||'#176d69',weight:4,opacity:.9}).on('click',()=>selectItem('trip',tripKey(trip))).addTo(pathLayer);
+  }
+  for(const stay of day?.stays||[]){
+    if(stay.kind!=='area')continue;
+    L.circle([stay.lat,stay.lon],{radius:stay.radius_m||50,color:stayColor(stay),weight:1,opacity:.45,fillOpacity:.05,interactive:false}).addTo(pathLayer);
+    for(const segment of stay.route_segments||[])L.polyline(mapPath(segment),{color:stayColor(stay),weight:4,opacity:.9}).on('click',()=>selectItem('stay',stay.id)).addTo(pathLayer);
   }
   for(const place of state.places){
     L.circle([place.lat,place.lon],{radius:place.radius_m,color:'#9aaba5',weight:1,fillOpacity:.04})
@@ -64,21 +119,49 @@ function drawMap(){
     L.circleMarker([state.focusPlace.lat,state.focusPlace.lon],{radius:9,color:'#fff',weight:3,fillColor:'#176d69',fillOpacity:1})
       .bindPopup('<strong>'+safe(label)+'</strong>').addTo(placeLayer);
   }
-  for(const [index,place] of (day?.visited_places||[]).entries()){
-    const icon=L.divIcon({className:'visit-pin',html:String(index+1),iconSize:[28,28],iconAnchor:[14,14]});
-    L.marker([place.lat,place.lon],{icon,title:place.name||place.display_name}).bindPopup('<strong>'+safe(place.name||place.display_name)+'</strong><br>'+place.visits+' observed visit'+(place.visits===1?'':'s')).addTo(placeLayer);
-    bounds.push([place.lat,place.lon]);
+  const numbers=new Map((day?.visited_places||[]).map((place,index)=>[place.cluster_id,index+1]));
+  for(const place of day?.places_including_home||[]){
+    const number=numbers.get(place.cluster_id);
+    const icon=L.divIcon({className:'visit-pin'+(number?'':' home'),html:number?String(number):placeIcons.home,iconSize:[28,28],iconAnchor:[14,14]});
+    const minutes=durationText(place.observed_minutes);
+    L.marker([place.lat,place.lon],{icon,title:place.name||place.display_name})
+      .bindPopup('<strong>'+safe(place.name||place.display_name)+'</strong><br>'+safe(minutes)+' · '+place.visits+' visit'+(place.visits===1?'':'s')).addTo(placeLayer);
   }
   if(state.current){
     const point=state.current;
     currentMarker=L.circleMarker([point.lat,point.lon],{radius:7,color:'#fff',weight:3,fillColor:'#dc7650',fillOpacity:1})
       .bindPopup('<strong>'+safe(point.place_name||point.address||'Current location')+'</strong><br>Updated '+safe(formatTime(point.timestamp))).addTo(map);
-    if(day?.date===localDateKey()||!day?.points)bounds.push([point.lat,point.lon]);
   }
-  if(day?.first_location)bounds.push([day.first_location.lat,day.first_location.lon]);
-  if(bounds.length)map.fitBounds(L.latLngBounds(bounds).pad(.15),{maxZoom:15});
-  else if(state.places.length)map.fitBounds(L.latLngBounds(state.places.map(p=>[p.lat,p.lon])).pad(.2),{maxZoom:13});
+  if(fit)fitDay();
+  drawSelection(false);
 }
+function drawSelection(zoom){
+  highlightLayer?.clearLayers();
+  const item=selectedItem();
+  const key=state.selected?`${state.selected.type}:${state.selected.key}`:null;
+  document.querySelectorAll('#day-timeline [data-item]').forEach(row=>{const active=row.dataset.item===key;row.classList.toggle('selected',active);row.setAttribute('aria-pressed',String(active))});
+  $('fit-day').hidden=!item;
+  if(!item){if(state.day)$('map-note').textContent=mapNote(state.day);return}
+  const subject=item.type==='trip'?item.trip:item.stay;
+  const color=item.type==='trip'?modeInfo[item.trip.mode]?.color||'#176d69':stayColor(item.stay);
+  $('map-note').textContent=item.type==='trip'?`${modeInfo[item.trip.mode]?.label||'Trip'}: ${item.trip.from_name||'Stay'} → ${item.trip.to_name||'Stay'}`:(item.stay.display_name||'Stay');
+  if(!map)return;
+  const lines=(subject.route_segments||[]).map(mapPath);
+  for(const line of lines){L.polyline(line,{color:'#fff',weight:10,opacity:.95,interactive:false}).addTo(highlightLayer);L.polyline(line,{color,weight:6,opacity:1,interactive:false}).addTo(highlightLayer)}
+  if(item.type==='stay')L.circleMarker([item.stay.lat,item.stay.lon],{radius:item.stay.kind==='area'?6:10,color:'#fff',weight:3,fillColor:color,fillOpacity:1,interactive:false}).addTo(highlightLayer);
+  if(!zoom)return;
+  if(item.type==='stay'&&item.stay.kind==='area')map.fitBounds(L.latLng(item.stay.lat,item.stay.lon).toBounds((item.stay.radius_m||100)*2.4),{maxZoom:16});
+  else if(lines.flat().length>1)map.fitBounds(L.latLngBounds(lines.flat()).pad(.2),{maxZoom:16});
+  else map.setView([subject.lat??subject.from_lat,subject.lon??subject.from_lon],16);
+}
+function selectItem(type,key){
+  const same=state.selected?.type===type&&state.selected?.key===key;
+  state.selected=same?null:{type,key};
+  state.focusPlace=null;
+  drawMap(false);
+  if(same)fitDay();else drawSelection(true);
+}
+function mapNote(day){return day.route_segments.length?day.route_segments.length+' recorded path segment'+(day.route_segments.length===1?'':'s'):day.points?day.timeline_points.toLocaleString()+' key fixes':state.focusPlace?'Location: '+(state.focusPlace.name||state.focusPlace.display_name||'selected fix'):'Recorded route'}
 function renderChart(){const points=[...state.timeline].reverse().filter(p=>p.speed_mps!=null).slice(-100);const box=$('speed-chart');if(points.length<2){box.innerHTML='<span class="empty">More timed samples are needed for a speed chart.</span>';return}const top=Math.max(10,...points.map(p=>p.speed_mps*3.6));const poly=points.map((p,i)=>`${(i/(points.length-1)*600).toFixed(1)},${(110-p.speed_mps*3.6/top*94).toFixed(1)}`).join(' ');box.innerHTML=`<svg viewBox="0 0 600 125" preserveAspectRatio="none" aria-label="Speed chart"><line x1="0" y1="110" x2="600" y2="110" stroke="#dce6eb"/><line x1="0" y1="63" x2="600" y2="63" stroke="#edf2f5"/><polyline fill="none" stroke="#177c91" stroke-width="3" points="${poly}"/><text x="0" y="12" fill="#98a7b4" font-size="10">${top.toFixed(0)} km/h</text><text x="0" y="123" fill="#98a7b4" font-size="10">${safe(formatTime(points[0].timestamp))}</text></svg>`}
 function renderSamples(){
   const rows=state.sampleView==='timeline'?state.timeline:state.points;
@@ -93,6 +176,56 @@ function renderSamples(){
   $('raw-page').textContent=`Page ${state.rawPage+1} of ${Math.max(1,Math.ceil(state.rawTotal/state.rawPageSize))}`;
   $('raw-previous').disabled=state.rawPage===0;
   $('raw-next').disabled=start+rows.length>=state.rawTotal;
+}
+function stayWhen(stay,day){
+  const early=new Date(stay.started_at)<new Date(day.start),late=new Date(stay.ended_at)>new Date(day.end);
+  if(early&&stay.ongoing)return'Since yesterday';
+  if(early&&late)return'All day';
+  if(early)return`Until ${clock(stay.ended_at)}`;
+  if(late)return`From ${clock(stay.started_at)}`;
+  if(stay.ongoing)return`Since ${clock(stay.started_at)}`;
+  return`${clock(stay.started_at)} – ${clock(stay.ended_at)}`;
+}
+function pinBadge(number){return number?`<span class="pin-badge">${number}</span>`:`<span class="pin-badge home" title="Home">${placeIcons.home}</span>`}
+function activityTag(stay){const text=stayActivityText(stay);return text?`<span class="activity-tag" style="--mode:${stayColor(stay)}">${stay.activity?modeIcon(stay.activity):''}${safe(text)}</span>`:''}
+function renderTimeline(day){
+  const numbers=new Map(day.visited_places.map((place,index)=>[place.cluster_id,index+1]));
+  const items=[...day.stays.map(stay=>({type:'stay',at:stay.started_at,stay})),...day.trips.map(trip=>({type:'trip',at:trip.start,trip}))]
+    .sort((a,b)=>new Date(a.at)-new Date(b.at)||(a.type==='stay'?-1:1));
+  $('timeline-count').textContent=items.length?`${day.stays.length} stay${day.stays.length===1?'':'s'} · ${day.trips.length} trip${day.trips.length===1?'':'s'}`:'';
+  $('day-timeline').innerHTML=items.map(item=>{
+    if(item.type==='stay'){
+      const stay=item.stay;
+      return `<li><button type="button" class="tl-stay" data-item="stay:${stay.id}" aria-pressed="false">${pinBadge(numbers.get(stay.cluster_id))}<span class="tl-body"><strong>${safe(stay.display_name||stay.place_name||'Observed stay')}</strong><small>${safe(stayWhen(stay,day))} · ${safe(durationText(stay.observed_minutes))}</small>${activityTag(stay)}</span></button></li>`;
+    }
+    const trip=item.trip,info=modeInfo[trip.mode]||{label:'Trip',color:'#6f7b76'};
+    const notes=[`${clock(trip.start)} – ${clock(trip.end)}`,durationText(trip.duration_minutes)];
+    if(trip.loop)notes.push('round trip');
+    if(!trip.coverage_complete)notes.push('coverage gap');
+    return `<li><button type="button" class="tl-trip" data-item="trip:${tripKey(trip)}" aria-pressed="false" style="--mode:${info.color}">${modeIcon(trip.mode)}<span class="tl-body"><strong>${safe(info.label)} · ${safe(distanceText(trip.distance_km))}</strong><small>${safe(notes.join(' · '))}</small></span></button></li>`;
+  }).join('')||'<li class="empty">No stays yet on this day. A stay needs 15 minutes of accurate samples in one place or area.</li>';
+  $('day-timeline').querySelectorAll('[data-item]').forEach(button=>button.onclick=()=>{const [type,...rest]=button.dataset.item.split(':');const key=rest.join(':');selectItem(type,type==='stay'?+key:key)});
+}
+function renderDayPlaces(day){
+  const numbers=new Map(day.visited_places.map((place,index)=>[place.cluster_id,index+1]));
+  $('visited-places').innerHTML=day.places_including_home.map(place=>{
+    const activities=Object.entries(place.activities||{}).map(([mode,count])=>modeName(mode)+(count>1?` ×${count}`:'')).join(', ');
+    const details=[`First seen ${clock(place.first_seen)}`,`${durationText(place.observed_minutes)} observed`];
+    if(place.visits>1)details.push(`${place.visits} visits`);
+    if(activities)details.push(activities);
+    return `<div class="list-item"><div class="place-main">${pinBadge(numbers.get(place.cluster_id))}<div><strong>${safe(place.name||place.display_name)}</strong><small>${safe(details.join(' · '))}${place.address&&place.address!==place.name?'<br>'+safe(place.address):''}</small></div></div><button data-day-place="${place.cluster_id}">Map</button></div>`;
+  }).join('')||'<p class="empty">No confirmed stays on this day. Sparse fixes may miss a visit.</p>';
+  $('visited-places').querySelectorAll('[data-day-place]').forEach(button=>button.onclick=()=>{const place=day.places_including_home.find(item=>item.cluster_id===+button.dataset.dayPlace);focusPlaceOnMap({...place,display_name:place.name||place.address||'Visited place'})});
+}
+function renderSummary(day){
+  $('stat-distance').textContent=distanceText(day.stats.distance_km);
+  $('stat-moving').textContent=durationText(day.movement_minutes);
+  $('stat-places').textContent=day.visited_places.length.toLocaleString();
+  $('stat-trips').textContent=day.trips.length.toLocaleString();
+  $('activity-chips').innerHTML=Object.entries(day.activity_totals).filter(([,totals])=>totals.count).map(([mode,totals])=>
+    `<span class="chip" style="--mode:${modeInfo[mode].color}">${modeIcon(mode)}<strong>${modeInfo[mode].noun}</strong><span>${distanceText(totals.distance_km)} · ${durationText(totals.minutes)}</span></span>`).join('');
+  const modes=new Set([...day.trips.map(trip=>trip.mode),...day.stays.map(stay=>stay.activity).filter(Boolean)]);
+  $('map-legend').innerHTML='<span><i class="legend-line" style="--mode:#8ea8a2"></i>Recorded path</span>'+[...modes].filter(mode=>modeInfo[mode]).map(mode=>`<span><i class="legend-line" style="--mode:${modeInfo[mode].color}"></i>${modeInfo[mode].noun}</span>`).join('');
 }
 function renderExplore(day,coverage){
   const hasHistory=day.points>0;
@@ -116,39 +249,23 @@ function renderExplore(day,coverage){
   $('locate').hidden=!(state.current||day.last_location);
   $('history-layout').classList.toggle('no-data',!hasMapContent);
   $('history-layout').classList.toggle('map-only',!hasHistory);
-  $('stat-driving').textContent=day.activity_counts.driving.toLocaleString();
-  $('stat-walking').textContent=day.activity_counts.walking.toLocaleString();
-  $('stat-running-cycling').textContent=day.activity_counts.running_cycling.toLocaleString();
-  $('stat-places').textContent=day.visited_places.length.toLocaleString();
-  $('stat-points').textContent=day.timeline_points.toLocaleString()+' key out of '+day.points.toLocaleString()+' raw';
   $('day-context').hidden=!hasHistory;
-  if(hasHistory){
-    const first=new Date(day.first_fix).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'});
-    const last=new Date(day.last_fix).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'});
-    $('day-context').textContent=day.stats.distance_km.toFixed(1)+' km sampled · '+(day.points===1?'Fix at '+first:'Fixes from '+first+' to '+last)+' · Gaps are unobserved';
-  }
-  $('map-note').textContent=day.route_segments.length?day.route_segments.length+' estimated path segment'+(day.route_segments.length===1?'':'s'):hasHistory?day.timeline_points.toLocaleString()+' key fixes':state.focusPlace?'Location: '+(state.focusPlace.name||state.focusPlace.display_name||'selected fix'):'Recorded route';
-  $('visited-places').innerHTML=day.visited_places.map((place,index)=>
-    '<button class="visit-row" data-visit="'+index+'">'+placeIcon(place)+'<span><strong>'+safe(place.name||place.display_name)+'</strong><small>'+safe(new Date(place.first_seen).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'}))+' · '+place.observed_minutes.toFixed(0)+' min observed'+(place.visits>1?' · '+place.visits+' visits':'')+'</small></span></button>'
-  ).join('')||'<p class="empty">No confirmed stops on this day. Sparse fixes may miss a visit.</p>';
-  $('visited-places').querySelectorAll('[data-visit]').forEach(button=>button.onclick=()=>{
-    const place=day.visited_places[+button.dataset.visit];
-    focusPlaceOnMap({...place,display_name:place.name||place.address||'Visited place'});
-  });
+  if(hasHistory)$('day-context').textContent=(day.points===1?'One fix at '+clock(day.first_fix):'Fixes from '+clock(day.first_fix)+' to '+clock(day.last_fix))+' · '+day.points.toLocaleString()+' samples · gaps are unobserved';
+  // Keep the map where the viewer left it on background refreshes; fit only for a new day or source.
+  const viewKey=`${day.date}|${day.source||''}`;
+  const newView=state.fitKey!==viewKey;
+  if(newView){state.fitKey=viewKey;state.selected=null}
+  let zoomToSelection=false;
+  if(state.pendingStayId!=null){state.selected={type:'stay',key:state.pendingStayId};state.pendingStayId=null;zoomToSelection=true}
+  if(!selectedItem())state.selected=null;
+  renderSummary(day);
+  renderTimeline(day);
+  renderDayPlaces(day);
   $('map-detail-section').hidden=true;
   renderSamples();
-  $('trips').innerHTML=day.trips.map((trip,index)=>'<div class="list-item"><div><strong>'+safe(trip.from_name||'Confirmed stay')+' → '+safe(trip.to_name||'Confirmed stay')+'</strong><small>'+safe(modeName(trip.mode))+' · '+trip.distance_km.toFixed(1)+' km · '+safe(formatTime(trip.start))+' → '+safe(formatTime(trip.end))+(trip.coverage_complete?'':' · route has a coverage gap')+'</small></div><button data-trip="'+index+'">Show on map</button></div>').join('')||'<p class="empty">No trips between confirmed 15 minute stays on this day.</p>';
-  $('trips').querySelectorAll('[data-trip]').forEach(button=>button.onclick=()=>{
-    const trip=day.trips[+button.dataset.trip];
-    if(!map)return;
-    drawMap();
-    const lines=(trip.route_segments||[]).map(segment=>L.polyline(segment.map(c=>[c[1],c[0]]),{color:'#e39659',weight:6,opacity:.9}).addTo(pathLayer));
-    if(lines.length){const bounds=L.featureGroup(lines).getBounds();map.fitBounds(bounds.pad(.2))}
-    document.querySelector('.map-shell').scrollIntoView({behavior:'smooth',block:'start'});
-  });
   renderChart();
-  drawMap();
-  if(map)setTimeout(()=>{map.invalidateSize();drawMap()},20);
+  const redraw=()=>{drawMap(newView&&!zoomToSelection);if(zoomToSelection){drawSelection(true);document.querySelector('#day-timeline .selected')?.scrollIntoView({block:'nearest'})}};
+  if(map&&(newView||zoomToSelection))setTimeout(()=>{map.invalidateSize();redraw()},20);else redraw();
 }
 function renderCurrent(){
   const point=state.current;
@@ -165,7 +282,7 @@ function setReminderDestination(place){$('reminder-place-name').value=(place.nam
 function openPlaceDialog(place={}){
   $('place-form').reset();$('search-results').innerHTML='';$('search').value='';$('place-id').value=place.id||'';$('place-category').value=place.category||'';$('place-provider-id').value=place.provider_place_id||'';$('place-name').value=place.name||'';$('place-lat').value=place.lat??'';$('place-lon').value=place.lon??'';$('place-radius').value=place.radius_m||150;$('place-address').value=place.address||'';$('place-dialog-title').textContent=place.id?'Edit place':'Add place';$('place-dialog').showModal();
 }
-function focusPlaceOnMap(place){state.focusPlace=place;showView('explore');if(state.day&&state.coverage)renderExplore(state.day,state.coverage);setTimeout(()=>{map?.invalidateSize();map?.setView([place.lat,place.lon],15);document.querySelector('.map-shell').scrollIntoView({behavior:'smooth',block:'start'})},30)}
+function focusPlaceOnMap(place){state.focusPlace=place;state.selected=null;showView('explore');if(state.day&&state.coverage)renderExplore(state.day,state.coverage);setTimeout(()=>{map?.invalidateSize();map?.setView([place.lat,place.lon],15);document.querySelector('.map-shell').scrollIntoView({behavior:'smooth',block:'start'})},30)}
 function renderPlaces(){
   fillPlaceSelectors();
   const usage=new Map(state.visitedPlaces.filter(p=>p.place_id!=null).map(p=>[p.place_id,p]));
@@ -183,7 +300,6 @@ function renderReminders(){
   $('reminders-list').querySelectorAll('[data-cancel-reminder]').forEach(button=>button.onclick=async()=>{try{await post('/api/reminders/cancel',{id:+button.dataset.cancelReminder});await refreshMeta();toast('Reminder cancelled')}catch(error){toast(error.message)}});
   $('reminder-history').innerHTML=state.reminderHistory.map(item=>`<div class="list-item"><div class="place-main">${placeIcon(item)}<div><strong>${safe(item.text)}</strong><small>${safe(item.place_name)} · ${item.status==='triggered'?'Triggered '+safe(formatTime(item.triggered_at)):'Cancelled '+safe(formatTime(item.cancelled_at||item.created_at))}</small></div></div></div>`).join('')||'<div class="empty">Triggered and cancelled reminders will appear here.</div>';
 }
-function renderStays(rows){$('stays').innerHTML=rows.slice(0,10).map(s=>`<div class="list-item"><div class="place-main">${placeIcon(s)}<div><strong>${safe(s.display_name||s.place_name||`${s.lat.toFixed(5)}, ${s.lon.toFixed(5)}`)} · ${s.observed_minutes.toFixed(0)} min</strong><small>${safe(formatTime(s.started_at))} · ${s.point_count} samples${s.ongoing?' · ongoing':''}</small></div></div><button data-stay="${s.id}">Map</button></div>`).join('')||'<div class="empty">No confirmed stays on this date. A stay needs nearby accurate samples spanning at least 15 minutes, with no gap over 30 minutes.</div>';$('stays').querySelectorAll('[data-stay]').forEach(button=>button.onclick=()=>{const s=rows.find(row=>row.id===+button.dataset.stay);focusPlaceOnMap({...s,display_name:s.display_name||s.place_name||'Observed stay'})})}
 function renderInsights(){const data=state.insights;if(!data)return;const prediction=data.prediction;$('prediction').textContent=prediction.prediction?`Likely next from ${prediction.from}: ${prediction.prediction} (${Math.round(prediction.frequency*100)}% of ${prediction.observations} observed departures).${prediction.current_fix_stale?' Latest location is stale; verify before acting.':''}`:`Next place: insufficient evidence (${prediction.reason}).`;$('pattern-places').innerHTML=data.frequent_places.slice(0,8).map((place,index)=>`<div class="list-item"><div class="place-main">${placeIcon(place)}<div><strong>${safe(place.display_name)}</strong><small>${place.visits} visit${place.visits===1?'':'s'} · ${place.observed_minutes.toFixed(0)} min observed</small></div></div><button data-pattern-place="${index}">Map</button></div>`).join('')||'<div class="empty">Common places appear after confirmed stays.</div>';$('pattern-places').querySelectorAll('[data-pattern-place]').forEach(button=>button.onclick=()=>focusPlaceOnMap(data.frequent_places[+button.dataset.patternPlace]));$('transitions').innerHTML=data.transitions.slice(0,8).map((t,index)=>`<div class="list-item"><div><strong>${safe(t.from_name)} → ${safe(t.to_name)}</strong><small>${t.count} observed transition${t.count===1?'':'s'}</small></div><button data-transition="${index}">Map arrival</button></div>`).join('')||'<div class="empty">Transitions appear after visits to two or more places.</div>';$('transitions').querySelectorAll('[data-transition]').forEach(button=>button.onclick=()=>{const transition=data.transitions[+button.dataset.transition];focusPlaceOnMap({lat:transition.to_lat,lon:transition.to_lon,display_name:transition.to_name})})}
 async function refreshCoverage(){const data=await api('/api/coverage');$('coverage').innerHTML=data.sources.map(s=>`<div class="list-item"><div><strong>${safe(s.source)} · ${s.points.toLocaleString()} fixes</strong><small>${safe(formatTime(s.first))} → ${safe(formatTime(s.last))}</small></div></div>`).join('')+(data.gaps_over_24h.length?`<p class="muted">${data.gaps_over_24h.length} gaps over 24 hours. Missing coverage cannot establish where you were.</p>`:'')||'<div class="empty">No source data yet.</div>'}
 async function refreshInsights(){state.insights=await api('/api/insights?limit=50');renderInsights()}
@@ -207,9 +323,16 @@ async function refreshExplore(resetRawPage=true){
   const rawQuery=new URLSearchParams(query);
   rawQuery.set('limit',state.rawPageSize);
   rawQuery.set('offset',state.rawPage*state.rawPageSize);
-  const [day,timeline,points,coverage]=await Promise.all([
-    api('/api/day?'+dayQuery),api('/api/timeline?'+query),api('/api/observations?'+rawQuery),api('/api/coverage')
-  ]);
+  // Background refreshes stay quiet; a day or source change dims the page while it loads.
+  if(resetRawPage)$('explore-view').classList.add('loading');
+  let day,timeline,points,coverage;
+  try{
+    [day,timeline,points,coverage]=await Promise.all([
+      api('/api/day?'+dayQuery),api('/api/timeline?'+query),api('/api/observations?'+rawQuery),api('/api/coverage')
+    ]);
+  }finally{
+    if(request===exploreRequest)$('explore-view').classList.remove('loading');
+  }
   if(request!==exploreRequest)return;
   const selected=$('source').value;
   $('source').innerHTML='<option value="">All sources</option>'+coverage.sources.map(item=>'<option value="'+safe(item.source)+'">'+safe(item.source)+'</option>').join('');
@@ -219,8 +342,10 @@ async function refreshExplore(resetRawPage=true){
   state.points=points;
   state.rawTotal=day.points;
   state.coverage=coverage;
+  // A past day is bookmarkable as #date=YYYY-MM-DD; today keeps a clean URL.
+  const hash=day.date===localDateKey()?'':'#date='+day.date;
+  if(location.hash!==hash)history.replaceState(null,'',location.pathname+location.search+hash);
   renderExplore(day,coverage);
-  renderStays(day.stays);
 }
 function renderDailySummaries(){$('daily-summaries').innerHTML=state.dailySummaries.slice(0,10).map(item=>`<div class="list-item"><div><strong>${safe(item.date)}</strong><small>${item.trip_count} trips · ${Number(item.distance_km).toFixed(1)} km · ${item.place_count} places · ${item.reminder_count} reminders</small></div></div>`).join('')||'<div class="empty">A summary will be saved after the first completed day.</div>'}
 function renderSettings(){if(!state.settings)return;populateTimezones(state.settings.timezone);$('speed-strategy').value=state.settings.speed_strategy;$('speed-offset').value=state.settings.reported_speed_offset_kmh;updateSpeedSettingsVisibility();renderDailySummaries()}
@@ -266,4 +391,48 @@ $('reminder-use-current').onclick=()=>{if(!state.current){toast('No current loca
 $('reminder-reverse').onclick=async()=>{if(!$('reminder-lat').value||!$('reminder-lon').value){toast('Enter coordinates first');return}try{const q=new URLSearchParams({lat:$('reminder-lat').value,lon:$('reminder-lon').value});const result=await api('/api/reverse?'+q);setReminderDestination({...result,lat:+$('reminder-lat').value,lon:+$('reminder-lon').value});toast(result.approximate?'Nearby cached place found — verify before creating':'Place found')}catch(error){toast(error.message)}};
 $('reminder-form').onsubmit=async e=>{e.preventDefault();try{const custom=$('reminder-place').value==='other';const payload=custom?{text:$('reminder-text').value,place_name:$('reminder-place-name').value,lat:+$('reminder-lat').value,lon:+$('reminder-lon').value,radius_m:+$('reminder-radius').value,address:$('reminder-address').value,category:$('reminder-category').value,provider_place_id:$('reminder-provider-id').value}:{text:$('reminder-text').value,place_id:+$('reminder-place').value};await post('/api/reminders',payload);$('reminder-form').reset();$('reminder-search-results').innerHTML='';toggleReminderDestination();await refreshMeta();toast('Reminder created')}catch(err){toast(err.message)}};
 $('notifications').onclick=async()=>{if(!('Notification' in window)){toast('Browser notifications are unavailable');return}const permission=await Notification.requestPermission();toast(permission==='granted'?'Browser alerts enabled':'Browser alerts were not enabled')};
+function dateLabel(value){const [year,month,day]=value.split('-').map(Number);return new Date(year,month-1,day).toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'})}
+function renderVisitResults(result){
+  const box=$('visit-results');
+  if(!result.visits.length){box.innerHTML=`<p class="empty">No visits matched “${safe(result.query)}”. Try a brand, a place type such as supermarket or park, or a street name.</p>`;return}
+  const names=result.places.map(place=>safe(place.name)).join(', ');
+  const shown=result.total_visits>result.visits.length?` · latest ${result.visits.length} shown`:'';
+  box.innerHTML=`<p class="result-summary"><strong>${result.total_visits} visit${result.total_visits===1?'':'s'}</strong> to ${names}${shown}</p><ul class="visit-list">${result.visits.map((visit,index)=>{
+    const details=[`${clock(visit.started_at)} – ${clock(visit.ended_at)}`,durationText(visit.observed_minutes)];
+    if(visit.activity)details.push(modeName(visit.activity));
+    if(visit.ongoing)details.push('now');
+    return `<li><div class="visit-date"><strong>${safe(dateLabel(visit.date))}</strong><span>${safe(visit.weekday)}</span></div><div class="visit-info"><strong>${safe(visit.place)}</strong><small>${safe(details.join(' · '))}</small></div><button type="button" class="outline-button" data-visit-day="${index}">Show day</button></li>`}).join('')}</ul>`;
+  box.querySelectorAll('[data-visit-day]').forEach(button=>button.onclick=()=>openVisitDay(result.visits[+button.dataset.visitDay]));
+}
+function openVisitDay(visit){
+  state.pendingStayId=visit.stay_id;
+  state.focusPlace=null;
+  $('source').value='';
+  $('day-date').value=visit.date;
+  state.followToday=visit.date===localDateKey();
+  showView('explore');
+  window.scrollTo({top:0,behavior:'smooth'});
+  refreshExplore().catch(error=>toast(error.message));
+}
+$('visit-search-form').onsubmit=async event=>{
+  event.preventDefault();
+  const query=$('visit-search').value.trim();
+  if(!query)return;
+  const box=$('visit-results');
+  box.innerHTML='<p class="empty">Searching…</p>';
+  try{renderVisitResults(await api('/api/visits?'+new URLSearchParams({q:query,limit:50})))}catch(error){box.innerHTML='';toast(error.message)}
+};
+$('fit-day').onclick=()=>{state.selected=null;drawSelection(false);fitDay()};
+$('close-map-detail').onclick=()=>{$('map-detail-section').hidden=true};
+document.addEventListener('keydown',event=>{
+  if(event.defaultPrevented||event.altKey||event.ctrlKey||event.metaKey||event.shiftKey)return;
+  if(!$('explore-view').classList.contains('active')||!$('auth-panel').hidden||$('place-dialog').open)return;
+  if(event.target.closest('input,select,textarea,#map'))return;
+  if(event.key==='ArrowLeft'){event.preventDefault();moveDay(-1)}
+  else if(event.key==='ArrowRight'&&!$('next-day').disabled){event.preventDefault();moveDay(1)}
+  else if(event.key==='Escape'&&state.selected){state.selected=null;drawSelection(false);fitDay()}
+});
+function linkedDate(){const match=location.hash.match(/date=(\d{4}-\d{2}-\d{2})/);return match&&match[1]<=localDateKey()?match[1]:null}
+window.addEventListener('hashchange',()=>{const date=linkedDate();if(date&&date!==$('day-date').value){state.focusPlace=null;state.followToday=false;$('day-date').value=date;showView('explore');refreshExplore().catch(error=>toast(error.message))}});
+if(linkedDate()){state.followToday=false;$('day-date').value=linkedDate()}
 initMap();refreshAll().then(()=>{state.lastEventId=state.events.reduce((max,e)=>Math.max(max,e.id),0)});setInterval(pollEvents,10000);setInterval(()=>{if(state.followToday&&$('day-date').value!==localDateKey())$('day-date').value=localDateKey();refreshCurrent().catch(()=>{});refreshExplore(false).catch(()=>{})},60000);setInterval(()=>refreshInsights().catch(()=>{}),300000);

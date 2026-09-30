@@ -2,6 +2,7 @@ import json
 import hashlib
 import hmac
 import io
+import math
 import os
 import tempfile
 import unittest
@@ -10,8 +11,55 @@ from email.message import Message
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from geotracker.core import Store, current_location, deliver_webhook, geocode, mode_for, reverse_cache_radius, reverse_geocode, route_segments_from_points, smooth_route_segment
-from geotracker.analysis import daily_overview, day_summary, insights, place_patterns, predict_next, resolve_place_patterns, stays, transitions, visited_places
+from geotracker.core import Store, classify_motion, current_location, deliver_webhook, geocode, mode_for, reverse_cache_radius, reverse_geocode, route_segments_from_points, smooth_route_segment
+from geotracker.analysis import daily_overview, day_summary, insights, place_patterns, predict_next, resolve_place_patterns, search_visits, stays, transitions, visited_places
+
+
+HOME = (41.0, -87.9)
+LAKE = (41.0, -87.78)
+
+
+def shifted(origin, east_m, north_m):
+    return (origin[0] + north_m / 110574,
+            origin[1] + east_m / (111320 * math.cos(math.radians(origin[0]))))
+
+
+def still(place, minutes):
+    return [place] * minutes
+
+
+def line(start, end, minutes):
+    return [(start[0] + (end[0] - start[0]) * step / minutes, start[1] + (end[1] - start[1]) * step / minutes)
+            for step in range(1, minutes + 1)]
+
+
+def laps(center, radius_m, minutes, kmh, start_angle=math.pi):
+    metres_per_minute = kmh / 3.6 * 60
+    return [shifted(center, radius_m * math.cos(start_angle + metres_per_minute * step / radius_m),
+                    radius_m * math.sin(start_angle + metres_per_minute * step / radius_m))
+            for step in range(1, minutes + 1)]
+
+
+def minute_fixes(segments, source="phone", start=datetime(2026, 9, 27, 13, tzinfo=timezone.utc), accuracy_m=8, hold=1):
+    """One fix per minute; `hold` > 1 repeats each position like a Home Assistant poll of an unchanged state."""
+    positions = [position for segment in segments for position in segment]
+    fixes, held = [], None
+    for index, position in enumerate(positions):
+        if held is None or index % hold == 0:
+            held = (position, f"update-{index}")
+        (lat, lon, *rest), external_id = held
+        fixes.append({"source": source, "external_id": external_id,
+                      "timestamp": (start + timedelta(minutes=index)).isoformat(),
+                      "lat": lat, "lon": lon, "accuracy_m": rest[0] if rest else accuracy_m})
+    return fixes
+
+
+def lake_run_day(hold=1):
+    """Home, drive 10 km, run an hour of laps around a 500 m radius lake, drive back, home."""
+    shore = shifted(LAKE, -500, 0)
+    run = laps(LAKE, 500, 60, 9)
+    return minute_fixes([still(HOME, 31), line(HOME, shore, 12), run, line(run[-1], HOME, 12), still(HOME, 30)],
+                        source="home_assistant:phone", hold=hold)
 from geotracker.imports import import_takeout
 from geotracker.mcp import dispatch
 from geotracker.cli import load_env_file, poll_home_assistant
@@ -245,7 +293,7 @@ class StoreTests(unittest.TestCase):
         day = day_summary(self.store, "2026-09-25", "UTC")
         self.assertEqual(len(day["trips"]), 1)
         self.assertEqual(day["trips"][0]["mode"], "driving")
-        self.assertEqual(day["activity_counts"]["running_cycling"], 0)
+        self.assertEqual((day["activity_counts"]["running"], day["activity_counts"]["cycling"]), (0, 0))
 
     def test_stay_requires_fifteen_minutes(self):
         base = datetime(2026, 9, 25, 10, tzinfo=timezone.utc)
@@ -473,7 +521,7 @@ class StoreTests(unittest.TestCase):
         self.assertEqual([place["name"] for place in day["visited_places"]], ["Campus"])
         self.assertEqual({place["name"] for place in day["places_including_home"]}, {"Home", "Campus"})
         summary = daily_overview(self.store, "2026-09-25", "UTC")
-        self.assertEqual(summary["schema_version"], 2)
+        self.assertEqual(summary["schema_version"], 3)
         self.assertEqual({place["name"] for place in summary["places"]}, {"Home", "Campus"})
         self.assertEqual((summary["totals"]["trips"], summary["trips"][0]["from"], summary["trips"][0]["to"]),
                          (1, "Home", "Campus"))
@@ -725,9 +773,13 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(len(places), 1)
         self.assertEqual(places[0]["name"], "Lake Example")
         self.assertEqual(places[0]["category"], "natural.water")
-        self.assertEqual(places[0]["visits"], 3)
+        # Three stays four minutes apart along one shore are one visit.
+        self.assertEqual(places[0]["visits"], 1)
         self.assertEqual(len(day["visited_places"]), 1)
         self.assertEqual(len(day["trips"]), 0)
+        self.assertEqual([(stay["started_at"], stay["ended_at"]) for stay in day["stays"]],
+                         [("2026-09-25T10:00:00+00:00", "2026-09-25T10:56:00+00:00")])
+        self.assertEqual(day["stays"][0]["observed_minutes"], 56)
         self.assertEqual(len(pattern), 1)
 
     def test_nearby_resolved_stays_with_same_name_are_merged(self):
@@ -826,7 +878,7 @@ class StoreTests(unittest.TestCase):
         migrated = Store(path)
         try:
             self.assertEqual(stays(migrated), [])
-            self.assertEqual(migrated.db.execute("PRAGMA user_version").fetchone()[0], 10)
+            self.assertEqual(migrated.db.execute("PRAGMA user_version").fetchone()[0], 11)
         finally:
             migrated.close()
 
@@ -842,6 +894,182 @@ class StoreTests(unittest.TestCase):
         self.assertEqual((first["inserted"], first["skipped"]), (2, 1))
         self.assertEqual(second["duplicates"], 2)
         self.assertEqual(self.store.events(), [])
+
+    def test_lake_run_between_drives_is_a_running_area_stay(self):
+        self.store.save_place({"name": "Home", "lat": HOME[0], "lon": HOME[1], "radius_m": 100})
+        # Home Assistant holds each position for two polls; timing a move from
+        # the last poll instead of the first would make the run look like a drive.
+        for fix in lake_run_day(hold=2):
+            self.store.ingest(fix)
+        rows = list(reversed(stays(self.store, limit=None)))
+        self.assertEqual([row["kind"] for row in rows], ["stationary", "area", "stationary"])
+        lake = rows[1]
+        self.assertEqual(lake["activity"], "running")
+        self.assertGreaterEqual(lake["observed_minutes"], 55)
+        self.assertLess(metres_from(lake, LAKE), 100)
+        self.assertAlmostEqual(lake["radius_m"], 500, delta=60)
+        self.assertAlmostEqual(lake["distance_m"] / 1000, 9, delta=1)
+        live = [(row["kind"], row["started_at"], row["ended_at"]) for row in rows]
+        process_stays_rebuild(self.store)
+        self.assertEqual([(row["kind"], row["started_at"], row["ended_at"]) for row in reversed(stays(self.store, limit=None))], live)
+
+        found = {"name": "Lake Example", "address": "Lake Example, Chicago", "category": "natural.water",
+                 "categories": ["natural.water"], "provider_place_id": "lake-1"}
+        with patch("geotracker.analysis.place_for_coordinate", return_value=found):
+            day = day_summary(self.store, "2026-09-27", "UTC")
+            overview = daily_overview(self.store, "2026-09-27", "UTC")
+        self.assertEqual([trip["mode"] for trip in day["trips"]], ["driving", "driving"])
+        self.assertEqual((day["activity_counts"]["running"], day["activity_counts"]["driving"]), (1, 2))
+        self.assertEqual([place["name"] for place in day["visited_places"]], ["Lake Example"])
+        self.assertEqual(day["visited_places"][0]["activities"], {"running": 1})
+        self.assertTrue(day["stays"][1]["route_segments"])
+        self.assertEqual([(visit["place"], visit["activity"]) for visit in overview["visits"]],
+                         [("Home", None), ("Lake Example", "running"), ("Home", None)])
+        self.assertRegex(overview["overview"], r"running 6\d min \(9\.\d km\)|running 6\d min \(8\.\d km\)")
+
+    def test_round_trip_from_home_is_a_loop_trip_not_a_visit(self):
+        walk = laps(shifted(HOME, 150, 0), 150, 20, 4.5)
+        self.store.ingest(minute_fixes([still(HOME, 30), walk, still(HOME, 30)]))
+        self.assertEqual([row["kind"] for row in stays(self.store, limit=None)], ["stationary", "stationary"])
+        trips = day_summary(self.store, "2026-09-27", "UTC")["trips"]
+        self.assertEqual([(trip["mode"], trip["loop"]) for trip in trips], [("walking", True)])
+        self.assertGreater(trips[0]["distance_km"], 1)
+
+    def test_errands_driven_with_short_stops_are_not_an_area_stay(self):
+        a, b, c = shifted(HOME, 3000, 0), shifted(HOME, 3000, 1500), shifted(HOME, 1500, 1500)
+        self.store.ingest(minute_fixes([still(HOME, 30), line(HOME, a, 6), still(a, 8), line(a, b, 4), still(b, 6),
+                                        line(b, c, 4), still(c, 9), line(c, HOME, 5), still(HOME, 30)]))
+        self.assertEqual([row["kind"] for row in stays(self.store, limit=None)], ["stationary", "stationary"])
+        trips = day_summary(self.store, "2026-09-27", "UTC")["trips"]
+        self.assertEqual([trip["mode"] for trip in trips], ["driving"])
+
+    def test_indoor_jitter_at_a_large_store_is_one_visit(self):
+        store = shifted(HOME, 6000, 2000)
+        jitter = [shifted(store, 70 * math.sin(index * 2.3), 50 * math.cos(index * 1.7)) + (35,) for index in range(40)]
+        self.store.ingest(minute_fixes([still(HOME, 30), line(HOME, store, 10), jitter, line(store, HOME, 10), still(HOME, 30)]))
+        rows = list(reversed(stays(self.store, limit=None)))
+        self.assertEqual(len(rows), 3)
+        self.assertGreaterEqual(rows[1]["observed_minutes"], 35)
+        self.assertLess(metres_from(rows[1], store), 60)
+
+    def test_inaccurate_and_stray_fixes_do_not_split_a_stay(self):
+        fixes = still(HOME, 20) + [(HOME[0] + .003, HOME[1], 300)] + still(HOME, 10) + [shifted(HOME, 80, 0) + (20,)] + still(HOME, 10)
+        self.store.ingest(minute_fixes([fixes]))
+        rows = stays(self.store, limit=None)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["observed_minutes"], 41)
+
+    def test_departure_confirmed_after_stray_fixes_keeps_stay_end(self):
+        away = line(HOME, shifted(HOME, 3000, 0), 6)
+        for fix in minute_fixes([still(HOME, 20), away]):
+            self.store.ingest(fix)
+        row = stays(self.store, limit=None)[0]
+        self.assertEqual((row["ongoing"], row["observed_minutes"]), (0, 19))
+        timeline = list(reversed(self.store.timeline(limit=None)))
+        self.assertEqual([point["role"] for point in timeline[:2]], ["arrival", "departure"])
+
+    def test_stay_split_by_gps_noise_is_reported_as_one_visit(self):
+        store = shifted(HOME, 4000, 0)
+        strays = [shifted(store, 80, 0), shifted(store, 85, 10), shifted(store, 80, 20)]
+        self.store.ingest(minute_fixes([still(HOME, 30), line(HOME, store, 6), still(store, 16), strays,
+                                        still(store, 17), line(store, HOME, 6), still(HOME, 30)]))
+        self.assertEqual(len(stays(self.store, limit=None)), 4)
+        label = {"name": "Costco Wholesale", "address": "", "category": "commercial.supermarket",
+                 "categories": ["commercial.supermarket"], "provider_place_id": "costco"}
+        home = {"name": "Home Street", "address": "", "category": "", "categories": [], "provider_place_id": "home"}
+        def resolve(_store, lat, lon):
+            return label if lon > HOME[1] + .01 else home
+        with patch("geotracker.analysis.place_for_coordinate", side_effect=resolve):
+            found = search_visits(self.store, "costco", timezone_name="UTC")
+            day = day_summary(self.store, "2026-09-27", "UTC")
+        self.assertEqual(found["total_visits"], 1)
+        self.assertEqual(found["places"][0]["visits"], 1)
+        self.assertGreaterEqual(found["visits"][0]["observed_minutes"], 35)
+        self.assertEqual([stay["display_name"] for stay in day["stays"]], ["Home Street", "Costco Wholesale", "Home Street"])
+
+    def test_tracker_without_stationary_stays_matches_rebuild_when_live(self):
+        park, track = shifted(HOME, 3000, 0), shifted(HOME, 9000, 400)
+        fixes = minute_fixes([line(HOME, shifted(park, -300, 0), 8), laps(park, 300, 30, 5),
+                              line(shifted(park, -300, 0), shifted(track, 0, -400), 10), laps(track, 400, 25, 9),
+                              line(shifted(track, 0, -400), HOME, 12)], source="car")
+        for fix in fixes:
+            self.store.ingest(fix)
+        live = [(row["kind"], row["activity"], row["started_at"], row["ended_at"]) for row in stays(self.store, limit=None)]
+        self.assertEqual([(kind, activity) for kind, activity, *_ in reversed(live)], [("area", "walking"), ("area", "running")])
+        process_stays_rebuild(self.store)
+        self.assertEqual([(row["kind"], row["activity"], row["started_at"], row["ended_at"]) for row in stays(self.store, limit=None)], live)
+
+    def test_parked_out_and_back_run_is_one_visit(self):
+        trail = shifted(HOME, 15000, 0)
+        turn = shifted(trail, 0, 3000)
+        self.store.ingest(minute_fixes([still(HOME, 30), line(HOME, trail, 15), line(trail, turn, 20),
+                                        line(turn, trail, 20), line(trail, HOME, 15), still(HOME, 30)]))
+        area = [row for row in stays(self.store, limit=None) if row["kind"] == "area"]
+        self.assertEqual(len(area), 1)
+        self.assertEqual(area[0]["activity"], "running")
+        self.assertGreaterEqual(area[0]["observed_minutes"], 38)
+
+    def test_motion_classification_uses_distance_weighted_speeds(self):
+        minute = 60
+        self.assertEqual(classify_motion([(80, minute, None)] * 10)["mode"], "walking")
+        self.assertEqual(classify_motion([(150, minute, None)] * 10)["mode"], "running")
+        self.assertEqual(classify_motion([(330, minute, None)] * 10)["mode"], "cycling")
+        self.assertEqual(classify_motion([(800, minute, None)] * 10)["mode"], "driving")
+        # One implausible jump inside a walk does not make it a drive.
+        self.assertEqual(classify_motion([(80, minute, None)] * 10 + [(300, 20, None)])["mode"], "walking")
+        self.assertIsNone(classify_motion([(3, minute, None)]))
+
+    def test_search_visits_finds_named_places_by_word(self):
+        costco, club = shifted(HOME, 5000, 0), shifted(HOME, -5000, 0)
+        for day, place in ((25, costco), (26, club), (27, costco)):
+            self.store.ingest(minute_fixes([still(place, 40)], start=datetime(2026, 9, day, 18, tzinfo=timezone.utc)))
+        labels = {costco: {"name": "Costco Wholesale", "address": "1 Warehouse Way", "category": "commercial.supermarket",
+                           "categories": ["commercial.supermarket"], "provider_place_id": "costco"},
+                  club: {"name": "Sam's Club", "address": "9 Depot Road", "category": "commercial.supermarket",
+                         "categories": ["commercial.supermarket"], "provider_place_id": "sams"}}
+        def label(_store, lat, lon):
+            return next(value for place, value in labels.items() if abs(place[0] - lat) + abs(place[1] - lon) < 1e-3)
+        with patch("geotracker.analysis.place_for_coordinate", side_effect=label):
+            result = search_visits(self.store, "costco", timezone_name="America/Chicago")
+            self.assertEqual([visit["date"] for visit in result["visits"]], ["2026-09-27", "2026-09-25"])
+            self.assertEqual(result["visits"][0]["arrival"], "2026-09-27T13:00-05:00")
+            self.assertEqual(result["visits"][0]["weekday"], "Sunday")
+            self.assertEqual(result["places"][0]["name"], "Costco Wholesale")
+            self.assertEqual(search_visits(self.store, "sams club")["total_visits"], 1)
+            self.assertEqual(search_visits(self.store, "supermarket")["total_visits"], 3)
+            self.assertEqual(search_visits(self.store, "warehouse costco")["total_visits"], 2)
+            self.assertEqual(search_visits(self.store, "walmart")["visits"], [])
+            response = dispatch(self.store, {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                             "params": {"name": "search_visits", "arguments": {"query": "Costco"}}})
+        self.assertEqual(response["result"]["structuredContent"]["result"]["total_visits"], 2)
+        with self.assertRaisesRegex(ValueError, "query is required"):
+            search_visits(self.store, "  ")
+
+    def test_area_stay_migration_rebuilds_an_existing_archive(self):
+        path = Path(self.tmp.name) / "before-area-stays.db"
+        archive = Store(path)
+        archive.ingest(lake_run_day())
+        archive.db.execute("DELETE FROM observed_stays_v2 WHERE kind='area'")
+        archive.db.execute("PRAGMA user_version=10")
+        archive.db.commit()
+        archive.close()
+        migrated = Store(path)
+        try:
+            self.assertEqual([row["kind"] for row in reversed(stays(migrated, limit=None))], ["stationary", "area", "stationary"])
+            self.assertEqual(migrated.db.execute("PRAGMA user_version").fetchone()[0], 11)
+        finally:
+            migrated.close()
+
+
+def metres_from(row, place):
+    from geotracker.core import metres
+    return metres(row["lat"], row["lon"], place[0], place[1])
+
+
+def process_stays_rebuild(store):
+    from geotracker.analysis import process_stays
+    process_stays(store, rebuild=True)
+    store.db.commit()
 
 
 if __name__ == "__main__":

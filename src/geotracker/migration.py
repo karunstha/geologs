@@ -16,7 +16,7 @@ TABLES = {
     "source_state": "source point_id",
     "observed_stays": "id source start_point_id end_point_id started_at ended_at lat lon point_count ongoing",
     "stay_processing_state": "source last_point_id last_timestamp candidate",
-    "observed_stays_v2": "id source start_observation_id end_observation_id started_at ended_at lat lon point_count ongoing",
+    "observed_stays_v2": "id source start_observation_id end_observation_id started_at ended_at lat lon point_count ongoing kind activity distance_m radius_m",
     "stay_observation_state": "source last_observation_id last_timestamp candidate",
     "app_settings": "key value",
     "analysis_cache": "cache_key watermark value created_at",
@@ -24,6 +24,8 @@ TABLES = {
     "geocode_cache": "cache_key provider value created_at",
     "reverse_regions": "id provider center_lat center_lon radius_m value created_at expires_at",
 }
+# Columns added after an archive was created take their schema default.
+COLUMN_DEFAULTS = {"kind": "'stationary'"}
 IDENTITY_TABLES = ("points", "point_observations", "places", "reminders", "events", "observed_stays", "observed_stays_v2", "daily_summaries", "reverse_regions")
 
 
@@ -47,7 +49,7 @@ def migrate_sqlite(sqlite_path, postgres_url):
                 continue
             columns = names.split()
             source_columns = {row[1] for row in source.execute(f"PRAGMA table_info({table})")}
-            select = source.execute("SELECT " + ",".join(column if column in source_columns else f"NULL AS {column}" for column in columns) + f" FROM {table}")
+            select = source.execute("SELECT " + ",".join(column if column in source_columns else f"{COLUMN_DEFAULTS.get(column, 'NULL')} AS {column}" for column in columns) + f" FROM {table}")
             placeholders = ",".join(["%s"] * len(columns))
             statement = f"INSERT INTO {table} ({','.join(columns)}) VALUES ({placeholders})"
             count = 0
@@ -91,15 +93,15 @@ def migrate_sqlite(sqlite_path, postgres_url):
                 FROM point_observations) ranked WHERE rank>1)""")
         target.execute("""DELETE FROM timeline_fixes t USING point_observations o
             WHERE t.observation_id=o.id AND EXISTS (
-                SELECT 1 FROM observed_stays_v2 s WHERE s.source=o.source
+                SELECT 1 FROM observed_stays_v2 s WHERE s.source=o.source AND s.kind='stationary'
                 AND o.timestamp>=s.started_at AND o.timestamp<=s.ended_at
                 AND o.id<>s.start_observation_id AND o.id<>s.end_observation_id)""")
         target.execute("""INSERT INTO timeline_fixes(observation_id,source,role,stay_id)
-            SELECT start_observation_id,source,'arrival',id FROM observed_stays_v2 WHERE true
+            SELECT start_observation_id,source,'arrival',id FROM observed_stays_v2 WHERE kind='stationary'
             ON CONFLICT(observation_id) DO UPDATE SET role=excluded.role,stay_id=excluded.stay_id""")
         target.execute("""INSERT INTO timeline_fixes(observation_id,source,role,stay_id)
             SELECT end_observation_id,source,CASE WHEN ongoing=1 THEN 'latest' ELSE 'departure' END,id
-            FROM observed_stays_v2 WHERE true ON CONFLICT(observation_id) DO UPDATE
+            FROM observed_stays_v2 WHERE kind='stationary' ON CONFLICT(observation_id) DO UPDATE
             SET role=excluded.role,stay_id=excluded.stay_id""")
         target.execute("""WITH candidates AS (
             SELECT source,candidate::jsonb AS value FROM stay_observation_state
