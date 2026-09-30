@@ -3,7 +3,7 @@ import json
 import sqlite3
 
 from .core import current_location, deliver_webhook, geocode, reverse_geocode
-from .analysis import daily_overview, day_summary, place_patterns, predict_next, stays, transitions, visited_places
+from .analysis import daily_overview, day_summary, place_patterns, predict_next, resolve_place_patterns, stays, transitions, visited_places
 from .postgres import INTEGRITY_ERRORS
 
 DB_INPUT_ERRORS = (ValueError, KeyError, TypeError, sqlite3.IntegrityError) + INTEGRITY_ERRORS
@@ -25,24 +25,24 @@ TOOLS = [
     {"name": "get_location_at_time", "description": "Nearest recorded point to an ISO 8601 timestamp, including its time difference.", "inputSchema": schema({"timestamp": STRING}, ["timestamp"])},
     {"name": "search_locations_near", "description": "Recorded points within a radius of coordinates, optionally in a time window.", "inputSchema": schema({"lat": NUMBER, "lon": NUMBER, "radius_m": NUMBER, "start": STRING, "end": STRING, "source": STRING, "limit": INTEGER}, ["lat", "lon"])},
     {"name": "get_travel_stats", "description": "Sampled distance, movement hours, and mode counts for a time window.", "inputSchema": schema({"start": STRING, "end": STRING, "source": STRING})},
-    {"name": "get_trips", "description": "Recorded movement runs with path, distance, and estimated transport mode.", "inputSchema": schema({"start": STRING, "end": STRING, "source": STRING})},
+    {"name": "get_trips", "description": "Trips between consecutive confirmed stays of at least 15 minutes, with route segments, distance, endpoints, coverage, and estimated transport mode.", "inputSchema": schema({"start": STRING, "end": STRING, "source": STRING})},
     {"name": "get_coverage", "description": "Source date ranges and gaps over 24 hours; use before drawing conclusions from missing location data.", "inputSchema": schema({})},
     {"name": "get_place_visits", "description": "Observed visits to a saved place, split by exits or gaps over 30 minutes.", "inputSchema": schema({"place_id": INTEGER, "start": STRING, "end": STRING}, ["place_id"])},
-    {"name": "get_stays", "description": "Observed stops of at least five minutes within 50 m, with optional saved place labels. Sparse GPS cannot prove time in gaps.", "inputSchema": schema({"start": STRING, "end": STRING, "source": STRING, "limit": INTEGER})},
+    {"name": "get_stays", "description": "Observed stops of at least 15 minutes within 50 m, with optional saved place labels. Sparse GPS cannot prove time in gaps.", "inputSchema": schema({"start": STRING, "end": STRING, "source": STRING, "limit": INTEGER})},
     {"name": "get_frequent_places", "description": "Saved and suggested places ranked by observed stop time and visits; unlabeled clusters can be named with save_place.", "inputSchema": schema({"limit": INTEGER})},
     {"name": "get_visited_places", "description": "Saved and unsaved observed places except Home, ranked by total sampled time, with cache-first place labels.", "inputSchema": schema({"limit": INTEGER})},
     {"name": "get_unlabeled_frequent_places", "description": "Frequent observed stop clusters that do not yet match a saved place.", "inputSchema": schema({"limit": INTEGER})},
     {"name": "get_time_at_place", "description": "Observed visit count and sampled duration at a saved place; unobserved gaps are excluded.", "inputSchema": schema({"place_id": INTEGER, "start": STRING, "end": STRING}, ["place_id"])},
-    {"name": "get_day_summary", "description": "Detailed daily fixes, movement runs, observed visited places excluding Home, and coverage for a local calendar day.", "inputSchema": schema({"date": STRING, "timezone": STRING, "source": STRING}, ["date"])},
+    {"name": "get_day_summary", "description": "Detailed daily fixes, trips bounded by 15 minute stays, observed visited places excluding Home, and coverage for a local calendar day.", "inputSchema": schema({"date": STRING, "timezone": STRING, "source": STRING}, ["date"])},
     {"name": "get_daily_overview", "description": "Compact persisted overview for one local day: places including Home and time at each, trips, distances, fixes, activity counts, and reminder activity. Designed for efficient LLM retrieval.", "inputSchema": schema({"date": STRING, "timezone": STRING, "source": STRING}, ["date"])},
     {"name": "list_daily_overviews", "description": "List persisted daily overview records and totals without loading every full summary.", "inputSchema": schema({"start": STRING, "end": STRING, "limit": INTEGER})},
     {"name": "get_place_transitions", "description": "Observed transitions between stop clusters, counted by source and grouped across visits.", "inputSchema": schema({"limit": INTEGER})},
     {"name": "predict_next_destination", "description": "Evidence-based next place estimate from at least three observed departures; may return no prediction.", "inputSchema": schema({})},
     {"name": "list_places", "description": "Saved named places and geofence radii. Use this first to resolve a place_id for a location reminder.", "inputSchema": schema({})},
-    {"name": "save_place", "description": "Create or edit a named place and arrival geofence.", "inputSchema": schema({"id": INTEGER, "name": STRING, "lat": NUMBER, "lon": NUMBER, "radius_m": NUMBER, "address": STRING}, ["name", "lat", "lon"])},
+    {"name": "save_place", "description": "Create or edit a named place and arrival geofence.", "inputSchema": schema({"id": INTEGER, "name": STRING, "lat": NUMBER, "lon": NUMBER, "radius_m": NUMBER, "address": STRING, "category": STRING, "provider_place_id": STRING}, ["name", "lat", "lon"])},
     {"name": "list_reminders", "description": "Active one-shot location reminders waiting for arrival.", "inputSchema": schema({})},
     {"name": "list_reminder_history", "description": "Past triggered or cancelled location reminders.", "inputSchema": schema({"limit": INTEGER})},
-    {"name": "create_reminder", "description": "Create a one-shot location reminder for the next arrival at a saved place; resolve place_id with list_places, or geocode_address and save_place first.", "inputSchema": schema({"text": STRING, "place_id": INTEGER}, ["text", "place_id"])},
+    {"name": "create_reminder", "description": "Create a one-shot arrival reminder at a saved place_id or an unsaved destination. For an unsaved place, provide place_name with coordinates; place_name alone uses the nearest geocoding match.", "inputSchema": schema({"text": STRING, "place_id": INTEGER, "place_name": STRING, "lat": NUMBER, "lon": NUMBER, "radius_m": NUMBER, "address": STRING, "category": STRING, "provider_place_id": STRING}, ["text"])},
     {"name": "cancel_reminder", "description": "Cancel an active location reminder. Cancelled reminders remain in history and cannot be re-enabled.", "inputSchema": schema({"id": INTEGER}, ["id"])},
     {"name": "list_reminder_events", "description": "Triggered reminder inbox for delivery/notification workflows.", "inputSchema": schema({"since_id": INTEGER, "limit": INTEGER})},
     {"name": "ingest_location", "description": "Store one location from any source and evaluate arrival reminders. Location sources may also use POST /api/points.", "inputSchema": schema({"lat": NUMBER, "lon": NUMBER, "timestamp": STRING, "source": STRING, "external_id": STRING, "accuracy_m": NUMBER, "speed_mps": NUMBER}, ["lat", "lon"])},
@@ -75,11 +75,12 @@ def call_tool(store, name, args):
     if name == "get_stays":
         return stays(store, args.get("start"), args.get("end"), args.get("source"), args.get("limit", 500))
     if name == "get_frequent_places":
-        return place_patterns(store, args.get("limit", 50))[0]
+        return resolve_place_patterns(store, place_patterns(store, None))[0][:min(int(args.get("limit", 50)), 5000)]
     if name == "get_visited_places":
         return visited_places(store, args.get("limit", 100))
     if name == "get_unlabeled_frequent_places":
-        return [p for p in place_patterns(store, None)[0] if p["place_id"] is None][:min(int(args.get("limit", 50)), 500)]
+        return [p for p in resolve_place_patterns(store, place_patterns(store, None))[0]
+                if p["place_id"] is None][:min(int(args.get("limit", 50)), 500)]
     if name == "get_time_at_place":
         return store.place_visits(args["place_id"], args.get("start"), args.get("end"))
     if name == "get_day_summary":

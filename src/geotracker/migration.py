@@ -10,9 +10,9 @@ from .postgres import PostgresConnection
 TABLES = {
     "points": "id source external_id timestamp lat lon accuracy_m speed_mps speed_origin mode",
     "point_observations": "id point_id legacy_point_id source timestamp lat lon accuracy_m speed_mps speed_origin received_at fingerprint",
-    "places": "id name lat lon radius_m address",
-    "reminders": "id text place_id active repeat cooldown_minutes created_at last_triggered_at cancelled_at",
-    "events": "id reminder_id point_id triggered_at acknowledged_at webhook_status",
+    "places": "id name lat lon radius_m address category provider_place_id saved",
+    "reminders": "id text place_id active repeat cooldown_minutes created_at last_triggered_at cancelled_at destination_name destination_address destination_category destination_provider_place_id",
+    "events": "id reminder_id point_id triggered_at webhook_status",
     "source_state": "source point_id",
     "observed_stays": "id source start_point_id end_point_id started_at ended_at lat lon point_count ongoing",
     "stay_processing_state": "source last_point_id last_timestamp candidate",
@@ -104,7 +104,7 @@ def migrate_sqlite(sqlite_path, postgres_url):
         target.execute("""WITH candidates AS (
             SELECT source,candidate::jsonb AS value FROM stay_observation_state
             WHERE (candidate::jsonb->>'count')::integer>=2
-            AND (candidate::jsonb->>'end')::timestamptz-(candidate::jsonb->>'start')::timestamptz<interval '5 minutes')
+            AND (candidate::jsonb->>'end')::timestamptz-(candidate::jsonb->>'start')::timestamptz<interval '15 minutes')
             DELETE FROM timeline_fixes t USING point_observations o,candidates c
             WHERE t.observation_id=o.id AND o.source=c.source
             AND o.timestamp>=(c.value->>'start') AND o.timestamp<=(c.value->>'end')
@@ -112,14 +112,14 @@ def migrate_sqlite(sqlite_path, postgres_url):
         target.execute("""WITH candidates AS (
             SELECT source,candidate::jsonb AS value FROM stay_observation_state
             WHERE (candidate::jsonb->>'count')::integer>=2
-            AND (candidate::jsonb->>'end')::timestamptz-(candidate::jsonb->>'start')::timestamptz<interval '5 minutes')
+            AND (candidate::jsonb->>'end')::timestamptz-(candidate::jsonb->>'start')::timestamptz<interval '15 minutes')
             INSERT INTO timeline_fixes(observation_id,source,role,stay_id)
             SELECT (value->>'start_id')::bigint,source,'arrival',NULL FROM candidates WHERE true
             ON CONFLICT(observation_id) DO UPDATE SET role=excluded.role""")
         target.execute("""WITH candidates AS (
             SELECT source,candidate::jsonb AS value FROM stay_observation_state
             WHERE (candidate::jsonb->>'count')::integer>=2
-            AND (candidate::jsonb->>'end')::timestamptz-(candidate::jsonb->>'start')::timestamptz<interval '5 minutes')
+            AND (candidate::jsonb->>'end')::timestamptz-(candidate::jsonb->>'start')::timestamptz<interval '15 minutes')
             INSERT INTO timeline_fixes(observation_id,source,role,stay_id)
             SELECT (value->>'end_id')::bigint,source,'latest',NULL FROM candidates WHERE true
             ON CONFLICT(observation_id) DO UPDATE SET role=excluded.role""")

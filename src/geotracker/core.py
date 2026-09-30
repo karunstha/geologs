@@ -128,79 +128,60 @@ def stats_from_points(points):
             "first": points[0]["timestamp"] if points else None, "last": points[-1]["timestamp"] if points else None}
 
 
-def trips_from_points(points):
-    """Classify connected travel as a whole; short traffic stops stay inside it."""
-    by_source = {}
-    for point in points:
-        by_source.setdefault(point["source"], []).append(point)
+def trips_between_stays(points, stay_rows, start=None, end=None):
+    """Build one trip between each pair of consecutive confirmed stays."""
+    points_by_source, stays_by_source = {}, {}
+    for point in select_best_timed_fixes(points):
+        points_by_source.setdefault(point["source"], []).append(point)
+    for stay in stay_rows:
+        stays_by_source.setdefault(stay["source"], []).append(stay)
+    start_at = datetime.fromisoformat(parse_time(start)) if start else None
+    end_at = datetime.fromisoformat(parse_time(end)) if end else None
     trips = []
-    for source_points in by_source.values():
-        source_points.sort(key=lambda point: (point["timestamp"], point.get("id", 0)))
-        trips.extend(_trips_for_source(source_points))
+    for source, source_stays in stays_by_source.items():
+        source_stays.sort(key=lambda stay: (stay["started_at"], stay["id"]))
+        source_points = points_by_source.get(source, [])
+        for origin, destination in zip(source_stays, source_stays[1:]):
+            departure = datetime.fromisoformat(origin["ended_at"])
+            arrival = datetime.fromisoformat(destination["started_at"])
+            if arrival <= departure or (arrival - departure).total_seconds() > 86400:
+                continue
+            if start_at and arrival < start_at:
+                continue
+            if end_at and departure > end_at:
+                continue
+            trip_points = [point for point in source_points
+                           if departure <= datetime.fromisoformat(point["timestamp"]) <= arrival]
+            if len(trip_points) < 2:
+                continue
+            moving, held_since = [], trip_points[0]
+            for previous, point in zip(trip_points, trip_points[1:]):
+                seconds = _connected_elapsed(previous, point, held_since)
+                distance = metres(previous["lat"], previous["lon"], point["lat"], point["lon"])
+                if seconds is not None and distance >= 10:
+                    moving.append((distance, max(distance / seconds, point.get("speed_mps") or 0)))
+                if not _same_source_state(previous, point):
+                    held_since = point
+            if not moving:
+                continue
+            distance_m = sum(distance for distance, _ in moving)
+            peak_kmh = max(speed for _, speed in moving) * 3.6
+            driving_evidence = any(distance >= 60 and speed * 3.6 >= 25 for distance, speed in moving)
+            mode = "driving" if driving_evidence else "running_cycling" if peak_kmh >= 7 else "walking"
+            route_segments = [smooth_route_segment(segment) for segment in route_segments_from_points(trip_points)]
+            trips.append({
+                "start": origin["ended_at"], "end": destination["started_at"],
+                "source": source, "distance_km": round(distance_m / 1000, 2),
+                "mode": mode, "modes": {mode: len(moving)},
+                "from_stay_id": origin["id"], "to_stay_id": destination["id"],
+                "from_name": origin.get("place_name"), "to_name": destination.get("place_name"),
+                "from_lat": origin["lat"], "from_lon": origin["lon"],
+                "to_lat": destination["lat"], "to_lon": destination["lon"],
+                "route_segments": route_segments,
+                "coordinates": route_segments[0] if len(route_segments) == 1 else [],
+                "recorded_points": len(trip_points), "coverage_complete": len(route_segments) == 1,
+            })
     return sorted(trips, key=lambda trip: trip["start"], reverse=True)
-
-
-def _trips_for_source(points):
-    trips, run, edge_seconds = [], [], []
-    last_moving_at = None
-    held_since = None
-
-    def finish():
-        active = [point for point in run if last_moving_at is None or datetime.fromisoformat(point["timestamp"]) <= last_moving_at]
-        if len(active) < 2:
-            return
-        moving = []
-        for previous, point, seconds in zip(active, active[1:], edge_seconds[:len(active) - 1]):
-            distance = metres(previous["lat"], previous["lon"], point["lat"], point["lon"])
-            if seconds > 0 and distance >= 10:
-                moving.append((distance, max(distance / seconds, point.get("speed_mps") or 0)))
-        if not moving:
-            return
-        distance_m = sum(distance for distance, _ in moving)
-        peak_kmh = max(speed for _, speed in moving) * 3.6
-        driving_evidence = any(distance >= 60 and speed * 3.6 >= 25 for distance, speed in moving)
-        mode = "driving" if driving_evidence else "running_cycling" if peak_kmh >= 7 else "walking"
-        trips.append({"start": active[0]["timestamp"], "end": active[-1]["timestamp"],
-                      "distance_km": round(distance_m / 1000, 2), "mode": mode,
-                      "modes": {mode: len(moving)},
-                      "coordinates": smooth_route_segment([[point["lon"], point["lat"]] for point in active])})
-
-    for point in points:
-        if not run:
-            run = [point]
-            last_moving_at = None
-            held_since = point
-            continue
-        previous = run[-1]
-        seconds = _connected_elapsed(previous, point, held_since)
-        distance = metres(previous["lat"], previous["lon"], point["lat"], point["lon"])
-        held = _same_source_state(previous, point)
-        if seconds is None:
-            finish()
-            run = [point]
-            edge_seconds = []
-            last_moving_at = None
-            held_since = point
-            continue
-        run.append(point)
-        edge_seconds.append(seconds)
-        if distance >= 10:
-            last_moving_at = datetime.fromisoformat(point["timestamp"])
-        elif last_moving_at is None:
-            if not held:
-                run = [point]
-                edge_seconds = []
-        elif last_moving_at and (datetime.fromisoformat(point["timestamp"]) - last_moving_at).total_seconds() >= 300:
-            stationary = run.pop()
-            edge_seconds.pop()
-            finish()
-            run = [stationary]
-            edge_seconds = []
-            last_moving_at = None
-        if not held:
-            held_since = point
-    finish()
-    return trips
 
 
 def route_segments_from_points(points):
@@ -312,20 +293,22 @@ class Store:
         CREATE TABLE IF NOT EXISTS places (
             id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE COLLATE NOCASE,
             lat REAL NOT NULL, lon REAL NOT NULL, radius_m REAL NOT NULL DEFAULT 150,
-            address TEXT
+            address TEXT, category TEXT, provider_place_id TEXT, saved INTEGER DEFAULT 1
         );
         CREATE TABLE IF NOT EXISTS reminders (
             id INTEGER PRIMARY KEY, text TEXT NOT NULL, place_id INTEGER NOT NULL REFERENCES places(id),
             active INTEGER NOT NULL DEFAULT 1, repeat INTEGER NOT NULL DEFAULT 0,
             cooldown_minutes INTEGER NOT NULL DEFAULT 1440,
             created_at TEXT NOT NULL, last_triggered_at TEXT, cancelled_at TEXT,
+            destination_name TEXT, destination_address TEXT,
+            destination_category TEXT, destination_provider_place_id TEXT,
             FOREIGN KEY(place_id) REFERENCES places(id)
         );
         CREATE INDEX IF NOT EXISTS reminders_active_created ON reminders(active,created_at);
         CREATE TABLE IF NOT EXISTS events (
             id INTEGER PRIMARY KEY, reminder_id INTEGER NOT NULL REFERENCES reminders(id),
             point_id INTEGER NOT NULL REFERENCES points(id), triggered_at TEXT NOT NULL,
-            acknowledged_at TEXT, webhook_status TEXT DEFAULT 'pending'
+            webhook_status TEXT DEFAULT 'pending'
         );
         CREATE INDEX IF NOT EXISTS events_triggered ON events(triggered_at);
         CREATE TABLE IF NOT EXISTS source_state (
@@ -376,7 +359,7 @@ class Store:
             """)
         if not self.postgres:
             version = self.db.execute("PRAGMA user_version").fetchone()[0]
-            rebuild_analysis = version < 5
+            rebuild_analysis = version < 8
             if version < 1:
                 self.db.execute("UPDATE points SET mode='running_cycling' WHERE mode='cycling'")
             if version < 2:
@@ -417,24 +400,57 @@ class Store:
                 if "cancelled_at" not in reminder_columns:
                     self.db.execute("ALTER TABLE reminders ADD COLUMN cancelled_at TEXT")
                 self.db.execute("UPDATE reminders SET cancelled_at=created_at WHERE active=0 AND last_triggered_at IS NULL AND cancelled_at IS NULL")
+            if version < 9:
+                place_columns = {row[1] for row in self.db.execute("PRAGMA table_info(places)")}
+                if "category" not in place_columns:
+                    self.db.execute("ALTER TABLE places ADD COLUMN category TEXT")
+                if "provider_place_id" not in place_columns:
+                    self.db.execute("ALTER TABLE places ADD COLUMN provider_place_id TEXT")
+            if version < 10:
+                place_columns = {row[1] for row in self.db.execute("PRAGMA table_info(places)")}
+                if "saved" not in place_columns:
+                    self.db.execute("ALTER TABLE places ADD COLUMN saved INTEGER DEFAULT 1")
+                reminder_columns = {row[1] for row in self.db.execute("PRAGMA table_info(reminders)")}
+                for column in ("destination_name", "destination_address", "destination_category", "destination_provider_place_id"):
+                    if column not in reminder_columns:
+                        self.db.execute(f"ALTER TABLE reminders ADD COLUMN {column} TEXT")
+                self.db.execute("""UPDATE reminders SET destination_name=(SELECT name FROM places WHERE id=place_id),
+                    destination_address=(SELECT address FROM places WHERE id=place_id),
+                    destination_category=(SELECT category FROM places WHERE id=place_id),
+                    destination_provider_place_id=(SELECT provider_place_id FROM places WHERE id=place_id)
+                    WHERE destination_name IS NULL""")
+                event_columns = {row[1] for row in self.db.execute("PRAGMA table_info(events)")}
+                if "acknowledged_at" in event_columns:
+                    self.db.execute("ALTER TABLE events DROP COLUMN acknowledged_at")
         if self.postgres and not self.db.execute("SELECT 1 FROM schema_migrations WHERE version=5").fetchone():
             self.db.execute("SELECT pg_advisory_xact_lock(hashtext('geotracker:analysis:migration:5'))")
             if not self.db.execute("SELECT 1 FROM schema_migrations WHERE version=5").fetchone():
                 from .analysis import process_stays
                 process_stays(self, rebuild=True)
                 self.db.execute("INSERT INTO schema_migrations(version) VALUES(5)")
+        if self.postgres and not self.db.execute("SELECT 1 FROM schema_migrations WHERE version=8").fetchone():
+            self.db.execute("SELECT pg_advisory_xact_lock(hashtext('geotracker:stays:migration:8'))")
+            if not self.db.execute("SELECT 1 FROM schema_migrations WHERE version=8").fetchone():
+                from .analysis import process_stays
+                process_stays(self, rebuild=True)
+                self.db.execute("INSERT INTO schema_migrations(version) VALUES(8)")
         elif not self.postgres and rebuild_analysis:
             from .analysis import process_stays
             process_stays(self, rebuild=True)
-            self.db.execute("PRAGMA user_version=5")
+            self.db.execute("PRAGMA user_version=8")
         elif not self.db.execute("SELECT 1 FROM stay_observation_state LIMIT 1").fetchone() and self.db.execute("SELECT 1 FROM point_observations LIMIT 1").fetchone():
             if self.postgres:
                 self.db.execute("SELECT pg_advisory_xact_lock(hashtext('geotracker:stays:bootstrap'))")
             if not self.db.execute("SELECT 1 FROM stay_observation_state LIMIT 1").fetchone():
                 from .analysis import process_stays
                 process_stays(self)
-        if not self.postgres and version < 7:
-            self.db.execute("PRAGMA user_version=7")
+        if not self.postgres and version < 8:
+            self.db.execute("PRAGMA user_version=8")
+        if not self.postgres and version < 9:
+            self.db.execute("DELETE FROM analysis_cache")
+            self.db.execute("PRAGMA user_version=9")
+        if not self.postgres and version < 10:
+            self.db.execute("PRAGMA user_version=10")
         self.db.commit()
 
     def close(self):
@@ -511,7 +527,7 @@ class Store:
             args.append(source)
         event_row = self.db.execute("""SELECT COUNT(*) AS count,COALESCE(MAX(e.id),0) AS max_id
             FROM events e JOIN points p ON p.id=e.point_id WHERE """ + " AND ".join(clauses), args).fetchone()
-        places = self._rows("SELECT id,name,lat,lon,radius_m,address FROM places ORDER BY id")
+        places = self._rows("SELECT id,name,lat,lon,radius_m,address,category,provider_place_id FROM places ORDER BY id")
         reminders = self._rows("""SELECT id,text,place_id,active,created_at,last_triggered_at,cancelled_at
             FROM reminders WHERE (created_at>=? AND created_at<=?)
             OR (last_triggered_at>=? AND last_triggered_at<=?)
@@ -520,7 +536,7 @@ class Store:
                 AND (cancelled_at IS NULL OR cancelled_at>?)) ORDER BY id""",
             (parse_time(start), parse_time(end), parse_time(start), parse_time(end),
              parse_time(start), parse_time(end), parse_time(end), parse_time(end), parse_time(end)))
-        value = [self.analysis_watermark(start, end, source), event_row["count"], event_row["max_id"], places, reminders]
+        value = ["stay-trips-v2", self.analysis_watermark(start, end, source), event_row["count"], event_row["max_id"], places, reminders]
         return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
     def stored_daily_overview(self, date, timezone_name, source=None, watermark=None):
@@ -646,7 +662,8 @@ class Store:
             if not trigger_reminders or abs((datetime.now(timezone.utc) - datetime.fromisoformat(timestamp)).total_seconds()) > 1800:
                 continue
             for reminder in self._rows("""SELECT r.*, p.lat AS place_lat, p.lon AS place_lon, p.radius_m,
-                p.name AS place_name FROM reminders r JOIN places p ON p.id=r.place_id WHERE r.active=1"""):
+                COALESCE(r.destination_name,p.name) AS place_name
+                FROM reminders r JOIN places p ON p.id=r.place_id WHERE r.active=1"""):
                 if accuracy is not None and accuracy > max(150, reminder["radius_m"]):
                     continue
                 inside = metres(lat, lon, reminder["place_lat"], reminder["place_lon"]) <= reminder["radius_m"]
@@ -752,16 +769,21 @@ class Store:
         return rows[0] if rows else None
 
     def places(self, enrich=False):
-        rows = self._rows("SELECT id,name,lat,lon,radius_m,address FROM places ORDER BY name")
+        rows = self._rows("""SELECT id,name,lat,lon,radius_m,address,category,provider_place_id
+            FROM places WHERE COALESCE(saved,1)=1 ORDER BY name""")
         if enrich:
             changed = False
             for place in rows:
-                if place["address"]:
+                if place["address"] and place["category"] and place["provider_place_id"]:
                     continue
-                result = address_for_coordinate(self, place["lat"], place["lon"])
-                if result:
-                    place["address"] = result
-                    self.db.execute("UPDATE places SET address=? WHERE id=? AND (address IS NULL OR address='')", (result, place["id"]))
+                found = place_for_coordinate(self, place["lat"], place["lon"])
+                address = place["address"] or found.get("address") or ""
+                category = place["category"] or found.get("category") or ""
+                provider_place_id = place["provider_place_id"] or found.get("provider_place_id") or ""
+                if (address, category, provider_place_id) != (place["address"] or "", place["category"] or "", place["provider_place_id"] or ""):
+                    place.update({"address": address, "category": category, "provider_place_id": provider_place_id})
+                    self.db.execute("UPDATE places SET address=?,category=?,provider_place_id=? WHERE id=?",
+                                    (address, category, provider_place_id, place["id"]))
                     changed = True
             if changed:
                 self.db.commit()
@@ -775,28 +797,40 @@ class Store:
         radius = float(raw.get("radius_m", 150))
         if not (-90 <= lat <= 90 and -180 <= lon <= 180 and 20 <= radius <= 5000):
             raise ValueError("invalid place coordinates or radius (20–5000 m)")
-        address = str(raw.get("address") or "")[:300]
-        if not address:
-            address = address_for_coordinate(self, lat, lon)
+        existing = self.db.execute("SELECT address,category,provider_place_id FROM places WHERE id=?", (int(raw["id"]),)).fetchone() if raw.get("id") else None
+        address = str(raw.get("address") or (existing["address"] if existing else "") or "")[:300]
+        category = str(raw.get("category") or (existing["category"] if existing else "") or "")[:160]
+        provider_place_id = str(raw.get("provider_place_id") or (existing["provider_place_id"] if existing else "") or "")[:300]
+        if not address or not category or not provider_place_id:
+            found = place_for_coordinate(self, lat, lon)
+            address = address or found.get("address") or ""
+            category = category or found.get("category") or ""
+            provider_place_id = provider_place_id or found.get("provider_place_id") or ""
         if raw.get("id"):
-            updated = self.db.execute("UPDATE places SET name=?,lat=?,lon=?,radius_m=?,address=? WHERE id=?", (name, lat, lon, radius, address, int(raw["id"])))
+            updated = self.db.execute("UPDATE places SET name=?,lat=?,lon=?,radius_m=?,address=?,category=?,provider_place_id=?,saved=1 WHERE id=?",
+                                      (name, lat, lon, radius, address, category, provider_place_id, int(raw["id"])))
             if not updated.rowcount:
                 raise ValueError("place not found")
             id_ = int(raw["id"])
         else:
-            id_ = self.db.execute("INSERT INTO places(name,lat,lon,radius_m,address) VALUES (?,?,?,?,?) RETURNING id", (name, lat, lon, radius, address)).fetchone()["id"]
+            id_ = self.db.execute("INSERT INTO places(name,lat,lon,radius_m,address,category,provider_place_id,saved) VALUES (?,?,?,?,?,?,?,1) RETURNING id",
+                                  (name, lat, lon, radius, address, category, provider_place_id)).fetchone()["id"]
         self.db.execute("DELETE FROM analysis_cache")
         self.db.commit()
-        return self._rows("SELECT id,name,lat,lon,radius_m,address FROM places WHERE id=?", (id_,))[0]
+        return self._rows("SELECT id,name,lat,lon,radius_m,address,category,provider_place_id FROM places WHERE id=?", (id_,))[0]
 
     def reminders(self):
         """Active one-shot reminders waiting for their next arrival."""
-        return self._rows("""SELECT r.*, p.name AS place_name FROM reminders r JOIN places p ON p.id=r.place_id
+        return self._rows("""SELECT r.*,COALESCE(r.destination_name,p.name) AS place_name,
+            p.lat AS place_lat,p.lon AS place_lon,p.radius_m,
+            COALESCE(r.destination_address,p.address) AS place_address,
+            COALESCE(r.destination_category,p.category) AS category
+            FROM reminders r JOIN places p ON p.id=r.place_id
             WHERE r.active=1 ORDER BY r.created_at DESC,r.id DESC""")
 
     def reminder_history(self, limit=200):
-        return self._rows("""SELECT r.*,p.name AS place_name,e.id AS event_id,e.triggered_at,
-            e.acknowledged_at,e.webhook_status,
+        return self._rows("""SELECT r.*,COALESCE(r.destination_name,p.name) AS place_name,
+            COALESCE(r.destination_category,p.category) AS category,e.id AS event_id,e.triggered_at,e.webhook_status,
             CASE WHEN r.last_triggered_at IS NULL THEN 'cancelled' ELSE 'triggered' END AS status
             FROM reminders r JOIN places p ON p.id=r.place_id
             LEFT JOIN events e ON e.id=(SELECT MAX(latest.id) FROM events latest WHERE latest.reminder_id=r.id)
@@ -807,12 +841,52 @@ class Store:
         message = str(raw.get("text") or "").strip()
         if not message or len(message) > 500:
             raise ValueError("text is required (max 500 characters)")
-        place_id = int(raw["place_id"])
-        if not self.db.execute("SELECT 1 FROM places WHERE id=?", (place_id,)).fetchone():
-            raise ValueError("place not found")
-        id_ = self.db.execute("INSERT INTO reminders(text,place_id,repeat,cooldown_minutes,created_at) VALUES (?,?,0,1440,?) RETURNING id", (message, place_id, parse_time(None))).fetchone()["id"]
+        if raw.get("place_id") not in (None, ""):
+            place_id = int(raw["place_id"])
+            place = self.db.execute("SELECT * FROM places WHERE id=?", (place_id,)).fetchone()
+            if not place:
+                raise ValueError("place not found")
+            destination = {"name": place["name"], "address": place["address"] or "",
+                           "category": place["category"] or "", "provider_place_id": place["provider_place_id"] or ""}
+        else:
+            destination_name = str(raw.get("place_name") or "").strip()
+            lat, lon = raw.get("lat"), raw.get("lon")
+            if (lat is None or lon is None) and destination_name:
+                matches = geocode(self, destination_name)
+                if not matches:
+                    raise ValueError("place name was not found; provide coordinates")
+                match = matches[0]
+                lat, lon = match["lat"], match["lon"]
+                raw = {**match, **raw, "lat": lat, "lon": lon}
+            if lat is None or lon is None:
+                raise ValueError("place_id or destination coordinates are required")
+            lat, lon = float(lat), float(lon)
+            radius = float(raw.get("radius_m", 150))
+            if not (-90 <= lat <= 90 and -180 <= lon <= 180 and 20 <= radius <= 5000):
+                raise ValueError("invalid destination coordinates or radius (20–5000 m)")
+            found = place_for_coordinate(self, lat, lon)
+            destination = {
+                "name": destination_name or str(raw.get("name") or found.get("name") or f"{lat:.5f}, {lon:.5f}").strip(),
+                "address": str(raw.get("address") or found.get("address") or "")[:300],
+                "category": str(raw.get("category") or found.get("category") or "")[:160],
+                "provider_place_id": str(raw.get("provider_place_id") or found.get("provider_place_id") or "")[:300],
+            }
+            if not destination["name"] or len(destination["name"]) > 120:
+                raise ValueError("place_name is required (max 120 characters)")
+            internal_name = "Reminder destination " + os.urandom(8).hex()
+            place_id = self.db.execute("""INSERT INTO places
+                (name,lat,lon,radius_m,address,category,provider_place_id,saved)
+                VALUES (?,?,?,?,?,?,?,0) RETURNING id""",
+                (internal_name, lat, lon, radius, destination["address"], destination["category"],
+                 destination["provider_place_id"])).fetchone()["id"]
+        id_ = self.db.execute("""INSERT INTO reminders
+            (text,place_id,repeat,cooldown_minutes,created_at,destination_name,destination_address,
+             destination_category,destination_provider_place_id)
+            VALUES (?,?,0,1440,?,?,?,?,?) RETURNING id""",
+            (message, place_id, parse_time(None), destination["name"], destination["address"],
+             destination["category"], destination["provider_place_id"])).fetchone()["id"]
         self.db.commit()
-        return self._rows("SELECT * FROM reminders WHERE id=?", (id_,))[0]
+        return next(item for item in self.reminders() if item["id"] == id_)
 
     def cancel_reminder(self, id_):
         result = self.db.execute("UPDATE reminders SET active=0,cancelled_at=? WHERE id=? AND active=1", (parse_time(None), int(id_)))
@@ -822,7 +896,7 @@ class Store:
         return {"updated": result.rowcount}
 
     def events(self, since_id=0, limit=100):
-        return self._rows("""SELECT e.*, r.text, p.name AS place_name FROM events e
+        return self._rows("""SELECT e.*,r.text,COALESCE(r.destination_name,p.name) AS place_name FROM events e
             JOIN reminders r ON r.id=e.reminder_id JOIN places p ON p.id=r.place_id
             WHERE e.id>? ORDER BY e.id DESC LIMIT ?""", (int(since_id), min(int(limit), 500)))
 
@@ -832,34 +906,30 @@ class Store:
         if source:
             clauses.append("pnt.source=?")
             args.append(source)
-        return self._rows("""SELECT e.id,e.reminder_id,e.triggered_at,e.acknowledged_at,e.webhook_status,
-            r.text,p.name AS place_name FROM events e JOIN reminders r ON r.id=e.reminder_id
+        return self._rows("""SELECT e.id,e.reminder_id,e.triggered_at,e.webhook_status,
+            r.text,COALESCE(r.destination_name,p.name) AS place_name FROM events e JOIN reminders r ON r.id=e.reminder_id
             JOIN places p ON p.id=r.place_id JOIN points pnt ON pnt.id=e.point_id WHERE """
             + " AND ".join(clauses) + " ORDER BY e.triggered_at", args)
 
     def reminders_created(self, start, end):
-        return self._rows("""SELECT r.id,r.text,r.created_at,r.active,r.last_triggered_at,p.name AS place_name
+        return self._rows("""SELECT r.id,r.text,r.created_at,r.active,r.last_triggered_at,
+            COALESCE(r.destination_name,p.name) AS place_name
             FROM reminders r JOIN places p ON p.id=r.place_id
             WHERE r.created_at>=? AND r.created_at<=? ORDER BY r.created_at""",
             (parse_time(start), parse_time(end)))
 
     def reminders_cancelled(self, start, end):
-        return self._rows("""SELECT r.id,r.text,r.cancelled_at,p.name AS place_name
+        return self._rows("""SELECT r.id,r.text,r.cancelled_at,COALESCE(r.destination_name,p.name) AS place_name
             FROM reminders r JOIN places p ON p.id=r.place_id
             WHERE r.cancelled_at>=? AND r.cancelled_at<=? ORDER BY r.cancelled_at""",
             (parse_time(start), parse_time(end)))
 
     def reminders_active_at(self, timestamp):
         at = parse_time(timestamp)
-        return self._rows("""SELECT r.id,r.text,r.created_at,p.name AS place_name
+        return self._rows("""SELECT r.id,r.text,r.created_at,COALESCE(r.destination_name,p.name) AS place_name
             FROM reminders r JOIN places p ON p.id=r.place_id WHERE r.created_at<=?
             AND (r.last_triggered_at IS NULL OR r.last_triggered_at>?)
             AND (r.cancelled_at IS NULL OR r.cancelled_at>?) ORDER BY r.created_at""", (at, at, at))
-
-    def acknowledge(self, id_):
-        result = self.db.execute("UPDATE events SET acknowledged_at=? WHERE id=?", (parse_time(None), int(id_)))
-        self.db.commit()
-        return {"updated": result.rowcount}
 
     def stats(self, start=None, end=None, source=None):
         raw = list(reversed(self.observations(start, end, source=source, limit=None)))
@@ -871,8 +941,9 @@ class Store:
         return result
 
     def trips(self, start=None, end=None, source=None):
-        """Movement runs, split by pauses and gaps. Estimates from samples, not map matching."""
-        return trips_from_points(select_best_timed_fixes(list(reversed(self.observations(start, end, source=source, limit=None)))))
+        """Travel between consecutive confirmed stays. Estimates are based on recorded samples."""
+        from .analysis import anchored_trips
+        return anchored_trips(self, start, end, source)
 
     def export_geojson(self, start=None, end=None):
         return {"type": "FeatureCollection", "features": [{"type": "Feature", "geometry": {"type": "Point", "coordinates": [p["lon"], p["lat"]]}, "properties": {k: v for k, v in p.items() if k not in ("lat", "lon")}} for p in self.observations(start, end, limit=None)]}
@@ -1032,8 +1103,11 @@ def photon_result(feature):
     lon, lat = feature["geometry"]["coordinates"][:2]
     label = ", ".join(str(props[k]) for k in ("name", "street", "city", "state", "country") if props.get(k))
     place_name = str(props.get("name") or "").strip()
+    category = ".".join(str(props[key]) for key in ("osm_key", "osm_value") if props.get(key))
+    provider_place_id = ":".join(str(props[key]) for key in ("osm_type", "osm_id") if props.get(key))
     return {"name": label or "Unknown place", "place_name": place_name,
-            "lat": lat, "lon": lon, "address": label}
+            "lat": lat, "lon": lon, "address": label, "category": category,
+            "categories": [category] if category else [], "provider_place_id": provider_place_id}
 
 
 def geoapify_reverse_result(value, lat, lon):
@@ -1049,9 +1123,12 @@ def geoapify_reverse_result(value, lat, lon):
     # Geoapify documents address_line1 as the amenity name for amenity results.
     if not place_name and value.get("result_type") == "amenity":
         place_name = str(value.get("address_line1") or "").strip()
+    categories = value.get("categories") if isinstance(value.get("categories"), list) else []
+    category = value.get("category") or (categories[0] if categories else None)
     return {"name": place_name or address or "Unknown place",
             "place_name": place_name, "address": address, "lat": lat, "lon": lon,
-            "result_type": value.get("result_type"), "category": value.get("category"),
+            "result_type": value.get("result_type"), "category": category,
+            "categories": categories, "provider_place_id": value.get("place_id"),
             "distance_m": value.get("distance")}
 
 
@@ -1115,7 +1192,10 @@ def geocode(store, query, lat=None, lon=None):
         data = provider_request("/v1/geocode/search", params)
         value = [{"name": r.get("name") or r.get("formatted") or query,
                   "place_name": r.get("name") or "", "lat": r["lat"], "lon": r["lon"],
-                  "address": r.get("formatted", "")} for r in data.get("results", [])]
+                  "address": r.get("formatted", ""),
+                  "category": r.get("category") or ((r.get("categories") or [None])[0]),
+                  "categories": r.get("categories") if isinstance(r.get("categories"), list) else [],
+                  "provider_place_id": r.get("place_id")} for r in data.get("results", [])]
     store.cache(key, provider, value)
     return value
 
@@ -1168,9 +1248,12 @@ def place_for_coordinate(store, lat, lon):
     try:
         value = reverse_geocode(store, lat, lon)
         return {"name": str(value.get("place_name") or value.get("name") or value.get("address") or "")[:300],
-                "address": str(value.get("address") or "")[:300]}
+                "address": str(value.get("address") or "")[:300],
+                "category": str(value.get("category") or "")[:160],
+                "categories": value.get("categories") if isinstance(value.get("categories"), list) else [],
+                "provider_place_id": str(value.get("provider_place_id") or "")[:300]}
     except (ValueError, OSError, KeyError):
-        return {"name": "", "address": ""}
+        return {"name": "", "address": "", "category": "", "categories": [], "provider_place_id": ""}
 
 
 def current_location(store):
@@ -1183,10 +1266,12 @@ def current_location(store):
     matches = [(distance, place) for distance, place in matches if distance <= place["radius_m"]]
     if matches:
         place = min(matches, key=lambda item: item[0])[1]
-        point.update({"place_id": place["id"], "place_name": place["name"], "address": place["address"] or ""})
+        point.update({"place_id": place["id"], "place_name": place["name"], "address": place["address"] or "",
+                      "category": place.get("category") or "", "provider_place_id": place.get("provider_place_id") or ""})
     else:
         found = place_for_coordinate(store, point["lat"], point["lon"])
-        point.update({"place_id": None, "place_name": found["name"], "address": found["address"]})
+        point.update({"place_id": None, "place_name": found["name"], "address": found["address"],
+                      "category": found["category"], "provider_place_id": found["provider_place_id"]})
     return point
 
 

@@ -8,11 +8,11 @@ import os
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from .core import metres, parse_time, place_for_coordinate, route_segments_from_points, select_best_timed_fixes, smooth_route_segment, stats_from_points, trips_from_points
+from .core import metres, parse_time, place_for_coordinate, route_segments_from_points, smooth_route_segment, stats_from_points, trips_between_stays
 
 
 STOP_RADIUS_M = 50
-STOP_MIN_SECONDS = 300
+STOP_MIN_SECONDS = 900
 MAX_SAMPLE_GAP_SECONDS = 1800
 
 
@@ -202,6 +202,15 @@ def stays(store, start=None, end=None, source=None, limit=500):
     return rows
 
 
+def anchored_trips(store, start=None, end=None, source=None):
+    """Return travel intervals bounded by consecutive stays lasting at least 15 minutes."""
+    context_start = (datetime.fromisoformat(parse_time(start)) - timedelta(days=1)).isoformat() if start else None
+    context_end = (datetime.fromisoformat(parse_time(end)) + timedelta(days=1)).isoformat() if end else None
+    anchors = stays(store, context_start, context_end, source=source, limit=None)
+    points = list(reversed(store.observations(context_start, context_end, source=source, limit=None)))
+    return trips_between_stays(points, anchors, start, end)
+
+
 def _bucket(lat, lon):
     """75 m ECEF grid: nearby places only need 27 neighboring cells checked."""
     a, b = math.radians(lat), math.radians(lon)
@@ -245,28 +254,118 @@ def place_patterns(store, limit=50, rows=None):
     return ordered if limit is None else ordered[:min(int(limit), 5000)], mapping
 
 
-def visited_places(store, limit=500):
-    """Observed places ordered by total sampled time, with cache-first labels."""
-    clusters, _ = place_patterns(store, limit=None)
+def _normalized_place_name(value):
+    """Normalize provider labels for matching without changing their display text."""
+    normalized = " ".join(str(value or "").casefold().split())
+    return "" if normalized in ("unknown", "unknown place") else normalized
+
+
+def resolve_place_patterns(store, patterns):
+    """Resolve coordinate clusters and merge clusters that describe one real place.
+
+    Provider IDs are authoritative. Equal normalized names are also merged when
+    their coordinates are within 2.5 km, which joins large parks and lakes while
+    keeping distant branches of a chain separate.
+    """
+    clusters, stay_mapping = patterns
     saved = {place["id"]: place for place in store.places(enrich=True)}
-    result = []
+    resolved = []
     for cluster in clusters:
         place = saved.get(cluster["place_id"])
-        found = ({"name": place["name"], "address": place["address"]} if place
-                 else place_for_coordinate(store, cluster["lat"], cluster["lon"]))
-        resolved_name = cluster["name"] or found["name"] or found["address"]
-        item = {**cluster, "name": resolved_name, "address": found["address"],
-                "display_name": resolved_name or cluster["display_name"], "saved": bool(place)}
-        if not _is_home_place(item):
-            result.append(item)
-        if len(result) >= min(max(int(limit), 1), 5000):
-            break
-    return result
+        found = (place if place else place_for_coordinate(store, cluster["lat"], cluster["lon"]))
+        name = cluster.get("name") or found.get("name") or found.get("address") or ""
+        categories = found.get("categories") if isinstance(found.get("categories"), list) else []
+        category = found.get("category") or (categories[0] if categories else "")
+        resolved.append({**cluster, "name": name, "display_name": name or cluster["display_name"],
+                         "address": found.get("address") or "", "category": category or "",
+                         "categories": categories, "provider_place_id": found.get("provider_place_id") or "",
+                         "saved": bool(place)})
+
+    parent = list(range(len(resolved)))
+    def root(index):
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+    def union(a, b):
+        a, b = root(a), root(b)
+        if a != b:
+            parent[b] = a
+
+    saved_ids, provider_ids, names = {}, {}, {}
+    for index, place in enumerate(resolved):
+        if place.get("place_id") is not None:
+            key = place["place_id"]
+            if key in saved_ids:
+                union(index, saved_ids[key])
+            else:
+                saved_ids[key] = index
+        if place.get("provider_place_id"):
+            key = place["provider_place_id"]
+            if key in provider_ids:
+                union(index, provider_ids[key])
+            else:
+                provider_ids[key] = index
+        name = _normalized_place_name(place.get("name"))
+        if name:
+            for other in names.get(name, []):
+                if metres(place["lat"], place["lon"], resolved[other]["lat"], resolved[other]["lon"]) <= 2500:
+                    union(index, other)
+            names.setdefault(name, []).append(index)
+
+    grouped, raw_to_merged = [], {}
+    by_root = {}
+    for index, place in enumerate(resolved):
+        group_root = root(index)
+        target = by_root.get(group_root)
+        weight = max(float(place.get("observed_minutes") or 0), 1.0)
+        if target is None:
+            target = len(grouped)
+            by_root[group_root] = target
+            grouped.append({**place, "cluster_id": target, "_weight": weight})
+        else:
+            item = grouped[target]
+            total_weight = item["_weight"] + weight
+            item["lat"] = (item["lat"] * item["_weight"] + place["lat"] * weight) / total_weight
+            item["lon"] = (item["lon"] * item["_weight"] + place["lon"] * weight) / total_weight
+            item["_weight"] = total_weight
+            item["visits"] += place["visits"]
+            item["observed_minutes"] = round(item["observed_minutes"] + place["observed_minutes"], 1)
+            item["last_seen"] = max(item.get("last_seen") or "", place.get("last_seen") or "") or None
+            if "first_seen" in item or "first_seen" in place:
+                values = [value for value in (item.get("first_seen"), place.get("first_seen")) if value]
+                item["first_seen"] = min(values) if values else None
+            if place.get("saved") and not item.get("saved"):
+                for field in ("place_id", "name", "display_name", "address", "category", "provider_place_id"):
+                    item[field] = place.get(field) or item.get(field)
+            else:
+                for field in ("address", "category", "provider_place_id"):
+                    item[field] = item.get(field) or place.get(field) or ""
+            item["saved"] = item.get("saved") or place.get("saved")
+            item["categories"] = list(dict.fromkeys((item.get("categories") or []) + (place.get("categories") or [])))
+        raw_to_merged[place["cluster_id"]] = target
+    for place in grouped:
+        place.pop("_weight", None)
+    mapping = {stay_id: raw_to_merged[cluster_id] for stay_id, cluster_id in stay_mapping.items()}
+    grouped.sort(key=lambda item: (item["observed_minutes"], item["visits"]), reverse=True)
+    # Sorting changes public cluster IDs, so remap stays and IDs together.
+    old_to_new = {item["cluster_id"]: index for index, item in enumerate(grouped)}
+    for index, item in enumerate(grouped):
+        item["cluster_id"] = index
+    mapping = {stay_id: old_to_new[cluster_id] for stay_id, cluster_id in mapping.items()}
+    return grouped, mapping
+
+
+def visited_places(store, limit=500):
+    """Observed places ordered by total sampled time, with cache-first labels."""
+    clusters, _ = resolve_place_patterns(store, place_patterns(store, limit=None))
+    return [item for item in clusters if not _is_home_place(item)][:min(max(int(limit), 1), 5000)]
 
 
 def transitions(store, limit=50, patterns=None, rows=None):
     rows = rows if rows is not None else stays(store, limit=None)
-    clusters, mapping = patterns if patterns is not None else place_patterns(store, limit=None, rows=rows)
+    clusters, mapping = patterns if patterns is not None else resolve_place_patterns(
+        store, place_patterns(store, limit=None, rows=rows))
     cluster_by_id = {c["cluster_id"]: c for c in clusters}
     rows = list(reversed(rows))
     edges = {}
@@ -301,7 +400,7 @@ def predict_next(store, patterns=None, edges=None):
     current = store.latest()
     if not current:
         return {"prediction": None, "reason": "no location data"}
-    clusters, _ = patterns if patterns is not None else place_patterns(store, limit=None)
+    clusters, _ = patterns if patterns is not None else resolve_place_patterns(store, place_patterns(store, limit=None))
     origin = next((c for c in clusters if metres(current["lat"], current["lon"], c["lat"], c["lon"]) <= 75), None)
     if not origin:
         return {"prediction": None, "reason": "current point is not at an observed stay"}
@@ -323,13 +422,7 @@ def predict_next(store, patterns=None, edges=None):
 
 def insights(store, limit=50):
     rows = stays(store, limit=None)
-    patterns = place_patterns(store, limit=None, rows=rows)
-    for place in [place for place in patterns[0] if not place["name"]][:12]:
-        found = place_for_coordinate(store, place["lat"], place["lon"])
-        place["address"] = found["address"]
-        if found["name"] or found["address"]:
-            place["name"] = found["name"] or found["address"]
-            place["display_name"] = place["name"]
+    patterns = resolve_place_patterns(store, place_patterns(store, limit=None, rows=rows))
     edges = transitions(store, limit=None, patterns=patterns, rows=rows)
     unlabeled = [p for p in patterns[0] if p["place_id"] is None][:limit]
     return {"frequent_places": patterns[0][:limit],
@@ -353,7 +446,7 @@ def day_summary(store, date, timezone_name="UTC", source=None):
     start = day_start.isoformat()
     end = (day_end - timedelta(microseconds=1)).isoformat()
     provider = "photon:" + os.environ.get("GEOTRACKER_PHOTON_URL", "") if os.environ.get("GEOTRACKER_PHOTON_URL") else "geoapify:" + str(bool(os.environ.get("GEOAPIFY_API_KEY")))
-    cache_identity = json.dumps(["day-v4", date, timezone_name, source, provider], separators=(",", ":"))
+    cache_identity = json.dumps(["day-v6", date, timezone_name, source, provider], separators=(",", ":"))
     cache_key = "day:" + hashlib.sha256(cache_identity.encode()).hexdigest()
     watermark = store.analysis_watermark(start, end, source)
     cached = store.cached_analysis(cache_key, watermark)
@@ -364,31 +457,37 @@ def day_summary(store, date, timezone_name="UTC", source=None):
         first = max(datetime.fromisoformat(stay["started_at"]), day_start)
         last = min(datetime.fromisoformat(stay["ended_at"]), day_end)
         stay["observed_minutes"] = round(max(0, (last - first).total_seconds()) / 60, 1)
-    clusters, mapping = place_patterns(store, limit=None, rows=day_stays)
-    by_cluster = {cluster["cluster_id"]: cluster for cluster in clusters}
-    for cluster in clusters:
+    raw_patterns = place_patterns(store, limit=None, rows=day_stays)
+    raw_by_cluster = {cluster["cluster_id"]: cluster for cluster in raw_patterns[0]}
+    for cluster in raw_patterns[0]:
         cluster["first_seen"] = None
         cluster["last_seen"] = None
     for stay in day_stays:
-        cluster = by_cluster[mapping[stay["id"]]]
+        cluster = raw_by_cluster[raw_patterns[1][stay["id"]]]
         first = max(datetime.fromisoformat(stay["started_at"]), day_start).isoformat()
         last = min(datetime.fromisoformat(stay["ended_at"]), day_end).isoformat()
         cluster["first_seen"] = min(cluster["first_seen"] or first, first)
         cluster["last_seen"] = max(cluster["last_seen"] or last, last)
+    clusters, mapping = resolve_place_patterns(store, raw_patterns)
+    by_cluster = {cluster["cluster_id"]: cluster for cluster in clusters}
     places_including_home = sorted(clusters, key=lambda item: item["first_seen"])
-    for place in places_including_home:
-        found = place_for_coordinate(store, place["lat"], place["lon"])
-        place["address"] = found["address"]
-        if not place["name"] and (found["name"] or found["address"]):
-            place["name"] = found["name"] or found["address"]
     visited_places = [place for place in places_including_home if not _is_home_place(place)]
     for stay in day_stays:
         place = by_cluster[mapping[stay["id"]]]
         stay["display_name"] = place["name"] or place["display_name"]
+        stay["category"] = place.get("category") or ""
+        stay["provider_place_id"] = place.get("provider_place_id") or ""
     points = store.observations(start, end, source=source, limit=None)
-    raw_chronological = list(reversed(points))
     chronological = list(reversed(store.timeline(start, end, source=source, limit=None)))
-    trips = trips_from_points(select_best_timed_fixes(raw_chronological))
+    trips = anchored_trips(store, start, end, source)
+    stay_labels = {stay["id"]: by_cluster[mapping[stay["id"]]]["name"] or by_cluster[mapping[stay["id"]]]["display_name"]
+                   for stay in day_stays}
+    for trip in trips:
+        trip["from_name"] = stay_labels.get(trip["from_stay_id"], trip.get("from_name"))
+        trip["to_name"] = stay_labels.get(trip["to_stay_id"], trip.get("to_name"))
+    trips = [trip for trip in trips if mapping.get(trip["from_stay_id"]) is None
+             or mapping.get(trip["to_stay_id"]) is None
+             or mapping[trip["from_stay_id"]] != mapping[trip["to_stay_id"]]]
     route_segments = [smooth_route_segment(segment) for segment in route_segments_from_points(chronological)]
     activity_counts = {mode: sum(trip["mode"] == mode for trip in trips) for mode in ("driving", "walking", "running_cycling")}
     stats = stats_from_points(chronological)
@@ -432,6 +531,8 @@ def daily_overview(store, date, timezone_name=None, source=None):
     reminders_active_at_end = store.reminders_active_at(end)
     places = [{"name": place.get("name") or place.get("display_name"),
                "address": place.get("address") or "", "home": _is_home_place(place),
+               "category": place.get("category") or "",
+               "provider_place_id": place.get("provider_place_id") or "",
                "lat": place["lat"], "lon": place["lon"],
                "visits": place["visits"], "observed_minutes": place["observed_minutes"],
                "first_seen": place.get("first_seen"), "last_seen": place.get("last_seen")}
@@ -448,10 +549,13 @@ def daily_overview(store, date, timezone_name=None, source=None):
         duration = max(0, (datetime.fromisoformat(trip["end"]) - datetime.fromisoformat(trip["start"])).total_seconds())
         trips.append({"start": trip["start"], "end": trip["end"], "duration_minutes": round(duration / 60, 1),
                       "mode": trip["mode"], "distance_km": trip["distance_km"],
-                      "from": endpoint_name(trip["coordinates"][0] if trip["coordinates"] else None),
-                      "to": endpoint_name(trip["coordinates"][-1] if trip["coordinates"] else None)})
+                      "from": trip.get("from_name") or endpoint_name([trip["from_lon"], trip["from_lat"]]),
+                      "to": trip.get("to_name") or endpoint_name([trip["to_lon"], trip["to_lat"]]),
+                      "coverage_complete": trip["coverage_complete"]})
+    trip_distance_km = round(sum(trip["distance_km"] for trip in trips), 2)
     totals = {"raw_fixes": day["points"], "timeline_fixes": day["timeline_points"],
-              "distance_km": day["stats"]["distance_km"], "moving_hours": day["stats"]["moving_hours"],
+              "distance_km": trip_distance_km, "sampled_distance_km": day["stats"]["distance_km"],
+              "moving_hours": day["stats"]["moving_hours"],
               "trips": len(trips), "places": len(places),
               "reminders_created": len(reminders_created), "reminders_triggered": len(reminder_events),
               "reminders_cancelled": len(reminders_cancelled),
@@ -459,7 +563,7 @@ def daily_overview(store, date, timezone_name=None, source=None):
     overview = (f"{len(trips)} trips covering {totals['distance_km']:.2f} km; "
                 f"{len(places)} observed places; {len(reminder_events)} reminders triggered; "
                 f"{day['points']} raw fixes.")
-    value = {"schema_version": 1, "date": date, "timezone": timezone_name, "source": source,
+    value = {"schema_version": 2, "date": date, "timezone": timezone_name, "source": source,
              "overview": overview, "totals": totals, "activity_counts": day["activity_counts"],
              "places": places, "trips": trips, "reminders_created": reminders_created,
              "reminders_triggered": reminder_events, "reminders_cancelled": reminders_cancelled,

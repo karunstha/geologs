@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from geotracker.core import Store, current_location, deliver_webhook, geocode, mode_for, reverse_cache_radius, reverse_geocode, route_segments_from_points, smooth_route_segment
-from geotracker.analysis import daily_overview, day_summary, insights, place_patterns, predict_next, stays, transitions, visited_places
+from geotracker.analysis import daily_overview, day_summary, insights, place_patterns, predict_next, resolve_place_patterns, stays, transitions, visited_places
 from geotracker.imports import import_takeout
 from geotracker.mcp import dispatch
 from geotracker.cli import load_env_file, poll_home_assistant
@@ -68,6 +68,25 @@ class StoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "active reminder"):
             self.store.cancel_reminder(reminder["id"])
 
+    def test_unsaved_coordinate_reminder_stays_out_of_saved_places_and_triggers(self):
+        found = {"name": "Lake Example", "address": "Lake Example, Chicago",
+                 "category": "natural.water", "provider_place_id": "lake-1"}
+        with patch("geotracker.core.place_for_coordinate", return_value=found):
+            reminder = self.store.create_reminder({"text": "Start my run", "place_name": "Lake Example",
+                                                    "lat": 41, "lon": -87.9, "radius_m": 120})
+        self.assertEqual(self.store.places(), [])
+        self.assertEqual(reminder["place_name"], "Lake Example")
+        self.assertEqual(reminder["category"], "natural.water")
+        now = datetime.now(timezone.utc)
+        self.store.ingest({"source": "phone", "timestamp": (now - timedelta(minutes=5)).isoformat(),
+                           "lat": 41.01, "lon": -87.9})
+        event = self.store.ingest({"source": "phone", "timestamp": now.isoformat(),
+                                   "lat": 41, "lon": -87.9})["events"][0]
+        self.assertEqual(event["place"], "Lake Example")
+        history = self.store.reminder_history()[0]
+        self.assertNotIn("acknowledged_at", history)
+        self.assertNotIn("acknowledged_at", {row[1] for row in self.store.db.execute("PRAGMA table_info(events)")})
+
     def test_stale_and_cross_source_segments_do_not_inflate_distance(self):
         self.store.ingest({"source": "one", "timestamp": "2026-09-26T10:00:00Z", "lat": 41, "lon": -87})
         self.store.ingest({"source": "two", "timestamp": "2026-09-26T10:01:00Z", "lat": 42, "lon": -88})
@@ -88,27 +107,31 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(len(route_segments_from_points(points)), 2)
 
     def test_day_summary_counts_trips_and_unique_observed_places(self):
+        self.store.save_place({"name": "Home", "lat": 41.01, "lon": -87.9, "radius_m": 150})
         self.store.save_place({"name": "Campus", "lat": 41, "lon": -87.9, "radius_m": 150})
+        self.store.save_place({"name": "Park", "lat": 41.002, "lon": -87.9, "radius_m": 100})
         fixes = [
-            (0, 41.01, 0), (5, 41.005, 15), (10, 41, 15),
-            (15, 41, 0), (22, 41.00001, 0), (30, 41.00002, 0),
-            (35, 41.001, 1.4), (40, 41.002, 1.4),
+            (0, 41.01, 0), (15, 41.01, 0),
+            (16, 41.007, 15), (17, 41.004, 15), (18, 41.001, 15),
+            (20, 41, 0), (35, 41, 0),
+            (36, 41.0005, 1.4), (37, 41.001, 1.4),
+            (40, 41.002, 0), (55, 41.002, 0),
         ]
         self.store.ingest([{"source": "phone", "timestamp": (datetime(2026, 9, 25, 14, tzinfo=timezone.utc) + timedelta(minutes=minute)).isoformat(),
                             "lat": lat, "lon": -87.9, "speed_mps": speed, "accuracy_m": 10}
                            for minute, lat, speed in fixes])
         self.store.ingest({"source": "other", "timestamp": "2026-09-25T14:20:00Z", "lat": 42, "lon": -88})
         day = day_summary(self.store, "2026-09-25", "America/Chicago", "phone")
-        self.assertEqual(day["points"], 8)
-        self.assertEqual(day["stats"]["points"], 8)
+        self.assertEqual(day["points"], 11)
+        self.assertEqual(day["stats"]["points"], 11)
         self.assertEqual(day["activity_counts"]["driving"], 1)
         self.assertEqual(day["activity_counts"]["walking"], 1)
-        self.assertEqual(len(day["visited_places"]), 1)
+        self.assertEqual(len(day["visited_places"]), 2)
         self.assertEqual(day["visited_places"][0]["name"], "Campus")
-        self.assertEqual(day["stays"][0]["display_name"], "Campus")
+        self.assertEqual(day["stays"][1]["display_name"], "Campus")
         self.assertEqual(day["visited_places"][0]["visits"], 1)
         self.assertEqual(len(day["trips"]), 2)
-        self.assertEqual(len(day["route_segments"]), 2)
+        self.assertEqual(len(day["route_segments"]), 1)
 
     def test_day_summary_is_persisted_until_its_inputs_change(self):
         self.store.ingest([
@@ -133,7 +156,7 @@ class StoreTests(unittest.TestCase):
     def test_day_stay_uses_visited_place_reverse_geocode_label(self):
         self.store.ingest([
             {"source": "phone", "timestamp": "2026-09-25T10:00:00Z", "lat": 41, "lon": -87.9, "accuracy_m": 5},
-            {"source": "phone", "timestamp": "2026-09-25T10:06:00Z", "lat": 41, "lon": -87.9, "accuracy_m": 5},
+            {"source": "phone", "timestamp": "2026-09-25T10:16:00Z", "lat": 41, "lon": -87.9, "accuracy_m": 5},
         ])
         found = {"name": "University of Arkansas at Little Rock", "address": "2801 South University Avenue"}
         with patch("geotracker.analysis.place_for_coordinate", return_value=found) as reverse:
@@ -200,8 +223,8 @@ class StoreTests(unittest.TestCase):
     def test_trip_classification_uses_connected_trip_context(self):
         self.store.ingest([
             {"source": "phone", "timestamp": f"2026-09-25T10:{minute:02d}:00Z", "lat": lat, "lon": -87.9, "speed_mps": speed}
-            for minute, lat, speed in [(0, 41, 0), (5, 41.01, 10), (10, 41.02, 10),
-                                       (15, 41.021, 1.5), (20, 41.022, 1.5)]
+            for minute, lat, speed in [(0, 41, 0), (15, 41, 0), (16, 41.01, 10), (17, 41.02, 10),
+                                       (18, 41.021, 1.5), (19, 41.022, 1.5), (20, 41.023, 0), (35, 41.023, 0)]
         ])
         day = day_summary(self.store, "2026-09-25", "UTC")
         self.assertEqual(day["activity_counts"]["driving"], 1)
@@ -213,14 +236,46 @@ class StoreTests(unittest.TestCase):
         self.store.ingest([
             {"source": "phone", "timestamp": (base + timedelta(minutes=minute)).isoformat(),
              "lat": lat, "lon": -87.9, "speed_mps": speed, "accuracy_m": 10}
-            for minute, lat, speed in [(0, 41.0, 0), (1, 41.001, 4), (2, 41.002, 4),
-                                       (3, 41.002, 0), (4, 41.002, 0), (5, 41.003, 14),
-                                       (6, 41.004, 16)]
+            for minute, lat, speed in [(0, 41.0, 0), (15, 41.0, 0),
+                                       (16, 41.001, 14), (17, 41.002, 14),
+                                       (18, 41.002, 0), (19, 41.002, 0),
+                                       (20, 41.003, 14), (21, 41.004, 16),
+                                       (22, 41.005, 0), (37, 41.005, 0)]
         ])
         day = day_summary(self.store, "2026-09-25", "UTC")
         self.assertEqual(len(day["trips"]), 1)
         self.assertEqual(day["trips"][0]["mode"], "driving")
         self.assertEqual(day["activity_counts"]["running_cycling"], 0)
+
+    def test_stay_requires_fifteen_minutes(self):
+        base = datetime(2026, 9, 25, 10, tzinfo=timezone.utc)
+        self.store.ingest([
+            {"source": "short", "timestamp": (base + timedelta(minutes=minute)).isoformat(),
+             "lat": 41, "lon": -87.9, "accuracy_m": 5}
+            for minute in (0, 14)
+        ] + [
+            {"source": "confirmed", "timestamp": (base + timedelta(minutes=minute)).isoformat(),
+             "lat": 42, "lon": -88.9, "accuracy_m": 5}
+            for minute in (0, 15)
+        ])
+        self.assertEqual(stays(self.store, source="short"), [])
+        self.assertEqual(len(stays(self.store, source="confirmed")), 1)
+
+    def test_trip_route_keeps_coverage_gaps_as_separate_segments(self):
+        base = datetime(2026, 9, 25, 10, tzinfo=timezone.utc)
+        fixes = [(0, 41.000, 0), (15, 41.000, 0),
+                 (16, 41.001, 15), (17, 41.002, 15),
+                 (60, 41.003, 15), (61, 41.004, 15),
+                 (62, 41.005, 0), (77, 41.005, 0)]
+        self.store.ingest([
+            {"source": "phone", "timestamp": (base + timedelta(minutes=minute)).isoformat(),
+             "lat": lat, "lon": -87.9, "speed_mps": speed, "accuracy_m": 5}
+            for minute, lat, speed in fixes
+        ])
+        trip = day_summary(self.store, "2026-09-25", "UTC")["trips"][0]
+        self.assertEqual(len(trip["route_segments"]), 2)
+        self.assertFalse(trip["coverage_complete"])
+        self.assertEqual(trip["coordinates"], [])
 
     def test_held_home_assistant_state_does_not_strand_next_fix(self):
         self.store.ingest([
@@ -233,8 +288,7 @@ class StoreTests(unittest.TestCase):
         ])
         day = day_summary(self.store, "2026-09-25", "UTC")
         self.assertEqual(len(day["route_segments"]), 1)
-        self.assertEqual(len(day["trips"]), 1)
-        self.assertEqual(day["trips"][0]["mode"], "driving")
+        self.assertEqual(day["trips"], [])
         self.assertGreater(day["stats"]["distance_km"], 4)
 
     def test_held_source_state_does_not_bridge_more_than_fifteen_minutes(self):
@@ -369,37 +423,42 @@ class StoreTests(unittest.TestCase):
         self.store.ingest({**fix, "accuracy_m": 5})
         self.assertEqual(len(self.store.observations()), 2)
 
-    def test_long_stop_separates_driving_and_walking(self):
+    def test_short_stop_does_not_split_stay_anchored_trip(self):
         base = datetime(2026, 9, 25, 10, tzinfo=timezone.utc)
         self.store.ingest([
             {"source": "phone", "timestamp": (base + timedelta(minutes=minute)).isoformat(),
              "lat": lat, "lon": -87.9, "speed_mps": speed, "accuracy_m": 10}
-            for minute, lat, speed in [(0, 41.0, 0), (1, 41.001, 15), (2, 41.002, 15),
-                                       (3, 41.002, 0), (4, 41.002, 0), (5, 41.002, 0),
-                                       (6, 41.002, 0), (7, 41.002, 0), (8, 41.0025, 1.5),
-                                       (9, 41.003, 1.5)]
+            for minute, lat, speed in [(0, 41.0, 0), (15, 41.0, 0),
+                                       (16, 41.001, 15), (17, 41.002, 15),
+                                       (18, 41.002, 0), (19, 41.002, 0), (20, 41.002, 0),
+                                       (21, 41.002, 0), (22, 41.002, 0),
+                                       (23, 41.0025, 1.5), (24, 41.003, 1.5),
+                                       (25, 41.004, 0), (40, 41.004, 0)]
         ])
         trips = list(reversed(day_summary(self.store, "2026-09-25", "UTC")["trips"]))
-        self.assertEqual([trip["mode"] for trip in trips], ["driving", "walking"])
+        self.assertEqual([trip["mode"] for trip in trips], ["driving"])
 
-    def test_held_home_assistant_stop_splits_separate_trips(self):
+    def test_held_home_assistant_stop_under_15_minutes_does_not_split_trip(self):
         base = datetime(2026, 9, 25, 10, tzinfo=timezone.utc)
-        fixes = [(0, 41.000, "start", 0), (1, 41.010, "drive-a", 15), (2, 41.020, "stop", 15),
-                 (3, 41.020, "held", 0), (8, 41.020, "held", 0),
-                 (9, 41.030, "drive-b", 15), (10, 41.040, "finish", 15)]
+        fixes = [(0, 41.000, "home", 0), (15, 41.000, "home", 0),
+                 (16, 41.010, "drive-a", 15), (17, 41.020, "stop", 15),
+                 (18, 41.020, "held", 0), (23, 41.020, "held", 0),
+                 (24, 41.030, "drive-b", 15), (25, 41.040, "finish", 0),
+                 (40, 41.040, "finish", 0)]
         self.store.ingest([{"source": "home_assistant:phone", "external_id": external_id,
                             "timestamp": (base + timedelta(minutes=minute)).isoformat(),
                             "lat": lat, "lon": -87.9, "speed_mps": speed, "accuracy_m": 5}
                            for minute, lat, external_id, speed in fixes])
         trips = list(reversed(day_summary(self.store, "2026-09-25", "UTC")["trips"]))
-        self.assertEqual(len(trips), 2)
-        self.assertEqual([trip["mode"] for trip in trips], ["driving", "driving"])
+        self.assertEqual(len(trips), 1)
+        self.assertEqual(trips[0]["mode"], "driving")
+        self.assertTrue(trips[0]["coverage_complete"])
 
     def test_home_is_hidden_from_visited_list_but_kept_in_daily_overview(self):
         home = self.store.save_place({"name": "Home", "lat": 41, "lon": -87.9, "radius_m": 150})
         campus = self.store.save_place({"name": "Campus", "lat": 41.02, "lon": -87.9, "radius_m": 150})
         base = datetime(2026, 9, 25, 10, tzinfo=timezone.utc)
-        fixes = [(0, 41), (6, 41), (7, 41.005), (8, 41.01), (10, 41.02), (16, 41.02)]
+        fixes = [(0, 41), (16, 41), (17, 41.005), (18, 41.01), (20, 41.02), (36, 41.02)]
         self.store.ingest([{"source": "phone", "timestamp": (base + timedelta(minutes=minute)).isoformat(),
                             "lat": lat, "lon": -87.9, "accuracy_m": 5}
                            for minute, lat in fixes])
@@ -414,7 +473,11 @@ class StoreTests(unittest.TestCase):
         self.assertEqual([place["name"] for place in day["visited_places"]], ["Campus"])
         self.assertEqual({place["name"] for place in day["places_including_home"]}, {"Home", "Campus"})
         summary = daily_overview(self.store, "2026-09-25", "UTC")
+        self.assertEqual(summary["schema_version"], 2)
         self.assertEqual({place["name"] for place in summary["places"]}, {"Home", "Campus"})
+        self.assertEqual((summary["totals"]["trips"], summary["trips"][0]["from"], summary["trips"][0]["to"]),
+                         (1, "Home", "Campus"))
+        self.assertEqual(summary["totals"]["distance_km"], summary["trips"][0]["distance_km"])
         self.assertTrue(next(place for place in summary["places"] if place["name"] == "Home")["home"])
         self.assertEqual(summary["totals"]["reminders_triggered"], 1)
         self.assertEqual(len(self.store.daily_overviews()), 1)
@@ -614,12 +677,12 @@ class StoreTests(unittest.TestCase):
         base = datetime(2026, 9, 25, 10, tzinfo=timezone.utc)
         batch = []
         for cycle in range(3):
-            for label, lat, offset in (("A", 41.0, 0), ("B", 41.01, 12)):
-                for minute in (0, 3, 6):
+            for label, lat, offset in (("A", 41.0, 0), ("B", 41.01, 25)):
+                for minute in (0, 8, 16):
                     batch.append({"source": "phone", "external_id": f"{cycle}-{label}-{minute}",
                                   "timestamp": (base + timedelta(hours=cycle, minutes=offset + minute)).isoformat(),
                                   "lat": lat, "lon": -87.9})
-        for minute in (0, 3, 6):
+        for minute in (0, 8, 16):
             batch.append({"source": "phone", "external_id": f"3-A-{minute}",
                           "timestamp": (base + timedelta(hours=3, minutes=minute)).isoformat(),
                           "lat": 41, "lon": -87.9})
@@ -630,7 +693,7 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(predict_next(self.store)["frequency"], 1)
         self.assertEqual(day_summary(self.store, "2026-09-25", "UTC")["points"], 21)
         place = self.store.save_place({"name": "University", "lat": 41, "lon": -87.9})
-        self.assertEqual(self.store.place_visits(place["id"])["total_observed_minutes"], 24)
+        self.assertEqual(self.store.place_visits(place["id"])["total_observed_minutes"], 64)
         ranked = visited_places(self.store)
         self.assertEqual((ranked[0]["display_name"], ranked[0]["saved"], ranked[0]["visits"]), ("University", True, 4))
         self.assertGreater(ranked[0]["observed_minutes"], ranked[1]["observed_minutes"])
@@ -641,6 +704,61 @@ class StoreTests(unittest.TestCase):
                                     "params": {"name": "get_frequent_places", "arguments": {"limit": 10}}})
         self.assertEqual(mcp["result"]["structuredContent"]["result"][0]["name"], "University")
 
+    def test_resolved_stays_at_same_provider_place_are_merged(self):
+        base = datetime(2026, 9, 25, 10, tzinfo=timezone.utc)
+        fixes = [
+            (0, 41.0000), (16, 41.0000),
+            (17, 41.0005), (20, 41.0010), (36, 41.0010),
+            (37, 41.0015), (40, 41.0020), (56, 41.0020),
+        ]
+        self.store.ingest([{"source": "phone", "external_id": str(minute),
+                            "timestamp": (base + timedelta(minutes=minute)).isoformat(),
+                            "lat": lat, "lon": -87.9, "accuracy_m": 5}
+                           for minute, lat in fixes])
+        resolved = {"name": "Lake Example", "address": "Lake Example, Chicago",
+                    "category": "natural.water", "categories": ["natural.water"],
+                    "provider_place_id": "geoapify-lake-1"}
+        with patch("geotracker.analysis.place_for_coordinate", return_value=resolved):
+            places = visited_places(self.store)
+            day = day_summary(self.store, "2026-09-25", "UTC", "phone")
+            pattern = insights(self.store)["frequent_places"]
+        self.assertEqual(len(places), 1)
+        self.assertEqual(places[0]["name"], "Lake Example")
+        self.assertEqual(places[0]["category"], "natural.water")
+        self.assertEqual(places[0]["visits"], 3)
+        self.assertEqual(len(day["visited_places"]), 1)
+        self.assertEqual(len(day["trips"]), 0)
+        self.assertEqual(len(pattern), 1)
+
+    def test_nearby_resolved_stays_with_same_name_are_merged(self):
+        clusters = [
+            {"cluster_id": 0, "place_id": None, "name": None, "lat": 41, "lon": -87.9,
+             "visits": 1, "observed_minutes": 20, "last_seen": "2026-09-25T10:20:00+00:00",
+             "display_name": "41.00000, -87.90000"},
+            {"cluster_id": 1, "place_id": None, "name": None, "lat": 41.01, "lon": -87.9,
+             "visits": 1, "observed_minutes": 20, "last_seen": "2026-09-25T11:20:00+00:00",
+             "display_name": "41.01000, -87.90000"},
+        ]
+        labels = [
+            {"name": "Lake Example", "address": "North shore", "category": "natural.water",
+             "categories": ["natural.water"], "provider_place_id": "north"},
+            {"name": "  lake   example ", "address": "South shore", "category": "natural.water",
+             "categories": ["natural.water"], "provider_place_id": "south"},
+        ]
+        with patch("geotracker.analysis.place_for_coordinate", side_effect=labels):
+            merged, mapping = resolve_place_patterns(self.store, (clusters, {10: 0, 11: 1}))
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["visits"], 2)
+        self.assertEqual(mapping[10], mapping[11])
+
+    def test_saved_place_keeps_provider_metadata(self):
+        place = self.store.save_place({"name": "Walmart", "lat": 41, "lon": -87.9,
+                                       "address": "100 Main Street", "category": "commercial.supermarket",
+                                       "provider_place_id": "geoapify-store-1"})
+        self.assertEqual(place["category"], "commercial.supermarket")
+        self.assertEqual(place["provider_place_id"], "geoapify-store-1")
+        self.assertEqual(self.store.places()[0]["category"], "commercial.supermarket")
+
     def test_late_import_rebuilds_affected_source_stays(self):
         base = datetime(2026, 9, 25, 10, tzinfo=timezone.utc)
         def put(id_, minute):
@@ -648,9 +766,9 @@ class StoreTests(unittest.TestCase):
                                "timestamp": (base + timedelta(minutes=minute)).isoformat(),
                                "lat": 41, "lon": -87.9})
         put(1, 0)
-        put(3, 6)
+        put(3, 16)
         self.assertEqual(len(stays(self.store)), 1)
-        put(2, 3)
+        put(2, 8)
         self.assertEqual(stays(self.store)[0]["point_count"], 3)
 
     def test_repeated_home_assistant_samples_create_separate_stays_across_gap(self):
@@ -660,12 +778,12 @@ class StoreTests(unittest.TestCase):
                                       "timestamp": (base + timedelta(minutes=minute)).isoformat(),
                                       "lat": 41, "lon": -87.9, "accuracy_m": 4})
         poll(0)
-        self.assertEqual(poll(6)["recorded"], 1)
+        self.assertEqual(poll(16)["recorded"], 1)
         self.assertEqual(len(self.store.points()), 1)
         self.assertEqual(len(stays(self.store)), 1)
         self.assertEqual(stays(self.store)[0]["point_count"], 2)
         poll(50)
-        poll(56)
+        poll(66)
         rows = stays(self.store)
         self.assertEqual(len(rows), 2)
         self.assertEqual([row["point_count"] for row in rows], [2, 2])
@@ -674,7 +792,7 @@ class StoreTests(unittest.TestCase):
         path = Path(self.tmp.name) / "bootstrap.db"
         archive = Store(path)
         base = datetime(2026, 9, 25, 10, tzinfo=timezone.utc)
-        for minute in (0, 6):
+        for minute in (0, 16):
             archive.ingest({"source": "home_assistant:phone", "external_id": "same-state",
                             "timestamp": (base + timedelta(minutes=minute)).isoformat(),
                             "lat": 41, "lon": -87.9, "accuracy_m": 4}, process_analysis=False)
@@ -686,6 +804,31 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(stays(reopened)[0]["point_count"], 2)
         finally:
             reopened.close()
+
+    def test_stay_threshold_migration_removes_old_short_stays(self):
+        path = Path(self.tmp.name) / "old-stays.db"
+        archive = Store(path)
+        base = datetime(2026, 9, 25, 10, tzinfo=timezone.utc)
+        archive.ingest([
+            {"source": "phone", "timestamp": (base + timedelta(minutes=minute)).isoformat(),
+             "lat": 41, "lon": -87.9, "accuracy_m": 5}
+            for minute in (0, 6)
+        ])
+        observations = list(reversed(archive.observations(limit=None)))
+        archive.db.execute("""INSERT INTO observed_stays_v2
+            (source,start_observation_id,end_observation_id,started_at,ended_at,lat,lon,point_count,ongoing)
+            VALUES (?,?,?,?,?,?,?,?,1)""",
+            ("phone", observations[0]["id"], observations[1]["id"], observations[0]["timestamp"],
+             observations[1]["timestamp"], 41, -87.9, 2))
+        archive.db.execute("PRAGMA user_version=7")
+        archive.db.commit()
+        archive.close()
+        migrated = Store(path)
+        try:
+            self.assertEqual(stays(migrated), [])
+            self.assertEqual(migrated.db.execute("PRAGMA user_version").fetchone()[0], 10)
+        finally:
+            migrated.close()
 
     def test_takeout_import_is_idempotent_and_does_not_trigger_reminders(self):
         place = self.store.save_place({"name": "Market", "lat": 41, "lon": -87.9})

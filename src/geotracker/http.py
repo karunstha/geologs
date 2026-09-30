@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from .core import Store, current_location, deliver_webhook, geocode, reverse_geocode
-from .analysis import daily_overview, day_summary, finalize_previous_day, insights, place_patterns, predict_next, stays, transitions, visited_places
+from .analysis import daily_overview, day_summary, finalize_previous_day, insights, place_patterns, predict_next, resolve_place_patterns, stays, transitions, visited_places
 from .mcp import SUPPORTED_VERSIONS, dispatch
 from .postgres import INTEGRITY_ERRORS
 
@@ -168,7 +168,7 @@ class Handler(BaseHTTPRequestHandler):
             elif url.path == "/api/near": value = store.near(q["lat"], q["lon"], q.get("radius_m", 250), q.get("start"), q.get("end"), q.get("limit", 100), q.get("source"))
             elif url.path == "/api/place-visits": value = store.place_visits(q["place_id"], q.get("start"), q.get("end"))
             elif url.path == "/api/stays": value = stays(store, q.get("start"), q.get("end"), q.get("source"), q.get("limit", 500))
-            elif url.path == "/api/frequent-places": value = place_patterns(store, q.get("limit", 50))[0]
+            elif url.path == "/api/frequent-places": value = resolve_place_patterns(store, place_patterns(store, None))[0][:min(int(q.get("limit", 50)), 5000)]
             elif url.path == "/api/visited-places": value = visited_places(store, q.get("limit", 100))
             elif url.path == "/api/transitions": value = transitions(store, q.get("limit", 50))
             elif url.path == "/api/predict-next": value = predict_next(store)
@@ -266,7 +266,6 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/places": result = store.save_place(payload)
             elif path == "/api/reminders": result = store.create_reminder(payload)
             elif path == "/api/reminders/cancel": result = store.cancel_reminder(payload["id"])
-            elif path == "/api/events/ack": result = store.acknowledge(payload["id"])
             else:
                 self.error_json(404, "not found"); return
             self.send_json(200, result)
