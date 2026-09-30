@@ -16,7 +16,7 @@ TABLES = {
     "source_state": "source point_id",
     "observed_stays": "id source start_point_id end_point_id started_at ended_at lat lon point_count ongoing",
     "stay_processing_state": "source last_point_id last_timestamp candidate",
-    "observed_stays_v2": "id source start_observation_id end_observation_id started_at ended_at lat lon point_count ongoing kind activity distance_m radius_m",
+    "observed_stays_v2": "id source start_observation_id end_observation_id started_at ended_at lat lon point_count ongoing kind activity distance_m radius_m went_elsewhere",
     "stay_observation_state": "source last_observation_id last_timestamp candidate",
     "app_settings": "key value",
     "analysis_cache": "cache_key watermark value created_at",

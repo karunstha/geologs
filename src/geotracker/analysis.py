@@ -9,14 +9,13 @@ import re
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from .core import (MAX_CONNECTED_GAP_SECONDS, MAX_PLAUSIBLE_SPEED_MPS, MOVEMENT_MODES, classify_motion,
-                   is_excursion, metres, parse_time, place_for_coordinate, reported_speed,
+from .core import (MAX_CONNECTED_GAP_SECONDS, MAX_PLAUSIBLE_SPEED_MPS, MAX_SAMPLE_GAP_SECONDS, MOVEMENT_MODES,
+                   classify_motion, is_excursion, went_elsewhere_between, metres, parse_time, place_for_coordinate, reported_speed,
                    route_segments_from_points, smooth_route_segment, stats_from_points, trips_between_stays)
 
 
 STOP_RADIUS_M = 50
 STOP_MIN_SECONDS = 900
-MAX_SAMPLE_GAP_SECONDS = 1800
 # A stay survives this many consecutive stray fixes when the next fix is back
 # inside it; indoor GPS often jumps 60-100 m for a sample or two.
 STRAY_MAX_POINTS = 2
@@ -36,9 +35,6 @@ AREA_MIN_ACTIVITY_EXTENT_M = 150
 # Everything between parking and driving away is one visit (an out-and-back
 # trail run) when it circulates as a whole and stays within this extent.
 AREA_PARKED_MAX_EXTENT_M = 5000
-# Consecutive stays at one place this close together are one visit that GPS
-# noise split (indoor jitter at a large store), unless a real trip joins them.
-VISIT_MERGE_GAP_SECONDS = 600
 
 
 def sync_timeline(store, sources=None, rebuild=False, since_ids=None):
@@ -353,25 +349,37 @@ def _delete_area_stays(store, source, since):
         store.db.execute("DELETE FROM observed_stays_v2 WHERE source=? AND kind='area' AND started_at>=?", (source, since))
 
 
+def _flag(value):
+    return None if value is None else int(bool(value))
+
+
 def _refresh_area_stays(store, source, since=None):
     """Detect area stays in travel after `since` (all history when None).
 
     Travel intervals lie before the first stationary stay, between stationary
     stays, and after the last one; stationary fixes are never part of an area.
+    Every stay also records went_elsewhere: whether the travel since the stay
+    before it detoured somewhere off the direct path (1), went straight
+    between the two (0), or is unknown because of a coverage gap (NULL).
     """
-    query = "SELECT id,started_at,ended_at,lat,lon FROM observed_stays_v2 WHERE source=? AND kind='stationary'"
+    query = "SELECT id,started_at,ended_at,lat,lon,radius_m FROM observed_stays_v2 WHERE source=? AND kind='stationary'"
     args = [source]
     if since is not None:
         query += " AND ended_at>=?"
         args.append(since)
     anchors = store._rows(query + " ORDER BY started_at,id", args)
-    intervals = [(None, anchors[0] if anchors else None)] + list(zip(anchors, anchors[1:]))
+    # The stay that ended at `since` (of either kind) precedes the recomputed travel.
+    head = None
+    if since is not None:
+        head = next(iter(store._rows("""SELECT id,started_at,ended_at,lat,lon,radius_m FROM observed_stays_v2
+            WHERE source=? AND ended_at<=? ORDER BY ended_at DESC,id DESC LIMIT 1""", (source, since))), None)
+    intervals = [(head, anchors[0] if anchors else None)] + list(zip(anchors, anchors[1:]))
     if anchors:
         intervals.append((anchors[-1], None))
     for previous, following in intervals:
         after = previous["ended_at"] if previous else since
         before = following["started_at"] if following else None
-        if after and before and (datetime.fromisoformat(before) - datetime.fromisoformat(after)).total_seconds() < STOP_MIN_SECONDS:
+        if after and before and before <= after:
             continue
         clauses, args = ["o.source=?"], [source]
         if after:
@@ -384,18 +392,30 @@ def _refresh_area_stays(store, source, since=None):
                     ORDER BY COALESCE(o.accuracy_m,1000000000),o.id DESC) AS observation_rank
             FROM point_observations o WHERE """ + " AND ".join(clauses) + """) ranked
             WHERE observation_rank=1 ORDER BY timestamp,id""", args)
-        last_id = next((point["id"] for point in reversed(points) if _eligible(point)), None)
-        for window in area_windows(points):
-            if _returns_to_origin(window, previous, following):
-                continue
-            ongoing = following is None and window["end_id"] == last_id
+        windows = []
+        long_enough = not (after and before) or (datetime.fromisoformat(before) - datetime.fromisoformat(after)).total_seconds() >= STOP_MIN_SECONDS
+        if long_enough:
+            last_id = next((point["id"] for point in reversed(points) if _eligible(point)), None)
+            for window in area_windows(points):
+                if not _returns_to_origin(window, previous, following):
+                    window["ongoing"] = following is None and window["end_id"] == last_id
+                    windows.append(window)
+        sequence = ([previous] if previous else []) + windows + ([following] if following else [])
+        flags = {}
+        for earlier, later in zip(sequence, sequence[1:]):
+            between = [point for point in points if earlier["ended_at"] < point["timestamp"] < later["started_at"]]
+            flags[id(later)] = _flag(went_elsewhere_between(between, earlier, later))
+        for window in windows:
             store.db.execute("""INSERT INTO observed_stays_v2
                 (source,start_observation_id,end_observation_id,started_at,ended_at,lat,lon,point_count,ongoing,
-                 kind,activity,distance_m,radius_m)
-                VALUES (?,?,?,?,?,?,?,?,?,'area',?,?,?) ON CONFLICT(start_observation_id) DO NOTHING""",
+                 kind,activity,distance_m,radius_m,went_elsewhere)
+                VALUES (?,?,?,?,?,?,?,?,?,'area',?,?,?,?) ON CONFLICT(start_observation_id) DO NOTHING""",
                 (source, window["start_id"], window["end_id"], window["started_at"], window["ended_at"],
-                 window["lat"], window["lon"], window["point_count"], int(ongoing), window["activity"],
-                 round(window["distance_m"], 1), round(window["radius_m"], 1)))
+                 window["lat"], window["lon"], window["point_count"], int(window["ongoing"]), window["activity"],
+                 round(window["distance_m"], 1), round(window["radius_m"], 1), flags.get(id(window))))
+        if following:
+            store.db.execute("UPDATE observed_stays_v2 SET went_elsewhere=? WHERE id=?",
+                             (flags.get(id(following)), following["id"]))
 
 
 def process_stays(store, sources=None, rebuild=False):
@@ -468,47 +488,55 @@ def process_stays(store, sources=None, rebuild=False):
 
 
 def _gap_seconds(first, second):
-    """Time between two non-overlapping stays, in either order."""
-    return max((datetime.fromisoformat(second["started_at"]) - datetime.fromisoformat(first["ended_at"])).total_seconds(),
-               (datetime.fromisoformat(first["started_at"]) - datetime.fromisoformat(second["ended_at"])).total_seconds())
+    """Time from the end of one stay to the start of the next."""
+    return (datetime.fromisoformat(second["started_at"]) - datetime.fromisoformat(first["ended_at"])).total_seconds()
 
 
-def _count_visits(spans):
-    """Count (source, started_at, ended_at) spans, joining those that GPS noise split."""
-    visits, last_end = 0, {}
-    for source, started_at, ended_at in sorted(spans):
-        end = last_end.get(source)
-        if end is None or (datetime.fromisoformat(started_at) - datetime.fromisoformat(end)).total_seconds() > VISIT_MERGE_GAP_SECONDS:
-            visits += 1
-        last_end[source] = max(end or ended_at, ended_at)
+def _count_visits(entries):
+    """Visits per group from (stay_id, previous_stay_id, went_elsewhere, group) entries.
+
+    A stay continues the visit of the stay just before it when both are in
+    the same group and the travel between them went nowhere else (went_elsewhere == 0).
+    """
+    group_of = {stay_id: group for stay_id, _previous, _left, group in entries}
+    visits = {}
+    for _stay_id, previous_id, went_elsewhere, group in entries:
+        if not (went_elsewhere == 0 and previous_id is not None and group_of.get(previous_id) == group):
+            visits[group] = visits.get(group, 0) + 1
     return visits
 
 
-def merge_split_visits(rows, place_of, separated=frozenset()):
-    """Join chronological stays at one place that GPS noise split apart.
+def merge_split_visits(rows, place_of, moves_between=None):
+    """Join chronological stays at one place when the travel between them went nowhere else.
 
-    Two stays merge when they share a source and a place (per `place_of`),
-    at most VISIT_MERGE_GAP_SECONDS separate them, and their (from, to) stay
-    IDs are not in `separated`, the trips that really left the place.
+    Walking between two buildings of a campus, moving the car to another lot,
+    or an indoor GPS jump does not end a visit. `rows` must hold every stay of
+    each source in order, so a stay's went_elsewhere flag refers to the stay just
+    before it (rows from stays() carry previous_stay_id to check that).
+    `moves_between` maps (from_stay_id, to_stay_id) to the trip
+    that crossed; it stays on the visit as an internal move.
     """
     merged, last_by_source = [], {}
     for stay in rows:
         previous = last_by_source.get(stay["source"])
         place = place_of(stay)
-        if (previous is not None and place is not None and place_of(previous) == place
-                and (previous["_last_id"], stay["id"]) not in separated
-                and _gap_seconds(previous, stay) <= VISIT_MERGE_GAP_SECONDS):
+        continues = (previous is not None and place is not None and place_of(previous) == place
+                     and stay.get("went_elsewhere") == 0
+                     and stay.get("previous_stay_id", previous["_last_id"]) == previous["_last_id"])
+        if continues:
+            move = (moves_between or {}).get((previous["_last_id"], stay["id"]))
             gap_minutes = max(0.0, _gap_seconds(previous, stay)) / 60
             previous.update(ended_at=stay["ended_at"], end_observation_id=stay["end_observation_id"],
                             ongoing=stay["ongoing"], _last_id=stay["id"],
                             point_count=previous["point_count"] + stay["point_count"],
-                            observed_minutes=round(previous["observed_minutes"] + gap_minutes + stay["observed_minutes"], 1))
+                            observed_minutes=round(previous["observed_minutes"] + gap_minutes + stay["observed_minutes"], 1),
+                            internal_moves=previous["internal_moves"] + ([move] if move else []))
             if stay["kind"] == "area":
                 previous.update(kind="area", activity=previous.get("activity") or stay.get("activity"),
                                 distance_m=(previous.get("distance_m") or 0) + (stay.get("distance_m") or 0),
                                 radius_m=max(previous.get("radius_m") or 0, stay.get("radius_m") or 0))
             continue
-        item = {**stay, "_last_id": stay["id"]}
+        item = {**stay, "_last_id": stay["id"], "internal_moves": []}
         merged.append(item)
         last_by_source[stay["source"]] = item
     for item in merged:
@@ -539,7 +567,9 @@ def stays(store, start=None, end=None, source=None, limit=500):
     if limit is not None:
         args.append(min(max(int(limit), 1), 5000))
         suffix = " LIMIT ?"
-    rows = store._rows("SELECT * FROM observed_stays_v2" + where + " ORDER BY started_at DESC" + suffix, args)
+    # previous_stay_id lets callers tell whether went_elsewhere refers to the stay they hold.
+    rows = store._rows("""SELECT * FROM (SELECT s.*,LAG(s.id) OVER (PARTITION BY s.source ORDER BY s.started_at,s.id)
+        AS previous_stay_id FROM observed_stays_v2 s""" + where + ") ordered ORDER BY started_at DESC" + suffix, args)
     places = store.places()
     for row in rows:
         row["observed_minutes"] = round((datetime.fromisoformat(row["ended_at"]) - datetime.fromisoformat(row["started_at"])).total_seconds() / 60, 1)
@@ -602,14 +632,15 @@ def place_patterns(store, limit=50, rows=None):
         cluster["radius_m"] = max(cluster["radius_m"], round(radius))
         if stay.get("activity"):
             cluster["activities"][stay["activity"]] = cluster["activities"].get(stay["activity"], 0) + 1
-        cluster["_spans"].append((stay["source"], stay["started_at"], stay["ended_at"]))
+        cluster["_spans"].append((stay["id"], stay.get("previous_stay_id"), stay.get("went_elsewhere")))
         cluster["observed_minutes"] += stay["observed_minutes"]
         if stay["ended_at"] > cluster["last_seen"]:
             cluster["last_seen"] = stay["ended_at"]
         mapping[stay["id"]] = target
-    for cluster in clusters:
-        # Spans stay attached so visits can be recounted after clusters merge.
-        cluster["visits"] = _count_visits(cluster["_spans"])
+    # Spans stay attached so resolve_place_patterns can recount after clusters merge.
+    counts = _count_visits([(*span, index) for index, cluster in enumerate(clusters) for span in cluster["_spans"]])
+    for index, cluster in enumerate(clusters):
+        cluster["visits"] = counts.get(index, 0)
         cluster["observed_minutes"] = round(cluster["observed_minutes"], 1)
         cluster["display_name"] = cluster["name"] or f"{cluster['lat']:.5f}, {cluster['lon']:.5f}"
     ordered = sorted(clusters, key=lambda c: (c["observed_minutes"], c["visits"]), reverse=True)
@@ -713,11 +744,11 @@ def resolve_place_patterns(store, patterns):
             if "_spans" in item or "_spans" in place:
                 item["_spans"] = (item.get("_spans") or []) + (place.get("_spans") or [])
         raw_to_merged[place["cluster_id"]] = target
-    for place in grouped:
+    counts = _count_visits([(*span, index) for index, place in enumerate(grouped) for span in place.get("_spans") or []])
+    for index, place in enumerate(grouped):
         place.pop("_weight", None)
-        spans = place.pop("_spans", None)
-        if spans is not None:
-            place["visits"] = _count_visits(spans)
+        if place.pop("_spans", None) is not None:
+            place["visits"] = counts.get(index, 0)
     mapping = {stay_id: raw_to_merged[cluster_id] for stay_id, cluster_id in stay_mapping.items()}
     grouped.sort(key=lambda item: (item["observed_minutes"], item["visits"]), reverse=True)
     # Sorting changes public cluster IDs, so remap stays and IDs together.
@@ -861,6 +892,50 @@ def insights(store, limit=50):
             "observed_stays": len(rows)}
 
 
+def _fuse_sources(day_stays, trips, samples_by_source):
+    """Tell one story when several sources recorded the same day.
+
+    One device can sit at the university while another drives. The source
+    with the most samples is taken whole; other sources fill only the times
+    it has nothing to say, so the timeline never places you in two spots.
+    """
+    sources = sorted({stay["source"] for stay in day_stays} | {trip["source"] for trip in trips},
+                     key=lambda name: (-samples_by_source.get(name, 0), name))
+    if len(sources) < 2:
+        return day_stays, trips, sources
+    taken, kept_stays, kept_trips, used = [], [], [], []
+    for name in sources:
+        items = ([("stay", stay, stay["started_at"], stay["ended_at"]) for stay in day_stays if stay["source"] == name]
+                 + [("trip", trip, trip["start"], trip["end"]) for trip in trips if trip["source"] == name])
+        accepted = []
+        for kind, item, begin, finish in items:
+            begin, finish = datetime.fromisoformat(begin), datetime.fromisoformat(finish)
+            if not any(begin < taken_end and taken_begin < finish for taken_begin, taken_end in taken):
+                accepted.append((begin, finish))
+                (kept_stays if kind == "stay" else kept_trips).append(item)
+        taken.extend(accepted)
+        if accepted:
+            used.append(name)
+    kept_stays.sort(key=lambda stay: (stay["started_at"], stay["id"]))
+    kept_trips.sort(key=lambda trip: trip["start"], reverse=True)
+    return kept_stays, kept_trips, used
+
+
+def _coverage_gaps(points, trips):
+    """Unobserved stretches long enough to split a stay, except inside a trip that already notes them."""
+    times = sorted({datetime.fromisoformat(point["timestamp"]) for point in points})
+    spans = [(datetime.fromisoformat(trip["start"]), datetime.fromisoformat(trip["end"])) for trip in trips]
+    gaps = []
+    for earlier, later in zip(times, times[1:]):
+        if (later - earlier).total_seconds() <= MAX_SAMPLE_GAP_SECONDS:
+            continue
+        if any(start <= earlier and later <= end for start, end in spans):
+            continue
+        gaps.append({"start": earlier.isoformat(), "end": later.isoformat(),
+                     "minutes": round((later - earlier).total_seconds() / 60, 1)})
+    return gaps
+
+
 def day_summary(store, date, timezone_name="UTC", source=None):
     try:
         zone = ZoneInfo(timezone_name)
@@ -875,13 +950,19 @@ def day_summary(store, date, timezone_name="UTC", source=None):
     start = day_start.isoformat()
     end = (day_end - timedelta(microseconds=1)).isoformat()
     provider = "photon:" + os.environ.get("GEOTRACKER_PHOTON_URL", "") if os.environ.get("GEOTRACKER_PHOTON_URL") else "geoapify:" + str(bool(os.environ.get("GEOAPIFY_API_KEY")))
-    cache_identity = json.dumps(["day-v7", date, timezone_name, source, provider], separators=(",", ":"))
+    cache_identity = json.dumps(["day-v8", date, timezone_name, source, provider], separators=(",", ":"))
     cache_key = "day:" + hashlib.sha256(cache_identity.encode()).hexdigest()
     watermark = store.analysis_watermark(start, end, source)
     cached = store.cached_analysis(cache_key, watermark)
     if cached is not None:
         return cached
-    day_stays = list(reversed(stays(store, start, end, source=source, limit=None)))
+    points = store.observations(start, end, source=source, limit=None)
+    samples_by_source = {}
+    for point in points:
+        samples_by_source[point["source"]] = samples_by_source.get(point["source"], 0) + 1
+    day_stays, trips, timeline_sources = _fuse_sources(
+        list(reversed(stays(store, start, end, source=source, limit=None))),
+        anchored_trips(store, start, end, source), samples_by_source)
     for stay in day_stays:
         first = max(datetime.fromisoformat(stay["started_at"]), day_start)
         last = min(datetime.fromisoformat(stay["ended_at"]), day_end)
@@ -907,26 +988,38 @@ def day_summary(store, date, timezone_name="UTC", source=None):
         stay["display_name"] = place["name"] or place["display_name"]
         stay["category"] = place.get("category") or ""
         stay["provider_place_id"] = place.get("provider_place_id") or ""
-    points = store.observations(start, end, source=source, limit=None)
     chronological = list(reversed(store.timeline(start, end, source=source, limit=None)))
-    trips = anchored_trips(store, start, end, source)
     stay_labels = {stay["id"]: by_cluster[mapping[stay["id"]]]["name"] or by_cluster[mapping[stay["id"]]]["display_name"]
                    for stay in day_stays}
-    kept_trips = []
+    # Speed cannot tell slow driving from cycling. A lone "ride" between two
+    # drives (moving the car to another lot) is the car you arrived in.
+    by_source = {}
+    for trip in sorted(trips, key=lambda item: item["start"]):
+        by_source.setdefault(trip["source"], []).append(trip)
+    for sequence in by_source.values():
+        for before, trip, after in zip(sequence, sequence[1:], sequence[2:]):
+            if trip["mode"] == "cycling" and before["mode"] == after["mode"] == "driving":
+                trip.update(mode="driving", modes={"driving": sum(trip["modes"].values())}, mode_from_context=True)
+    kept_trips, internal_moves = [], {}
     for trip in trips:
         trip["from_name"] = stay_labels.get(trip["from_stay_id"], trip.get("from_name"))
         trip["to_name"] = stay_labels.get(trip["to_stay_id"], trip.get("to_name"))
         origin, destination = mapping.get(trip["from_stay_id"]), mapping.get(trip["to_stay_id"])
         if origin is not None and origin == destination:
-            # Same place at both ends: keep a real round trip (a run from home),
-            # drop drift between two halves of one visit.
+            # Same place at both ends. Moving between two buildings of one
+            # campus goes nowhere else: that is part of the visit, not a trip
+            # "to" the place you were already at. A real round trip (lunch
+            # off campus, a run from home) stays; drift is dropped.
+            if trip.get("went_elsewhere") is False:
+                internal_moves[(trip["from_stay_id"], trip["to_stay_id"])] = {
+                    key: trip[key] for key in ("start", "end", "mode", "distance_km", "duration_minutes", "route_segments")}
+                continue
             if not is_excursion(trip):
                 continue
             trip["loop"] = True
         kept_trips.append(trip)
     trips = kept_trips
-    separated = {(trip["from_stay_id"], trip["to_stay_id"]) for trip in trips}
-    day_stays = merge_split_visits(day_stays, lambda stay: stay.get("cluster_id"), separated)
+    day_stays = merge_split_visits(day_stays, lambda stay: stay.get("cluster_id"), internal_moves)
     for stay in day_stays:
         if stay["kind"] == "area":
             path = [point for point in chronological if point["source"] == stay["source"]
@@ -945,6 +1038,11 @@ def day_summary(store, date, timezone_name="UTC", source=None):
             totals["count"] += 1
             totals["distance_km"] += (stay.get("distance_m") or 0) / 1000
             totals["minutes"] += stay["observed_minutes"]
+        for move in stay["internal_moves"]:
+            totals = activity_totals[move["mode"]]
+            totals["count"] += 1
+            totals["distance_km"] += move["distance_km"]
+            totals["minutes"] += move["duration_minutes"]
     for totals in activity_totals.values():
         totals["distance_km"] = round(totals["distance_km"], 2)
         totals["minutes"] = round(totals["minutes"], 1)
@@ -958,6 +1056,8 @@ def day_summary(store, date, timezone_name="UTC", source=None):
             "unique_points": len(chronological), "timeline_points": len(chronological), "stats": stats, "trips": trips, "route_segments": route_segments,
             "activity_counts": activity_counts, "activity_totals": activity_totals,
             "movement_minutes": round(sum(totals["minutes"] for totals in activity_totals.values()), 1),
+            "movement_km": round(sum(totals["distance_km"] for totals in activity_totals.values()), 2),
+            "coverage_gaps": _coverage_gaps(points, trips), "timeline_sources": timeline_sources,
             "visited_places": visited_places, "places_including_home": places_including_home,
             "first_fix": points[-1]["timestamp"] if points else None,
             "last_fix": points[0]["timestamp"] if points else None,
@@ -1020,6 +1120,7 @@ def daily_overview(store, date, timezone_name=None, source=None):
                "observed_minutes": stay["observed_minutes"], "kind": stay["kind"],
                "activity": stay.get("activity"),
                "distance_km": round((stay.get("distance_m") or 0) / 1000, 2) if stay["kind"] == "area" else None,
+               "moved_within": [{"mode": move["mode"], "distance_km": move["distance_km"]} for move in stay["internal_moves"]],
                "ongoing": bool(stay["ongoing"])}
               for stay in day["stays"]]
     trip_distance_km = round(sum(trip["distance_km"] for trip in trips), 2)
@@ -1036,13 +1137,13 @@ def daily_overview(store, date, timezone_name=None, source=None):
                 f"{len(places)} observed places; "
                 + (f"activity: {', '.join(activities)}; " if activities else "")
                 + f"{len(reminder_events)} reminders triggered; {day['points']} raw fixes.")
-    value = {"schema_version": 3, "date": date, "timezone": timezone_name, "source": source,
+    value = {"schema_version": 4, "date": date, "timezone": timezone_name, "source": source,
              "overview": overview, "totals": totals, "activity_counts": day["activity_counts"],
              "activity_totals": day["activity_totals"], "visits": visits,
              "places": places, "trips": trips, "reminders_created": reminders_created,
              "reminders_triggered": reminder_events, "reminders_cancelled": reminders_cancelled,
              "active_reminders_at_end": reminders_active_at_end, "first_fix": day["first_fix"],
-             "last_fix": day["last_fix"], "coverage_note": day["coverage_note"],
+             "last_fix": day["last_fix"], "coverage_gaps": day["coverage_gaps"], "coverage_note": day["coverage_note"],
              "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
     return store.save_daily_overview(value, watermark)
 

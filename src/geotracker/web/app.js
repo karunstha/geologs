@@ -106,6 +106,7 @@ function drawMap(fit=false){
     for(const segment of trip.route_segments||[])L.polyline(mapPath(segment),{color:modeInfo[trip.mode]?.color||'#176d69',weight:4,opacity:.9}).on('click',()=>selectItem('trip',tripKey(trip))).addTo(pathLayer);
   }
   for(const stay of day?.stays||[]){
+    for(const move of stay.internal_moves||[])for(const segment of move.route_segments||[])L.polyline(mapPath(segment),{color:modeInfo[move.mode]?.color||'#176d69',weight:3,opacity:.8,dashArray:'6 6'}).on('click',()=>selectItem('stay',stay.id)).addTo(pathLayer);
     if(stay.kind!=='area')continue;
     L.circle([stay.lat,stay.lon],{radius:stay.radius_m||50,color:stayColor(stay),weight:1,opacity:.45,fillOpacity:.05,interactive:false}).addTo(pathLayer);
     for(const segment of stay.route_segments||[])L.polyline(mapPath(segment),{color:stayColor(stay),weight:4,opacity:.9}).on('click',()=>selectItem('stay',stay.id)).addTo(pathLayer);
@@ -146,11 +147,11 @@ function drawSelection(zoom){
   const color=item.type==='trip'?modeInfo[item.trip.mode]?.color||'#176d69':stayColor(item.stay);
   $('map-note').textContent=item.type==='trip'?`${modeInfo[item.trip.mode]?.label||'Trip'}: ${item.trip.from_name||'Stay'} → ${item.trip.to_name||'Stay'}`:(item.stay.display_name||'Stay');
   if(!map)return;
-  const lines=(subject.route_segments||[]).map(mapPath);
+  const lines=[...(subject.route_segments||[]),...(subject.internal_moves||[]).flatMap(move=>move.route_segments||[])].map(mapPath);
   for(const line of lines){L.polyline(line,{color:'#fff',weight:10,opacity:.95,interactive:false}).addTo(highlightLayer);L.polyline(line,{color,weight:6,opacity:1,interactive:false}).addTo(highlightLayer)}
   if(item.type==='stay')L.circleMarker([item.stay.lat,item.stay.lon],{radius:item.stay.kind==='area'?6:10,color:'#fff',weight:3,fillColor:color,fillOpacity:1,interactive:false}).addTo(highlightLayer);
   if(!zoom)return;
-  if(item.type==='stay'&&item.stay.kind==='area')map.fitBounds(L.latLng(item.stay.lat,item.stay.lon).toBounds((item.stay.radius_m||100)*2.4),{maxZoom:16});
+  if(item.type==='stay'&&item.stay.kind==='area'&&!item.stay.internal_moves?.length)map.fitBounds(L.latLng(item.stay.lat,item.stay.lon).toBounds((item.stay.radius_m||100)*2.4),{maxZoom:16});
   else if(lines.flat().length>1)map.fitBounds(L.latLngBounds(lines.flat()).pad(.2),{maxZoom:16});
   else map.setView([subject.lat??subject.from_lat,subject.lon??subject.from_lon],16);
 }
@@ -188,21 +189,33 @@ function stayWhen(stay,day){
 }
 function pinBadge(number){return number?`<span class="pin-badge">${number}</span>`:`<span class="pin-badge home" title="Home">${placeIcons.home}</span>`}
 function activityTag(stay){const text=stayActivityText(stay);return text?`<span class="activity-tag" style="--mode:${stayColor(stay)}">${stay.activity?modeIcon(stay.activity):''}${safe(text)}</span>`:''}
+function movedWithin(stay){
+  // Walking between buildings or moving the car belongs to the visit, not to a trip "to" where you already were.
+  const moves=(stay.internal_moves||[]).map(move=>`${modeInfo[move.mode]?.label||'Move'} ${distanceText(move.distance_km)}`);
+  return moves.length?`<span class="tl-within">Moved within · ${safe(moves.join(' · '))}</span>`:'';
+}
 function renderTimeline(day){
   const numbers=new Map(day.visited_places.map((place,index)=>[place.cluster_id,index+1]));
-  const items=[...day.stays.map(stay=>({type:'stay',at:stay.started_at,stay})),...day.trips.map(trip=>({type:'trip',at:trip.start,trip}))]
+  const items=[...day.stays.map(stay=>({type:'stay',at:stay.started_at,stay})),...day.trips.map(trip=>({type:'trip',at:trip.start,trip})),
+    ...(day.coverage_gaps||[]).map(gap=>({type:'gap',at:gap.start,gap}))]
     .sort((a,b)=>new Date(a.at)-new Date(b.at)||(a.type==='stay'?-1:1));
-  $('timeline-count').textContent=items.length?`${day.stays.length} stay${day.stays.length===1?'':'s'} · ${day.trips.length} trip${day.trips.length===1?'':'s'}`:'';
+  const counts=[`${day.stays.length} stay${day.stays.length===1?'':'s'}`,`${day.trips.length} trip${day.trips.length===1?'':'s'}`];
+  if((day.timeline_sources||[]).length>1)counts.push(`${day.timeline_sources.length} sources`);
+  $('timeline-count').textContent=day.stays.length||day.trips.length?counts.join(' · '):'';
+  $('timeline-count').title=(day.timeline_sources||[]).length>1?`Combined from ${day.timeline_sources.join(', ')}; where sources overlap, the one with the most samples is shown.`:'';
   $('day-timeline').innerHTML=items.map(item=>{
+    if(item.type==='gap')return `<li class="tl-gap"><span>No location data</span><small>${safe(clock(item.gap.start))} – ${safe(clock(item.gap.end))} · ${safe(durationText(item.gap.minutes))}</small></li>`;
     if(item.type==='stay'){
       const stay=item.stay;
-      return `<li><button type="button" class="tl-stay" data-item="stay:${stay.id}" aria-pressed="false">${pinBadge(numbers.get(stay.cluster_id))}<span class="tl-body"><strong>${safe(stay.display_name||stay.place_name||'Observed stay')}</strong><small>${safe(stayWhen(stay,day))} · ${safe(durationText(stay.observed_minutes))}</small>${activityTag(stay)}</span></button></li>`;
+      return `<li><button type="button" class="tl-stay" data-item="stay:${stay.id}" aria-pressed="false">${pinBadge(numbers.get(stay.cluster_id))}<span class="tl-body"><strong>${safe(stay.display_name||stay.place_name||'Observed stay')}</strong><small>${safe(stayWhen(stay,day))} · ${safe(durationText(stay.observed_minutes))}</small>${activityTag(stay)}${movedWithin(stay)}</span></button></li>`;
     }
     const trip=item.trip,info=modeInfo[trip.mode]||{label:'Trip',color:'#6f7b76'};
     const notes=[`${clock(trip.start)} – ${clock(trip.end)}`,durationText(trip.duration_minutes)];
-    if(trip.loop)notes.push('round trip');
     if(!trip.coverage_complete)notes.push('coverage gap');
-    return `<li><button type="button" class="tl-trip" data-item="trip:${tripKey(trip)}" aria-pressed="false" style="--mode:${info.color}">${modeIcon(trip.mode)}<span class="tl-body"><strong>${safe(info.label)} · ${safe(distanceText(trip.distance_km))}</strong><small>${safe(notes.join(' · '))}</small></span></button></li>`;
+    // A trip that ends where it began left and came back; say so rather than implying travel to where you already were.
+    const title=trip.loop?`Round trip · ${info.label} ${distanceText(trip.distance_km)}`:`${info.label} · ${distanceText(trip.distance_km)}`;
+    const from=trip.loop&&trip.from_name?`<span class="tl-within">Left ${safe(trip.from_name)} and came back</span>`:'';
+    return `<li><button type="button" class="tl-trip" data-item="trip:${tripKey(trip)}" aria-pressed="false" style="--mode:${info.color}">${modeIcon(trip.mode)}<span class="tl-body"><strong>${safe(title)}</strong><small>${safe(notes.join(' · '))}</small>${from}</span></button></li>`;
   }).join('')||'<li class="empty">No stays yet on this day. A stay needs 15 minutes of accurate samples in one place or area.</li>';
   $('day-timeline').querySelectorAll('[data-item]').forEach(button=>button.onclick=()=>{const [type,...rest]=button.dataset.item.split(':');const key=rest.join(':');selectItem(type,type==='stay'?+key:key)});
 }
@@ -218,13 +231,13 @@ function renderDayPlaces(day){
   $('visited-places').querySelectorAll('[data-day-place]').forEach(button=>button.onclick=()=>{const place=day.places_including_home.find(item=>item.cluster_id===+button.dataset.dayPlace);focusPlaceOnMap({...place,display_name:place.name||place.address||'Visited place'})});
 }
 function renderSummary(day){
-  $('stat-distance').textContent=distanceText(day.stats.distance_km);
+  $('stat-distance').textContent=distanceText(day.movement_km??day.stats.distance_km);
   $('stat-moving').textContent=durationText(day.movement_minutes);
   $('stat-places').textContent=day.visited_places.length.toLocaleString();
   $('stat-trips').textContent=day.trips.length.toLocaleString();
   $('activity-chips').innerHTML=Object.entries(day.activity_totals).filter(([,totals])=>totals.count).map(([mode,totals])=>
     `<span class="chip" style="--mode:${modeInfo[mode].color}">${modeIcon(mode)}<strong>${modeInfo[mode].noun}</strong><span>${distanceText(totals.distance_km)} · ${durationText(totals.minutes)}</span></span>`).join('');
-  const modes=new Set([...day.trips.map(trip=>trip.mode),...day.stays.map(stay=>stay.activity).filter(Boolean)]);
+  const modes=new Set([...day.trips.map(trip=>trip.mode),...day.stays.flatMap(stay=>[stay.activity,...(stay.internal_moves||[]).map(move=>move.mode)]).filter(Boolean)]);
   $('map-legend').innerHTML='<span><i class="legend-line" style="--mode:#8ea8a2"></i>Recorded path</span>'+[...modes].filter(mode=>modeInfo[mode]).map(mode=>`<span><i class="legend-line" style="--mode:${modeInfo[mode].color}"></i>${modeInfo[mode].noun}</span>`).join('');
 }
 function renderExplore(day,coverage){

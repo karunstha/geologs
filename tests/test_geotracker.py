@@ -521,7 +521,7 @@ class StoreTests(unittest.TestCase):
         self.assertEqual([place["name"] for place in day["visited_places"]], ["Campus"])
         self.assertEqual({place["name"] for place in day["places_including_home"]}, {"Home", "Campus"})
         summary = daily_overview(self.store, "2026-09-25", "UTC")
-        self.assertEqual(summary["schema_version"], 3)
+        self.assertEqual(summary["schema_version"], 4)
         self.assertEqual({place["name"] for place in summary["places"]}, {"Home", "Campus"})
         self.assertEqual((summary["totals"]["trips"], summary["trips"][0]["from"], summary["trips"][0]["to"]),
                          (1, "Home", "Campus"))
@@ -878,7 +878,7 @@ class StoreTests(unittest.TestCase):
         migrated = Store(path)
         try:
             self.assertEqual(stays(migrated), [])
-            self.assertEqual(migrated.db.execute("PRAGMA user_version").fetchone()[0], 11)
+            self.assertEqual(migrated.db.execute("PRAGMA user_version").fetchone()[0], 12)
         finally:
             migrated.close()
 
@@ -994,10 +994,87 @@ class StoreTests(unittest.TestCase):
                               line(shifted(track, 0, -400), HOME, 12)], source="car")
         for fix in fixes:
             self.store.ingest(fix)
-        live = [(row["kind"], row["activity"], row["started_at"], row["ended_at"]) for row in stays(self.store, limit=None)]
+        signature = lambda: [(row["kind"], row["activity"], row["started_at"], row["ended_at"], row["went_elsewhere"])
+                             for row in stays(self.store, limit=None)]
+        live = signature()
         self.assertEqual([(kind, activity) for kind, activity, *_ in reversed(live)], [("area", "walking"), ("area", "running")])
         process_stays_rebuild(self.store)
-        self.assertEqual([(row["kind"], row["activity"], row["started_at"], row["ended_at"]) for row in stays(self.store, limit=None)], live)
+        self.assertEqual(signature(), live)
+
+    def campus_day(self, middle, extra=None):
+        """Home, drive to campus, `middle`, drive home; campus coordinates geocode to University."""
+        library = CAMPUS
+        fixes = minute_fixes([still(HOME, 30), line(HOME, library, 12), *middle, line(middle[-1][-1][:2], HOME, 12), still(HOME, 30)])
+        self.store.ingest(fixes)
+        if extra:
+            self.store.ingest(extra)
+        with patch("geotracker.analysis.place_for_coordinate", side_effect=campus_label):
+            return (day_summary(self.store, "2026-09-27", "UTC"), search_visits(self.store, "university", timezone_name="UTC"),
+                    daily_overview(self.store, "2026-09-27", "UTC"))
+
+    def test_walking_between_buildings_is_one_visit_not_a_trip(self):
+        day, found, overview = self.campus_day([still(CAMPUS, 90), line(CAMPUS, LAB, 7), still(LAB, 80)])
+        self.assertEqual([stay["display_name"] for stay in day["stays"]], ["Home Street", "University", "Home Street"])
+        university = day["stays"][1]
+        self.assertEqual([(move["mode"], move["distance_km"]) for move in university["internal_moves"]], [("walking", 0.4)])
+        self.assertGreaterEqual(university["observed_minutes"], 170)
+        self.assertEqual([trip["mode"] for trip in day["trips"]], ["driving", "driving"])
+        self.assertEqual((found["total_visits"], found["places"][0]["visits"]), (1, 1))
+        self.assertEqual(next(place for place in day["places_including_home"] if place["name"] == "University")["visits"], 1)
+        self.assertEqual(overview["visits"][1]["moved_within"], [{"mode": "walking", "distance_km": 0.4}])
+
+    def test_indoor_gps_jump_is_not_a_drive(self):
+        jump = [shifted(CAMPUS, 420, 0) + (65,)] * 3
+        day, found, _overview = self.campus_day([still(CAMPUS, 60), jump, still(CAMPUS, 60)])
+        self.assertEqual([stay["display_name"] for stay in day["stays"]], ["Home Street", "University", "Home Street"])
+        self.assertEqual(day["stays"][1]["internal_moves"], [])
+        self.assertEqual(len(day["trips"]), 2)
+        self.assertEqual(found["total_visits"], 1)
+
+    def test_car_moved_between_campus_lots_is_driving_within_the_visit(self):
+        lot_a, lot_b = shifted(CAMPUS, -200, -300), shifted(CAMPUS, 900, 500)
+        day, _found, _overview = self.campus_day([line(CAMPUS, lot_a, 1), still(lot_a, 90), line(lot_a, lot_b, 4), still(lot_b, 80)])
+        moves = [move for stay in day["stays"] for move in stay["internal_moves"]]
+        self.assertEqual([move["mode"] for move in moves], ["driving"])
+        self.assertEqual([stay["display_name"] for stay in day["stays"]].count("University"), 1)
+
+    def test_lunch_off_campus_is_a_round_trip(self):
+        taco = shifted(CAMPUS, 2500, 0)
+        day, found, _overview = self.campus_day([still(CAMPUS, 60), line(CAMPUS, taco, 5), still(taco, 10),
+                                                 line(taco, CAMPUS, 5), still(CAMPUS, 60)])
+        loops = [trip for trip in day["trips"] if trip.get("loop")]
+        self.assertEqual([(trip["mode"], trip["went_elsewhere"]) for trip in loops], [("driving", True)])
+        self.assertEqual(found["total_visits"], 2)
+
+    def test_overlapping_sources_never_place_you_in_two_spots(self):
+        tablet = minute_fixes([still(HOME, 200)], source="old_tablet", start=datetime(2026, 9, 27, 14, tzinfo=timezone.utc))
+        day, _found, _overview = self.campus_day([still(CAMPUS, 180)], extra=tablet)
+        spans = sorted([(stay["started_at"], stay["ended_at"]) for stay in day["stays"]]
+                       + [(trip["start"], trip["end"]) for trip in day["trips"]])
+        for (_, first_end), (second_start, _) in zip(spans, spans[1:]):
+            self.assertLessEqual(first_end, second_start)
+        self.assertEqual(day["timeline_sources"][0], "phone")
+        self.assertIn("University", [stay["display_name"] for stay in day["stays"]])
+
+    def test_coverage_gap_is_reported_instead_of_a_repeated_visit(self):
+        before = minute_fixes([still(HOME, 30), line(HOME, CAMPUS, 12), still(CAMPUS, 60)])
+        after = minute_fixes([still(CAMPUS, 60), line(CAMPUS, HOME, 12), still(HOME, 30)], start=datetime(2026, 9, 27, 17, tzinfo=timezone.utc))
+        self.store.ingest(before + after)
+        with patch("geotracker.analysis.place_for_coordinate", side_effect=campus_label):
+            day = day_summary(self.store, "2026-09-27", "UTC")
+        self.assertEqual([(gap["start"], gap["end"]) for gap in day["coverage_gaps"]],
+                         [("2026-09-27T14:41:00+00:00", "2026-09-27T17:00:00+00:00")])
+
+    def test_went_elsewhere_flags_match_rebuild_when_ingested_live(self):
+        taco = shifted(CAMPUS, 2500, 0)
+        for fix in minute_fixes([still(HOME, 30), line(HOME, CAMPUS, 12), still(CAMPUS, 60), line(CAMPUS, LAB, 7), still(LAB, 40),
+                                 line(LAB, taco, 5), still(taco, 10), line(taco, LAB, 5), still(LAB, 40)]):
+            self.store.ingest(fix)
+        live = [(row["started_at"], row["went_elsewhere"]) for row in stays(self.store, limit=None)]
+        # Home -> campus and campus -> lab go straight; lab -> taco place -> lab went elsewhere.
+        self.assertEqual([flag for _, flag in reversed(live)], [None, 0, 0, 1])
+        process_stays_rebuild(self.store)
+        self.assertEqual([(row["started_at"], row["went_elsewhere"]) for row in stays(self.store, limit=None)], live)
 
     def test_parked_out_and_back_run_is_one_visit(self):
         trail = shifted(HOME, 15000, 0)
@@ -1056,9 +1133,23 @@ class StoreTests(unittest.TestCase):
         migrated = Store(path)
         try:
             self.assertEqual([row["kind"] for row in reversed(stays(migrated, limit=None))], ["stationary", "area", "stationary"])
-            self.assertEqual(migrated.db.execute("PRAGMA user_version").fetchone()[0], 11)
+            self.assertEqual(migrated.db.execute("PRAGMA user_version").fetchone()[0], 12)
         finally:
             migrated.close()
+
+
+CAMPUS = shifted(HOME, 6000, 3000)
+LAB = shifted(CAMPUS, 400, 0)
+
+
+def campus_label(_store, lat, lon):
+    from geotracker.core import metres
+    if metres(lat, lon, *CAMPUS) < 1500:
+        return {"name": "University", "address": "Campus", "category": "education.university",
+                "categories": ["education.university"], "provider_place_id": "university"}
+    if metres(lat, lon, *HOME) < 200:
+        return {"name": "Home Street", "address": "", "category": "", "categories": [], "provider_place_id": "home"}
+    return {"name": "Taco Place", "address": "", "category": "catering", "categories": ["catering"], "provider_place_id": "taco"}
 
 
 def metres_from(row, place):

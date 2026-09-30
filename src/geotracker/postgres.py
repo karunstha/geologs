@@ -90,7 +90,7 @@ CREATE TABLE IF NOT EXISTS observed_stays_v2 (
     lat DOUBLE PRECISION NOT NULL, lon DOUBLE PRECISION NOT NULL,
     point_count INTEGER NOT NULL, ongoing INTEGER NOT NULL DEFAULT 1,
     kind TEXT NOT NULL DEFAULT 'stationary', activity TEXT,
-    distance_m DOUBLE PRECISION, radius_m DOUBLE PRECISION
+    distance_m DOUBLE PRECISION, radius_m DOUBLE PRECISION, went_elsewhere INTEGER
 );
 CREATE INDEX IF NOT EXISTS observed_stays_v2_time ON observed_stays_v2(started_at);
 CREATE INDEX IF NOT EXISTS observed_stays_v2_source_time ON observed_stays_v2(source,started_at,ended_at);
@@ -259,6 +259,10 @@ class PostgresConnection:
                     self.connection.execute("ALTER TABLE observed_stays_v2 ADD COLUMN IF NOT EXISTS distance_m DOUBLE PRECISION")
                     self.connection.execute("ALTER TABLE observed_stays_v2 ADD COLUMN IF NOT EXISTS radius_m DOUBLE PRECISION")
                     self.connection.execute("INSERT INTO schema_migrations(version) VALUES(11)")
+                if not self.connection.execute("SELECT 1 FROM schema_migrations WHERE version=13").fetchone():
+                    # Whether travel before a stay went somewhere else; Store rebuilds under migration 14.
+                    self.connection.execute("ALTER TABLE observed_stays_v2 ADD COLUMN IF NOT EXISTS went_elsewhere INTEGER")
+                    self.connection.execute("INSERT INTO schema_migrations(version) VALUES(13)")
                 self.connection.commit()
                 _initialized_urls.add(url)
 
