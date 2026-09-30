@@ -70,16 +70,21 @@ function initMap(){
   map=L.map('map',{zoomControl:false}).setView([39.5,-98.35],4);
   L.control.zoom({position:'bottomright'}).addTo(map);
   L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'&copy; OpenStreetMap contributors',maxZoom:19}).addTo(map);
-  map.on('popupopen',event=>event.popup.getElement()?.querySelectorAll('[data-copy]').forEach(button=>button.onclick=()=>copyText(button.dataset.copy,'Coordinates copied')));
+  map.on('popupopen',event=>{
+    const element=event.popup.getElement();
+    element?.querySelectorAll('[data-copy]').forEach(button=>button.onclick=()=>copyText(button.dataset.copy,'Coordinates copied'));
+    element?.querySelectorAll('[data-edit-place]').forEach(button=>button.onclick=()=>{map.closePopup();editVisitedPlace(state.day?.places_including_home.find(place=>place.cluster_id===+button.dataset.editPlace))});
+  });
   pathLayer=L.layerGroup().addTo(map);placeLayer=L.layerGroup().addTo(map);highlightLayer=L.layerGroup().addTo(map);searchLayer=L.layerGroup().addTo(map);
   map.on('click',async e=>{const q=params();q.set('lat',e.latlng.lat);q.set('lon',e.latlng.lng);q.set('radius_m',250);q.set('limit',10);try{const rows=await api('/api/near?'+q);$('map-detail-section').hidden=false;$('map-detail').innerHTML=rows.map(p=>`<div class="list-item"><div><strong>${safe(formatTime(p.timestamp))}</strong><small>${safe(modeName(p.mode))} · ${safe(kmh(p))} · ${Math.round(p.distance_m)} m away · ${safe(coordinateText(p.lat,p.lon))}</small></div></div>`).join('')||'<p class="empty">No recorded fixes within 250 m on this day.</p>'}catch(err){toast(err.message)}});
 }
 function mapPath(segment){return segment.map(c=>[c[1],c[0]])}
 function coordinateText(lat,lon){return `${Number(lat).toFixed(6)}, ${Number(lon).toFixed(6)}`}
-function pointPopup(title,lines,lat,lon){
-  // Every point on the map shows its coordinates, ready to copy.
+function pointPopup(title,lines,lat,lon,clusterId=null){
+  // Every point on the map shows its coordinates, ready to copy; visits can be renamed from here.
   const coordinates=coordinateText(lat,lon);
-  return `<div class="map-popup"><strong>${safe(title)}</strong>${lines.filter(Boolean).map(line=>`<span>${safe(line)}</span>`).join('')}<button type="button" class="popup-copy" data-copy="${safe(coordinates)}" title="Copy coordinates">${safe(coordinates)}</button></div>`;
+  const edit=clusterId!=null?`<button type="button" class="popup-action" data-edit-place="${clusterId}">Edit place</button>`:'';
+  return `<div class="map-popup"><strong>${safe(title)}</strong>${lines.filter(Boolean).map(line=>`<span>${safe(line)}</span>`).join('')}<div class="popup-actions"><button type="button" class="popup-copy" data-copy="${safe(coordinates)}" title="Copy coordinates">${safe(coordinates)}</button>${edit}</div></div>`;
 }
 async function copyText(value,label='Copied'){try{await navigator.clipboard.writeText(value);toast(label)}catch(_error){toast(value)}}
 function tripKey(trip){return `${trip.from_stay_id}-${trip.to_stay_id}`}
@@ -134,7 +139,7 @@ function drawMap(fit=false){
     const icon=L.divIcon({className:'visit-pin'+(number?'':' home'),html:number?String(number):placeIcons.home,iconSize:[28,28],iconAnchor:[14,14]});
     const minutes=durationText(place.observed_minutes);
     L.marker([place.lat,place.lon],{icon,title:place.name||place.display_name})
-      .bindPopup(pointPopup(place.name||place.display_name,[place.address&&place.address!==place.name?place.address:'',minutes+' · '+place.visits+' visit'+(place.visits===1?'':'s')],place.lat,place.lon)).addTo(placeLayer);
+      .bindPopup(pointPopup(place.name||place.display_name,[place.address&&place.address!==place.name?place.address:'',minutes+' · '+place.visits+' visit'+(place.visits===1?'':'s')],place.lat,place.lon,place.cluster_id)).addTo(placeLayer);
   }
   if(state.current){
     const point=state.current;
@@ -160,7 +165,7 @@ function drawSelection(zoom){
   const lines=[...(subject.route_segments||[]),...(subject.internal_moves||[]).flatMap(move=>move.route_segments||[])].map(mapPath);
   for(const line of lines){L.polyline(line,{color:'#fff',weight:10,opacity:.95,interactive:false}).addTo(highlightLayer);L.polyline(line,{color,weight:6,opacity:1,interactive:false}).addTo(highlightLayer)}
   if(item.type==='stay')L.circleMarker([item.stay.lat,item.stay.lon],{radius:item.stay.kind==='area'?6:10,color:'#fff',weight:3,fillColor:color,fillOpacity:1})
-    .bindPopup(pointPopup(item.stay.display_name||'Stay',[stayWhen(item.stay,state.day)+' · '+durationText(item.stay.observed_minutes)],item.stay.lat,item.stay.lon)).addTo(highlightLayer);
+    .bindPopup(pointPopup(item.stay.display_name||'Stay',[stayWhen(item.stay,state.day)+' · '+durationText(item.stay.observed_minutes)],item.stay.lat,item.stay.lon,item.stay.cluster_id)).addTo(highlightLayer);
   const turn=item.type==='trip'&&item.trip.loop?item.trip.turnaround:null;
   if(turn)L.circleMarker([turn.lat,turn.lon],{radius:8,color:'#fff',weight:3,fillColor:color,fillOpacity:1})
     .bindPopup(pointPopup(turn.stop_minutes?(turn.name||'Stop'):'Farthest point',[turn.stop_minutes?`Stopped ${durationText(turn.stop_minutes)} · ${clock(turn.arrived_at)}`:clock(turn.arrived_at)],turn.lat,turn.lon)).addTo(highlightLayer);
@@ -248,9 +253,10 @@ function renderDayPlaces(day){
     const details=[`First seen ${clock(place.first_seen)}`,`${durationText(place.observed_minutes)} observed`];
     if(place.visits>1)details.push(`${place.visits} visits`);
     if(activities)details.push(activities);
-    return `<div class="list-item"><div class="place-main">${pinBadge(numbers.get(place.cluster_id))}<div><strong>${safe(place.name||place.display_name)}</strong><small>${safe(details.join(' · '))}${place.address&&place.address!==place.name?'<br>'+safe(place.address):''}</small></div></div><button data-day-place="${place.cluster_id}">Map</button></div>`;
+    return `<div class="list-item"><div class="place-main">${pinBadge(numbers.get(place.cluster_id))}<div><strong>${safe(place.name||place.display_name)}</strong><small>${safe(details.join(' · '))}${place.address&&place.address!==place.name?'<br>'+safe(place.address):''}</small></div></div><div class="actions"><button data-day-place="${place.cluster_id}">Map</button><button data-edit-day-place="${place.cluster_id}">Edit</button></div></div>`;
   }).join('')||'<p class="empty">No confirmed stays on this day. Sparse fixes may miss a visit.</p>';
   $('visited-places').querySelectorAll('[data-day-place]').forEach(button=>button.onclick=()=>{const place=day.places_including_home.find(item=>item.cluster_id===+button.dataset.dayPlace);focusPlaceOnMap({...place,display_name:place.name||place.address||'Visited place'})});
+  $('visited-places').querySelectorAll('[data-edit-day-place]').forEach(button=>button.onclick=()=>editVisitedPlace(day.places_including_home.find(item=>item.cluster_id===+button.dataset.editDayPlace)));
 }
 function renderSummary(day){
   $('stat-distance').textContent=distanceText(day.movement_km??day.stats.distance_km);
@@ -311,12 +317,48 @@ function renderCurrent(){
   $('current-updated').textContent=`Updated ${formatTime(point.timestamp)} · ${age}${point.stale?' · stale':''}`;
   $('current-coordinates').textContent=`${Number(point.lat).toFixed(6)}, ${Number(point.lon).toFixed(6)}`;
 }
-function fillPlaceSelectors(){const select=$('reminder-place'),value=select.value;select.innerHTML='<option value="">Select a saved place</option>'+state.places.map(p=>`<option value="${p.id}">${safe(p.name)}</option>`).join('')+'<option value="other">Other place or coordinates…</option>';select.value=[...select.options].some(option=>option.value===value)?value:'';toggleReminderDestination()}
-function toggleReminderDestination(){const custom=$('reminder-place').value==='other';$('reminder-custom-place').hidden=!custom;for(const id of ['reminder-lat','reminder-lon'])$(id).required=custom}
+function fillPlaceSelectors(){const select=$('reminder-place'),value=select.value;select.innerHTML='<option value="">Select a saved place</option>'+state.places.map(p=>`<option value="${p.id}">${safe(p.name)}</option>`).join('')+'<option value="other">Other place or coordinates…</option><option value="named">Any place named…</option>';select.value=[...select.options].some(option=>option.value===value)?value:'';toggleReminderDestination()}
+function toggleReminderDestination(){const choice=$('reminder-place').value,custom=choice==='other',named=choice==='named';$('reminder-custom-place').hidden=!custom;$('reminder-named-place').hidden=!named;$('reminder-match-name').required=named;for(const id of ['reminder-lat','reminder-lon'])$(id).required=custom}
+function reminderWhere(reminder){return reminder.match_name?`Any place named “${reminder.match_name}”`:reminder.place_name}
 function setReminderDestination(place){$('reminder-place-name').value=(place.name||place.place_name||'').slice(0,120);$('reminder-lat').value=place.lat??'';$('reminder-lon').value=place.lon??'';$('reminder-address').value=place.address||'';$('reminder-category').value=place.category||'';$('reminder-provider-id').value=place.provider_place_id||'';$('reminder-search-results').innerHTML=''}
-function openPlaceDialog(place={}){
-  $('place-form').reset();$('search-results').innerHTML='';$('search').value='';$('place-id').value=place.id||'';$('place-category').value=place.category||'';$('place-provider-id').value=place.provider_place_id||'';$('place-name').value=place.name||'';$('place-lat').value=place.lat??'';$('place-lon').value=place.lon??'';$('place-radius').value=place.radius_m||150;$('place-address').value=place.address||'';$('place-dialog-title').textContent=place.id?'Edit place':'Add place';$('place-dialog').showModal();
+function openPlaceDialog(place={},visit=null){
+  $('place-form').reset();$('search-results').innerHTML='';$('search').value='';$('place-id').value=place.id||'';$('place-category').value=place.category||'';$('place-provider-id').value=place.provider_place_id||'';$('place-name').value=place.name||'';$('place-lat').value=place.lat??'';$('place-lon').value=place.lon??'';$('place-radius').value=place.radius_m||150;$('place-address').value=place.address||'';
+  $('place-dialog-title').textContent=visit?(place.id?'Edit place':'Name this place'):place.id?'Edit place':'Add place';
+  $('place-dialog-note').textContent=visit?'Pick where you were. It is saved at this visit, so later visits here get the same name.':'Search near your latest fix or enter coordinates.';
+  $('nearby-section').hidden=!visit;
+  if(visit)loadNearbyPlaces(visit);
+  $('place-dialog').showModal();
 }
+function visitRadius(place){
+  // Tight enough that the shop next door keeps its own name; an area covers its extent.
+  const extent=place.extent_m||place.radius_m||0;
+  return Math.round(Math.min(1000,Math.max(50,extent?extent+25:50)));
+}
+function editVisitedPlace(place){
+  if(!place)return;
+  const saved=place.place_id!=null?state.places.find(item=>item.id===place.place_id):null;
+  openPlaceDialog(saved||{name:place.name||'',lat:+Number(place.lat).toFixed(6),lon:+Number(place.lon).toFixed(6),radius_m:visitRadius(place),address:place.address||'',category:place.category||'',provider_place_id:place.provider_place_id||''},place);
+}
+async function loadNearbyPlaces(visit){
+  const box=$('nearby-places'),request=++loadNearbyPlaces.request;
+  box.innerHTML='<p class="empty">Looking for places around this visit…</p>';
+  $('nearby-note').textContent='';
+  try{
+    const radius=Math.max(250,Math.round((visit.extent_m||visit.radius_m||0)+50));
+    const places=await api('/api/nearby-places?'+new URLSearchParams({lat:visit.lat,lon:visit.lon,radius_m:radius,limit:15}));
+    if(request!==loadNearbyPlaces.request)return;
+    $('nearby-note').textContent=places.length?`${places.length} within ${radius>=1000?(radius/1000).toFixed(1)+' km':radius+' m'}`:'';
+    box.innerHTML=places.map((place,index)=>`<div class="result-item"><div class="place-main">${placeIcon(place)}<div><strong>${safe(place.name)}</strong><span>${safe([place.distance_m!=null?place.distance_m+' m away':'',place.address&&place.address!==place.name?place.address:''].filter(Boolean).join(' · '))}</span></div></div><button type="button" data-nearby="${index}">Use</button></div>`).join('')||'<p class="empty">No named places nearby. Type the name below.</p>';
+    box.querySelectorAll('[data-nearby]').forEach(button=>button.onclick=()=>{
+      const place=places[+button.dataset.nearby];
+      // Keep the visit's own position; only the name and details come from the listing.
+      $('place-name').value=place.name.slice(0,120);$('place-category').value=place.category||'';$('place-provider-id').value=place.provider_place_id||'';$('place-address').value=place.address||'';
+      box.querySelectorAll('.result-item').forEach(item=>item.classList.toggle('chosen',item===button.closest('.result-item')));
+      $('place-name').focus();
+    });
+  }catch(error){if(request===loadNearbyPlaces.request)box.innerHTML=`<p class="empty">${safe(error.message)}</p>`}
+}
+loadNearbyPlaces.request=0;
 function revealMap(){
   // Bring the map on screen only when it is not already fully visible, so a list below keeps its place.
   const shell=document.querySelector('.map-shell'),box=shell.getBoundingClientRect();
@@ -337,15 +379,14 @@ function renderPlaces(){
   $('places-list').innerHTML=saved.map(p=>{const seen=usage.get(p.id);const activity=seen?`${seen.visits} visit${seen.visits===1?'':'s'} · ${seen.observed_minutes.toFixed(0)} min observed`:'No confirmed visits yet';return `<div class="list-item"><div class="place-main">${placeIcon(p)}<div><strong>${safe(p.name)}</strong><small>${safe(activity)} · ${Math.round(p.radius_m)} m radius${p.address?' · '+safe(p.address):''}</small></div></div><div class="actions"><button data-focus="${p.id}">Map</button><button data-edit="${p.id}">Edit</button></div></div>`}).join('')||'<div class="empty">No saved places yet.</div>';
   $('places-list').querySelectorAll('[data-focus]').forEach(button=>button.onclick=()=>focusPlaceOnMap(state.places.find(place=>place.id===+button.dataset.focus)));
   $('places-list').querySelectorAll('[data-edit]').forEach(button=>button.onclick=()=>openPlaceDialog(state.places.find(place=>place.id===+button.dataset.edit)));
-  $('all-visited-places').innerHTML=state.visitedPlaces.map((place,index)=>`<div class="list-item"><div class="place-main">${placeIcon(place)}<div><strong>${safe(place.display_name)}</strong><small>${place.visits} visit${place.visits===1?'':'s'} · ${place.observed_minutes.toFixed(0)} min observed · Last ${safe(formatTime(place.last_seen))}</small></div></div><div class="actions"><button data-map-visited="${index}">Map</button>${place.saved?`<button data-edit-visited="${index}">Edit saved</button>`:`<button data-save-visited="${index}">Save place</button>`}</div></div>`).join('')||'<div class="empty">No confirmed visited places yet.</div>';
+  $('all-visited-places').innerHTML=state.visitedPlaces.map((place,index)=>`<div class="list-item"><div class="place-main">${placeIcon(place)}<div><strong>${safe(place.display_name)}</strong><small>${place.visits} visit${place.visits===1?'':'s'} · ${place.observed_minutes.toFixed(0)} min observed · Last ${safe(formatTime(place.last_seen))}</small></div></div><div class="actions"><button data-map-visited="${index}">Map</button><button data-edit-visited="${index}">Edit place</button></div></div>`).join('')||'<div class="empty">No confirmed visited places yet.</div>';
   $('all-visited-places').querySelectorAll('[data-map-visited]').forEach(button=>button.onclick=()=>focusPlaceOnMap(state.visitedPlaces[+button.dataset.mapVisited]));
-  $('all-visited-places').querySelectorAll('[data-save-visited]').forEach(button=>button.onclick=()=>{const place=state.visitedPlaces[+button.dataset.saveVisited];openPlaceDialog({name:place.name||place.display_name||'',lat:place.lat,lon:place.lon,radius_m:75,address:place.address||'',category:place.category||'',provider_place_id:place.provider_place_id||''})});
-  $('all-visited-places').querySelectorAll('[data-edit-visited]').forEach(button=>button.onclick=()=>{const visited=state.visitedPlaces[+button.dataset.editVisited];openPlaceDialog(state.places.find(place=>place.id===visited.place_id))});
+  $('all-visited-places').querySelectorAll('[data-edit-visited]').forEach(button=>button.onclick=()=>editVisitedPlace(state.visitedPlaces[+button.dataset.editVisited]));
 }
 function renderReminders(){
-  $('reminders-list').innerHTML=state.reminders.map(r=>`<div class="list-item"><div class="place-main">${placeIcon(r)}<div><strong>${safe(r.text)}</strong><small>At ${safe(r.place_name)} · Created ${safe(formatTime(r.created_at))}</small></div></div><button data-cancel-reminder="${r.id}">Cancel</button></div>`).join('')||'<div class="empty">No active reminders.</div>';
+  $('reminders-list').innerHTML=state.reminders.map(r=>`<div class="list-item"><div class="place-main">${placeIcon(r)}<div><strong>${safe(r.text)}</strong><small>${safe(r.match_name?reminderWhere(r):'At '+r.place_name)} · Created ${safe(formatTime(r.created_at))}</small></div></div><button data-cancel-reminder="${r.id}">Cancel</button></div>`).join('')||'<div class="empty">No active reminders.</div>';
   $('reminders-list').querySelectorAll('[data-cancel-reminder]').forEach(button=>button.onclick=async()=>{try{await post('/api/reminders/cancel',{id:+button.dataset.cancelReminder});await refreshMeta();toast('Reminder cancelled')}catch(error){toast(error.message)}});
-  $('reminder-history').innerHTML=state.reminderHistory.map(item=>`<div class="list-item"><div class="place-main">${placeIcon(item)}<div><strong>${safe(item.text)}</strong><small>${safe(item.place_name)} · ${item.status==='triggered'?'Triggered '+safe(formatTime(item.triggered_at)):'Cancelled '+safe(formatTime(item.cancelled_at||item.created_at))}</small></div></div></div>`).join('')||'<div class="empty">Triggered and cancelled reminders will appear here.</div>';
+  $('reminder-history').innerHTML=state.reminderHistory.map(item=>`<div class="list-item"><div class="place-main">${placeIcon(item)}<div><strong>${safe(item.text)}</strong><small>${safe(reminderWhere(item))} · ${item.status==='triggered'?'Triggered '+safe(formatTime(item.triggered_at)):'Cancelled '+safe(formatTime(item.cancelled_at||item.created_at))}</small></div></div></div>`).join('')||'<div class="empty">Triggered and cancelled reminders will appear here.</div>';
 }
 function renderInsights(){const data=state.insights;if(!data)return;const prediction=data.prediction;$('prediction').textContent=prediction.prediction?`Likely next from ${prediction.from}: ${prediction.prediction} (${Math.round(prediction.frequency*100)}% of ${prediction.observations} observed departures).${prediction.current_fix_stale?' Latest location is stale; verify before acting.':''}`:`Next place: insufficient evidence (${prediction.reason}).`;$('pattern-places').innerHTML=data.frequent_places.slice(0,8).map((place,index)=>`<div class="list-item"><div class="place-main">${placeIcon(place)}<div><strong>${safe(place.display_name)}</strong><small>${place.visits} visit${place.visits===1?'':'s'} · ${place.observed_minutes.toFixed(0)} min observed</small></div></div><button data-pattern-place="${index}">Map</button></div>`).join('')||'<div class="empty">Common places appear after confirmed stays.</div>';$('pattern-places').querySelectorAll('[data-pattern-place]').forEach(button=>button.onclick=()=>focusPlaceOnMap(data.frequent_places[+button.dataset.patternPlace]));$('transitions').innerHTML=data.transitions.slice(0,8).map((t,index)=>`<div class="list-item"><div><strong>${safe(t.from_name)} → ${safe(t.to_name)}</strong><small>${t.count} observed transition${t.count===1?'':'s'}</small></div><button data-transition="${index}">Map arrival</button></div>`).join('')||'<div class="empty">Transitions appear after visits to two or more places.</div>';$('transitions').querySelectorAll('[data-transition]').forEach(button=>button.onclick=()=>{const transition=data.transitions[+button.dataset.transition];focusPlaceOnMap({lat:transition.to_lat,lon:transition.to_lon,display_name:transition.to_name})})}
 async function refreshCoverage(){const data=await api('/api/coverage');$('coverage').innerHTML=data.sources.map(s=>`<div class="list-item"><div><strong>${safe(s.source)} · ${s.points.toLocaleString()} fixes</strong><small>${safe(formatTime(s.first))} → ${safe(formatTime(s.last))}</small></div></div>`).join('')+(data.gaps_over_24h.length?`<p class="muted">${data.gaps_over_24h.length} gaps over 24 hours. Missing coverage cannot establish where you were.</p>`:'')||'<div class="empty">No source data yet.</div>'}
@@ -463,7 +504,7 @@ $('reminder-place').onchange=toggleReminderDestination;
 $('reminder-search-button').onclick=async()=>{const query=$('reminder-place-search').value.trim();if(!query){toast('Enter a place name');return}try{const q=new URLSearchParams({q:query});if(state.current){q.set('lat',state.current.lat);q.set('lon',state.current.lon)}const results=await api('/api/geocode?'+q);$('reminder-search-results').innerHTML=results.map((place,index)=>`<div class="result-item"><div class="place-main">${placeIcon(place)}<div><strong>${safe(place.name)}</strong><span>${safe(place.address||'')} · ${Number(place.lat).toFixed(5)}, ${Number(place.lon).toFixed(5)}</span></div></div><button type="button" data-reminder-result="${index}">Use</button></div>`).join('')||'<p class="empty">No matches.</p>';$('reminder-search-results').querySelectorAll('[data-reminder-result]').forEach(button=>button.onclick=()=>setReminderDestination(results[+button.dataset.reminderResult]))}catch(error){toast(error.message)}};
 $('reminder-use-current').onclick=()=>{if(!state.current){toast('No current location is available');return}setReminderDestination({...state.current,name:state.current.place_name||state.current.address||'Current location'});toast('Current coordinates selected')};
 $('reminder-reverse').onclick=async()=>{if(!$('reminder-lat').value||!$('reminder-lon').value){toast('Enter coordinates first');return}try{const q=new URLSearchParams({lat:$('reminder-lat').value,lon:$('reminder-lon').value});const result=await api('/api/reverse?'+q);setReminderDestination({...result,lat:+$('reminder-lat').value,lon:+$('reminder-lon').value});toast(result.approximate?'Nearby cached place found — verify before creating':'Place found')}catch(error){toast(error.message)}};
-$('reminder-form').onsubmit=async e=>{e.preventDefault();try{const custom=$('reminder-place').value==='other';const payload=custom?{text:$('reminder-text').value,place_name:$('reminder-place-name').value,lat:+$('reminder-lat').value,lon:+$('reminder-lon').value,radius_m:+$('reminder-radius').value,address:$('reminder-address').value,category:$('reminder-category').value,provider_place_id:$('reminder-provider-id').value}:{text:$('reminder-text').value,place_id:+$('reminder-place').value};await post('/api/reminders',payload);$('reminder-form').reset();$('reminder-search-results').innerHTML='';toggleReminderDestination();await refreshMeta();toast('Reminder created')}catch(err){toast(err.message)}};
+$('reminder-form').onsubmit=async e=>{e.preventDefault();try{const custom=$('reminder-place').value==='other';const payload=$('reminder-place').value==='named'?{text:$('reminder-text').value,match_name:$('reminder-match-name').value}:custom?{text:$('reminder-text').value,place_name:$('reminder-place-name').value,lat:+$('reminder-lat').value,lon:+$('reminder-lon').value,radius_m:+$('reminder-radius').value,address:$('reminder-address').value,category:$('reminder-category').value,provider_place_id:$('reminder-provider-id').value}:{text:$('reminder-text').value,place_id:+$('reminder-place').value};await post('/api/reminders',payload);$('reminder-form').reset();$('reminder-search-results').innerHTML='';toggleReminderDestination();await refreshMeta();toast('Reminder created')}catch(err){toast(err.message)}};
 $('notifications').onclick=async()=>{if(!('Notification' in window)){toast('Browser notifications are unavailable');return}const permission=await Notification.requestPermission();toast(permission==='granted'?'Browser alerts enabled':'Browser alerts were not enabled')};
 function dateLabel(value){const [year,month,day]=value.split('-').map(Number);return new Date(year,month-1,day).toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'})}
 function renderVisitResults(result){

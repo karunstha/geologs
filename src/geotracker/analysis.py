@@ -4,13 +4,13 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import re
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .core import (MAX_CONNECTED_GAP_SECONDS, MAX_PLAUSIBLE_SPEED_MPS, MAX_SAMPLE_GAP_SECONDS, MOVEMENT_MODES,
-                   classify_motion, is_excursion, went_elsewhere_between, metres, parse_time, place_for_coordinate,
-                   places_provider_identity, reported_speed,
+                   classify_motion, is_excursion, went_elsewhere_between, metres, name_matches, nearby_places,
+                   parse_time, place_for_coordinate,
+                   places_provider_identity, reported_speed, search_text,
                    route_segments_from_points, smooth_route_segment, stats_from_points, trips_between_stays)
 
 
@@ -35,6 +35,10 @@ AREA_MIN_ACTIVITY_EXTENT_M = 150
 # Everything between parking and driving away is one visit (an out-and-back
 # trail run) when it circulates as a whole and stays within this extent.
 AREA_PARKED_MAX_EXTENT_M = 5000
+# Name-only reminders check the places around you after this long still. A
+# full 15 minute stay would miss a quick coffee run.
+NAME_REMINDER_DWELL_SECONDS = 180
+NAME_REMINDER_RADIUS_M = 150
 
 
 def sync_timeline(store, sources=None, rebuild=False, since_ids=None):
@@ -418,6 +422,56 @@ def _refresh_area_stays(store, source, since=None):
                              (flags.get(id(following)), following["id"]))
 
 
+def check_name_reminders(store, sources, now=None):
+    """Fire name-only reminders once you have been still for a few minutes near a matching place.
+
+    The places around the current stationary candidate are looked up once and
+    kept on the candidate, so later polls (and reminders created meanwhile)
+    are checked without asking the provider again. Every named place within
+    NAME_REMINDER_RADIUS_M counts, not just the nearest, so a busy strip mall
+    cannot hide the match. Saved places count by their own radius.
+    """
+    reminders = store._rows("SELECT id,text,match_name FROM reminders WHERE active=1 AND match_name IS NOT NULL")
+    if not reminders:
+        return []
+    now = now or datetime.now(timezone.utc)
+    events = []
+    for source in sources:
+        state = store.db.execute("SELECT candidate FROM stay_observation_state WHERE source=?", (source,)).fetchone()
+        candidate = json.loads(state["candidate"]) if state and state["candidate"] else None
+        if not candidate or candidate["count"] < 2 or _duration(candidate) < NAME_REMINDER_DWELL_SECONDS:
+            continue
+        if (now - datetime.fromisoformat(candidate["end"])).total_seconds() > 1800:
+            continue  # historical data never fires reminders
+        if "nearby_names" not in candidate:
+            names = [place["name"] for place in store.places()
+                     if metres(candidate["lat"], candidate["lon"], place["lat"], place["lon"]) <= place["radius_m"]]
+            try:
+                names += [place["name"] for place in
+                          nearby_places(store, candidate["lat"], candidate["lon"], NAME_REMINDER_RADIUS_M)
+                          if (place.get("distance_m") or 0) <= NAME_REMINDER_RADIUS_M]
+            except (ValueError, OSError, KeyError):
+                pass  # no provider: saved places still match
+            candidate["nearby_names"] = list(dict.fromkeys(name for name in names if name))
+            store.db.execute("UPDATE stay_observation_state SET candidate=? WHERE source=?",
+                             (json.dumps(candidate), source))
+        point = store.db.execute("SELECT point_id FROM point_observations WHERE id=?", (candidate["end_id"],)).fetchone()
+        for reminder in reminders:
+            matched = next((name for name in candidate["nearby_names"] if name_matches(reminder["match_name"], name)), None)
+            if matched is None or point is None:
+                continue
+            # A reminder fires once, even when two sources stop at the same place.
+            claimed = store.db.execute("""UPDATE reminders SET last_triggered_at=?,cancelled_at=NULL,active=0,repeat=0
+                WHERE id=? AND active=1""", (candidate["end"], reminder["id"]))
+            if not claimed.rowcount:
+                continue
+            event_id = store.db.execute("INSERT INTO events(reminder_id,point_id,triggered_at) VALUES (?,?,?) RETURNING id",
+                                        (reminder["id"], point["point_id"], candidate["end"])).fetchone()["id"]
+            events.append({"id": event_id, "reminder_id": reminder["id"], "text": reminder["text"],
+                           "place": matched, "triggered_at": candidate["end"]})
+    return events
+
+
 def process_stays(store, sources=None, rebuild=False):
     """Process raw observations; a late import rebuilds that source safely."""
     if rebuild:
@@ -776,9 +830,7 @@ def visited_places(store, limit=500):
 
 
 def _search_text(value):
-    """Lowercase words; apostrophes vanish so "Sam's" matches "sams"."""
-    text = re.sub(r"['’`]", "", str(value or "").casefold())
-    return " ".join(re.sub(r"[^\w]+", " ", text).split())
+    return search_text(value)
 
 
 def search_visits(store, query, start=None, end=None, limit=50, timezone_name=None):
@@ -1094,8 +1146,15 @@ def day_summary(store, date, timezone_name="UTC", source=None):
 
 
 def daily_overview(store, date, timezone_name=None, source=None):
-    """Materialize a compact, structured record intended for API and LLM use."""
-    timezone_name = timezone_name or store.settings()["timezone"]
+    """Materialize a compact, structured record intended for API and LLM use.
+
+    The catalog holds one record per date: the configured timezone across all
+    sources. Other timezones or a single source are computed on request but not
+    stored, so an agent asking in another zone cannot add a second record.
+    """
+    configured = store.settings()["timezone"]
+    timezone_name = timezone_name or configured
+    canonical = timezone_name == configured and not source
     try:
         zone = ZoneInfo(timezone_name)
         local_start = datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=zone)
@@ -1108,7 +1167,7 @@ def daily_overview(store, date, timezone_name=None, source=None):
     start = day_start.isoformat()
     end = (day_end - timedelta(microseconds=1)).isoformat()
     watermark = store.daily_overview_watermark(start, end, source)
-    cached = store.stored_daily_overview(date, timezone_name, source, watermark)
+    cached = store.stored_daily_overview(date, timezone_name, source, watermark) if canonical else None
     if cached is not None:
         return cached
     day = day_summary(store, date, timezone_name, source)
@@ -1170,7 +1229,7 @@ def daily_overview(store, date, timezone_name=None, source=None):
              "active_reminders_at_end": reminders_active_at_end, "first_fix": day["first_fix"],
              "last_fix": day["last_fix"], "coverage_gaps": day["coverage_gaps"], "coverage_note": day["coverage_note"],
              "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
-    return store.save_daily_overview(value, watermark)
+    return store.save_daily_overview(value, watermark) if canonical else value
 
 
 def finalize_previous_day(store, now=None):

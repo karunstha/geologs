@@ -2,7 +2,7 @@
 import json
 import sqlite3
 
-from .core import current_location, deliver_webhook, geocode, reverse_geocode
+from .core import current_location, deliver_webhook, geocode, nearby_places, reverse_geocode
 from .analysis import daily_overview, day_summary, place_patterns, predict_next, resolve_place_patterns, search_visits, stays, transitions, visited_places
 from .postgres import INTEGRITY_ERRORS
 
@@ -43,11 +43,12 @@ TOOLS = [
     {"name": "save_place", "description": "Create or edit a named place and arrival geofence.", "inputSchema": schema({"id": INTEGER, "name": STRING, "lat": NUMBER, "lon": NUMBER, "radius_m": NUMBER, "address": STRING, "category": STRING, "provider_place_id": STRING}, ["name", "lat", "lon"])},
     {"name": "list_reminders", "description": "Active one-shot location reminders waiting for arrival.", "inputSchema": schema({})},
     {"name": "list_reminder_history", "description": "Past triggered or cancelled location reminders.", "inputSchema": schema({"limit": INTEGER})},
-    {"name": "create_reminder", "description": "Create a one-shot arrival reminder at a saved place_id or an unsaved destination. For an unsaved place, provide place_name with coordinates; place_name alone uses the nearest geocoding match.", "inputSchema": schema({"text": STRING, "place_id": INTEGER, "place_name": STRING, "lat": NUMBER, "lon": NUMBER, "radius_m": NUMBER, "address": STRING, "category": STRING, "provider_place_id": STRING}, ["text"])},
+    {"name": "create_reminder", "description": "Create a one-shot reminder. Three kinds: at a saved place_id (arrival geofence); at an unsaved destination (place_name with lat/lon, or place_name alone for the nearest geocoding match); or match_name alone for any place with that name, such as 'Starbucks', which fires after about three minutes stopped within 150 m of a place whose name matches (word prefixes, tolerant of small typos).", "inputSchema": schema({"text": STRING, "place_id": INTEGER, "place_name": STRING, "match_name": STRING, "lat": NUMBER, "lon": NUMBER, "radius_m": NUMBER, "address": STRING, "category": STRING, "provider_place_id": STRING}, ["text"])},
     {"name": "cancel_reminder", "description": "Cancel an active location reminder. Cancelled reminders remain in history and cannot be re-enabled.", "inputSchema": schema({"id": INTEGER}, ["id"])},
     {"name": "list_reminder_events", "description": "Triggered reminder inbox for delivery/notification workflows.", "inputSchema": schema({"since_id": INTEGER, "limit": INTEGER})},
     {"name": "ingest_location", "description": "Store one location from any source and evaluate arrival reminders. Location sources may also use POST /api/points.", "inputSchema": schema({"lat": NUMBER, "lon": NUMBER, "timestamp": STRING, "source": STRING, "external_id": STRING, "accuracy_m": NUMBER, "speed_mps": NUMBER}, ["lat", "lon"])},
     {"name": "geocode_address", "description": "Search for a place or address near the latest recorded fix with the places provider chosen in Settings (Geoapify, Mapbox, or Photon); results are cached by area.", "inputSchema": schema({"query": STRING, "lat": NUMBER, "lon": NUMBER}, ["query"])},
+    {"name": "list_nearby_places", "description": "Named places around coordinates, nearest first, from the places provider chosen in Settings. Use it to correct a visited place that was named after the wrong neighbour: pick the right one and save_place at the visit's coordinates with a small radius.", "inputSchema": schema({"lat": NUMBER, "lon": NUMBER, "radius_m": NUMBER, "limit": INTEGER}, ["lat", "lon"])},
     {"name": "reverse_geocode", "description": "Name coordinates after the nearest named place within radius_m (default 150 m) using the places provider chosen in Settings (Geoapify, Mapbox, or Photon), falling back to the street address when nothing named is nearby. For a stay, pass its averaged position and extent. Results are spatially cached.", "inputSchema": schema({"lat": NUMBER, "lon": NUMBER, "radius_m": NUMBER}, ["lat", "lon"])},
 ]
 
@@ -116,6 +117,8 @@ def call_tool(store, name, args):
         return value
     if name == "geocode_address":
         return geocode(store, args["query"], args.get("lat"), args.get("lon"))
+    if name == "list_nearby_places":
+        return nearby_places(store, args["lat"], args["lon"], args.get("radius_m"), args.get("limit", 15))
     if name == "reverse_geocode":
         return reverse_geocode(store, args["lat"], args["lon"], args.get("radius_m"))
     raise ValueError("unknown tool: " + str(name))

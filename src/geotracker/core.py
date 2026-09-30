@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import csv
+import difflib
 import hashlib
 import hmac
 import io
 import json
 import math
 import os
+import re
 import sqlite3
 import threading
 import urllib.parse
@@ -405,6 +407,19 @@ def smooth_route_segment(coordinates, samples_per_leg=4):
     return result
 
 
+# A reminder has a place (geofence) or, since v13, only a name to match.
+SQLITE_REMINDERS_TABLE = """CREATE TABLE {name} (
+        id INTEGER PRIMARY KEY, text TEXT NOT NULL, place_id INTEGER REFERENCES places(id),
+        active INTEGER NOT NULL DEFAULT 1, repeat INTEGER NOT NULL DEFAULT 0,
+        cooldown_minutes INTEGER NOT NULL DEFAULT 1440,
+        created_at TEXT NOT NULL, last_triggered_at TEXT, cancelled_at TEXT,
+        destination_name TEXT, destination_address TEXT,
+        destination_category TEXT, destination_provider_place_id TEXT, match_name TEXT
+    )"""
+REMINDER_COLUMNS = ("id,text,place_id,active,repeat,cooldown_minutes,created_at,last_triggered_at,cancelled_at,"
+                    "destination_name,destination_address,destination_category,destination_provider_place_id")
+
+
 class Store:
     def __init__(self, path=None):
         url = os.environ.get("GEOTRACKER_DATABASE_URL") if path is None else None
@@ -467,13 +482,12 @@ class Store:
             address TEXT, category TEXT, provider_place_id TEXT, saved INTEGER DEFAULT 1
         );
         CREATE TABLE IF NOT EXISTS reminders (
-            id INTEGER PRIMARY KEY, text TEXT NOT NULL, place_id INTEGER NOT NULL REFERENCES places(id),
+            id INTEGER PRIMARY KEY, text TEXT NOT NULL, place_id INTEGER REFERENCES places(id),
             active INTEGER NOT NULL DEFAULT 1, repeat INTEGER NOT NULL DEFAULT 0,
             cooldown_minutes INTEGER NOT NULL DEFAULT 1440,
             created_at TEXT NOT NULL, last_triggered_at TEXT, cancelled_at TEXT,
             destination_name TEXT, destination_address TEXT,
-            destination_category TEXT, destination_provider_place_id TEXT,
-            FOREIGN KEY(place_id) REFERENCES places(id)
+            destination_category TEXT, destination_provider_place_id TEXT, match_name TEXT
         );
         CREATE INDEX IF NOT EXISTS reminders_active_created ON reminders(active,created_at);
         CREATE TABLE IF NOT EXISTS events (
@@ -605,6 +619,13 @@ class Store:
                 stay_columns = {row[1] for row in self.db.execute("PRAGMA table_info(observed_stays_v2)")}
                 if "went_elsewhere" not in stay_columns:
                     self.db.execute("ALTER TABLE observed_stays_v2 ADD COLUMN went_elsewhere INTEGER")
+            if version < 13:
+                reminder_columns = {row[1]: row for row in self.db.execute("PRAGMA table_info(reminders)")}
+                if reminder_columns["place_id"][3]:
+                    self._rebuild_sqlite_reminders()
+                elif "match_name" not in reminder_columns:
+                    self.db.execute("ALTER TABLE reminders ADD COLUMN match_name TEXT")
+                self._keep_canonical_daily_summaries(self.settings()["timezone"])
         # Stay algorithm versions: 5 and 8 changed stationary stays; 12 adds area
         # stays (moving around one place) and stray-fix tolerance; 14 records
         # whether travel between stays went somewhere else. One rebuild covers every
@@ -633,9 +654,36 @@ class Store:
         if not self.postgres and version < 9:
             self.db.execute("DELETE FROM analysis_cache")
             self.db.execute("PRAGMA user_version=9")
-        if not self.postgres and version < 12:
-            self.db.execute("PRAGMA user_version=12")
+        if not self.postgres and version < 13:
+            self.db.execute("PRAGMA user_version=13")
+        if self.postgres and self._missing_migrations((16,)):
+            # Keep one stored daily summary per date: the configured timezone, all sources.
+            self._keep_canonical_daily_summaries(self.settings()["timezone"])
+            self.db.execute("INSERT INTO schema_migrations(version) VALUES(16) ON CONFLICT DO NOTHING")
         self.db.commit()
+
+    def _rebuild_sqlite_reminders(self):
+        """Let place_id be empty (name-only reminders): SQLite needs a table rebuild for that."""
+        self.db.commit()
+        # Compare against violations that already existed, so an old orphan row
+        # elsewhere cannot block the upgrade; only new breakage aborts it.
+        existing = {tuple(row) for row in self.db.execute("PRAGMA foreign_key_check").fetchall()}
+        self.db.execute("PRAGMA foreign_keys=OFF")
+        try:
+            self.db.execute("BEGIN")
+            self.db.execute(SQLITE_REMINDERS_TABLE.format(name="reminders_v13"))
+            self.db.execute(f"INSERT INTO reminders_v13 ({REMINDER_COLUMNS}) SELECT {REMINDER_COLUMNS} FROM reminders")
+            self.db.execute("DROP TABLE reminders")
+            self.db.execute("ALTER TABLE reminders_v13 RENAME TO reminders")
+            self.db.execute("CREATE INDEX IF NOT EXISTS reminders_active_created ON reminders(active,created_at)")
+            if {tuple(row) for row in self.db.execute("PRAGMA foreign_key_check").fetchall()} - existing:
+                raise RuntimeError("reminder rebuild would break foreign keys")
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
+        finally:
+            self.db.execute("PRAGMA foreign_keys=ON")
 
     def close(self):
         self.db.close()
@@ -682,8 +730,15 @@ class Store:
         for key, value in values.items():
             self.db.execute("""INSERT INTO app_settings(key,value) VALUES (?,?)
                 ON CONFLICT(key) DO UPDATE SET value=excluded.value""", (key, json.dumps(value)))
+        if timezone_name != current["timezone"]:
+            # Summaries are derived; days are rebuilt in the new zone when requested.
+            self._keep_canonical_daily_summaries(timezone_name)
         self.db.commit()
         return values
+
+    def _keep_canonical_daily_summaries(self, timezone_name):
+        """Drop stored summaries for another timezone or a single source."""
+        self.db.execute("DELETE FROM daily_summaries WHERE timezone<>? OR source<>''", (timezone_name,))
 
     def analysis_watermark(self, start=None, end=None, source=None):
         clauses, args = [], []
@@ -758,12 +813,13 @@ class Store:
         return value
 
     def daily_overviews(self, start=None, end=None, limit=90):
-        clauses, args = [], []
+        # One record per date: the configured timezone across all sources.
+        clauses, args = ["timezone=?", "source=''"], [self.settings()["timezone"]]
         if start:
             clauses.append("summary_date>=?"); args.append(str(start))
         if end:
             clauses.append("summary_date<=?"); args.append(str(end))
-        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        where = " WHERE " + " AND ".join(clauses)
         args.append(min(max(int(limit), 1), 1000))
         return self._rows("""SELECT summary_date AS date,timezone,NULLIF(source,'') AS source,
             points,distance_km,trip_count,place_count,reminder_count,created_at,updated_at
@@ -869,8 +925,11 @@ class Store:
                 self.db.execute("UPDATE reminders SET last_triggered_at=?,cancelled_at=NULL,active=0,repeat=0 WHERE id=?", (timestamp, reminder["id"]))
                 events.append({"id": event_id, "reminder_id": reminder["id"], "text": reminder["text"], "place": reminder["place_name"], "triggered_at": timestamp})
         if recorded and process_analysis:
-            from .analysis import process_stays
-            process_stays(self, {str(item.get("source") or "manual")[:80] for item in items})
+            from .analysis import check_name_reminders, process_stays
+            ingested_sources = {str(item.get("source") or "manual")[:80] for item in items}
+            process_stays(self, ingested_sources)
+            if trigger_reminders:
+                events += check_name_reminders(self, ingested_sources)
         self.db.commit()
         return {"inserted": inserted, "duplicates": duplicate, "recorded": recorded, "events": events}
 
@@ -1018,14 +1077,14 @@ class Store:
             p.lat AS place_lat,p.lon AS place_lon,p.radius_m,
             COALESCE(r.destination_address,p.address) AS place_address,
             COALESCE(r.destination_category,p.category) AS category
-            FROM reminders r JOIN places p ON p.id=r.place_id
+            FROM reminders r LEFT JOIN places p ON p.id=r.place_id
             WHERE r.active=1 ORDER BY r.created_at DESC,r.id DESC""")
 
     def reminder_history(self, limit=200):
         return self._rows("""SELECT r.*,COALESCE(r.destination_name,p.name) AS place_name,
             COALESCE(r.destination_category,p.category) AS category,e.id AS event_id,e.triggered_at,e.webhook_status,
             CASE WHEN r.last_triggered_at IS NULL THEN 'cancelled' ELSE 'triggered' END AS status
-            FROM reminders r JOIN places p ON p.id=r.place_id
+            FROM reminders r LEFT JOIN places p ON p.id=r.place_id
             LEFT JOIN events e ON e.id=(SELECT MAX(latest.id) FROM events latest WHERE latest.reminder_id=r.id)
             WHERE r.active=0 ORDER BY COALESCE(r.last_triggered_at,r.cancelled_at,r.created_at) DESC,r.id DESC LIMIT ?""",
             (min(max(int(limit), 1), 1000),))
@@ -1034,7 +1093,14 @@ class Store:
         message = str(raw.get("text") or "").strip()
         if not message or len(message) > 500:
             raise ValueError("text is required (max 500 characters)")
-        if raw.get("place_id") not in (None, ""):
+        match_name = str(raw.get("match_name") or "").strip()
+        if match_name:
+            # Name-only: fires at the first stop near any place with a matching name.
+            if len(match_name) > 120 or not search_text(match_name):
+                raise ValueError("match_name must contain letters or digits (max 120 characters)")
+            place_id = None
+            destination = {"name": match_name, "address": "", "category": "", "provider_place_id": ""}
+        elif raw.get("place_id") not in (None, ""):
             place_id = int(raw["place_id"])
             place = self.db.execute("SELECT * FROM places WHERE id=?", (place_id,)).fetchone()
             if not place:
@@ -1074,10 +1140,10 @@ class Store:
                  destination["provider_place_id"])).fetchone()["id"]
         id_ = self.db.execute("""INSERT INTO reminders
             (text,place_id,repeat,cooldown_minutes,created_at,destination_name,destination_address,
-             destination_category,destination_provider_place_id)
-            VALUES (?,?,0,1440,?,?,?,?,?) RETURNING id""",
+             destination_category,destination_provider_place_id,match_name)
+            VALUES (?,?,0,1440,?,?,?,?,?,?) RETURNING id""",
             (message, place_id, parse_time(None), destination["name"], destination["address"],
-             destination["category"], destination["provider_place_id"])).fetchone()["id"]
+             destination["category"], destination["provider_place_id"], match_name or None)).fetchone()["id"]
         self.db.commit()
         return next(item for item in self.reminders() if item["id"] == id_)
 
@@ -1090,7 +1156,7 @@ class Store:
 
     def events(self, since_id=0, limit=100):
         return self._rows("""SELECT e.*,r.text,COALESCE(r.destination_name,p.name) AS place_name FROM events e
-            JOIN reminders r ON r.id=e.reminder_id JOIN places p ON p.id=r.place_id
+            JOIN reminders r ON r.id=e.reminder_id LEFT JOIN places p ON p.id=r.place_id
             WHERE e.id>? ORDER BY e.id DESC LIMIT ?""", (int(since_id), min(int(limit), 500)))
 
     def reminder_events(self, start, end, source=None):
@@ -1101,26 +1167,26 @@ class Store:
             args.append(source)
         return self._rows("""SELECT e.id,e.reminder_id,e.triggered_at,e.webhook_status,
             r.text,COALESCE(r.destination_name,p.name) AS place_name FROM events e JOIN reminders r ON r.id=e.reminder_id
-            JOIN places p ON p.id=r.place_id JOIN points pnt ON pnt.id=e.point_id WHERE """
+            LEFT JOIN places p ON p.id=r.place_id JOIN points pnt ON pnt.id=e.point_id WHERE """
             + " AND ".join(clauses) + " ORDER BY e.triggered_at", args)
 
     def reminders_created(self, start, end):
         return self._rows("""SELECT r.id,r.text,r.created_at,r.active,r.last_triggered_at,
             COALESCE(r.destination_name,p.name) AS place_name
-            FROM reminders r JOIN places p ON p.id=r.place_id
+            FROM reminders r LEFT JOIN places p ON p.id=r.place_id
             WHERE r.created_at>=? AND r.created_at<=? ORDER BY r.created_at""",
             (parse_time(start), parse_time(end)))
 
     def reminders_cancelled(self, start, end):
         return self._rows("""SELECT r.id,r.text,r.cancelled_at,COALESCE(r.destination_name,p.name) AS place_name
-            FROM reminders r JOIN places p ON p.id=r.place_id
+            FROM reminders r LEFT JOIN places p ON p.id=r.place_id
             WHERE r.cancelled_at>=? AND r.cancelled_at<=? ORDER BY r.cancelled_at""",
             (parse_time(start), parse_time(end)))
 
     def reminders_active_at(self, timestamp):
         at = parse_time(timestamp)
         return self._rows("""SELECT r.id,r.text,r.created_at,COALESCE(r.destination_name,p.name) AS place_name
-            FROM reminders r JOIN places p ON p.id=r.place_id WHERE r.created_at<=?
+            FROM reminders r LEFT JOIN places p ON p.id=r.place_id WHERE r.created_at<=?
             AND (r.last_triggered_at IS NULL OR r.last_triggered_at>?)
             AND (r.cancelled_at IS NULL OR r.cancelled_at>?) ORDER BY r.created_at""", (at, at, at))
 
@@ -1355,8 +1421,9 @@ def nearest_place_radius(extent_m=None):
     return next((radius for radius in NEAREST_PLACE_RADII_M if radius >= extent), NEAREST_PLACE_RADII_M[-1])
 
 
-def geoapify_nearest_result(data, lat, lon):
-    """The first named place in a distance-ordered Places API response."""
+def geoapify_candidates(data):
+    """Named places in a Places API response, in its order, each with its own position."""
+    candidates = []
     for feature in data.get("features", []) if isinstance(data, dict) else []:
         props = feature.get("properties") if isinstance(feature, dict) else None
         if not isinstance(props, dict):
@@ -1368,15 +1435,21 @@ def geoapify_nearest_result(data, lat, lon):
         address = str(props.get("formatted") or "").strip()
         if not address:
             address = ", ".join(str(props.get(key)).strip() for key in ("address_line1", "address_line2") if props.get(key))
-        return {
-            "name": name, "place_name": name, "address": address, "lat": lat, "lon": lon,
-            "result_type": "place",
+        candidates.append({
+            "name": name, "place_name": name, "address": address,
             # The deepest category ("commercial.supermarket") says the most.
             "category": max(categories, key=lambda category: str(category).count("."), default=None),
             "categories": categories, "provider_place_id": props.get("place_id"),
-            "distance_m": props.get("distance"), "source": "geoapify_places",
-        }
-    return None
+            "distance_m": props.get("distance"), "place_lat": props.get("lat"), "place_lon": props.get("lon"),
+            "source": "geoapify_places",
+        })
+    return candidates
+
+
+def geoapify_nearest_result(data, lat, lon):
+    """The first named place in a distance-ordered Places API response."""
+    candidates = geoapify_candidates(data)
+    return {**candidates[0], "lat": lat, "lon": lon, "result_type": "place"} if candidates else None
 
 
 PLACES_PROVIDERS = {
@@ -1452,8 +1525,8 @@ def mapbox_place(feature):
             "result_type": props.get("feature_type")}
 
 
-def mapbox_nearest_result(data, lat, lon, radius):
-    """The nearest named POI within `radius`; Search Box /reverse takes no radius and states no order."""
+def mapbox_candidates(data, lat, lon, radius):
+    """Named POIs within `radius`, nearest first; Search Box /reverse takes no radius and states no order."""
     candidates = []
     for feature in data.get("features", []) if isinstance(data, dict) else []:
         place = mapbox_place(feature)
@@ -1463,12 +1536,14 @@ def mapbox_nearest_result(data, lat, lon, radius):
             continue
         distance = metres(lat, lon, place["lat"], place["lon"])
         if distance <= radius:
-            candidates.append((distance, place))
-    if not candidates:
-        return None
-    distance, place = min(candidates, key=lambda item: item[0])
-    return {**place, "lat": lat, "lon": lon, "result_type": "place", "distance_m": round(distance),
-            "source": "mapbox_searchbox"}
+            candidates.append({**place, "place_lat": place["lat"], "place_lon": place["lon"],
+                               "distance_m": round(distance), "source": "mapbox_searchbox"})
+    return sorted(candidates, key=lambda place: place["distance_m"])
+
+
+def mapbox_nearest_result(data, lat, lon, radius):
+    candidates = mapbox_candidates(data, lat, lon, radius)
+    return {**candidates[0], "lat": lat, "lon": lon, "result_type": "place"} if candidates else None
 
 
 def _geoapify_search(query, bias):
@@ -1527,24 +1602,38 @@ def geocode(store, query, lat=None, lon=None):
     return value
 
 
-def _photon_lookup(lat, lon, radius):
+def _photon_features(lat, lon, radius, limit=10):
     photon = os.environ.get("GEOTRACKER_PHOTON_URL", "").rstrip("/")
     data = json_get(photon + "/reverse?" + urllib.parse.urlencode(
-        {"lat": lat, "lon": lon, "radius": radius / 1000, "limit": 10}))
+        {"lat": lat, "lon": lon, "radius": radius / 1000, "limit": limit}))
     features = data.get("features") or []
-    named = next((feature for feature in features
-                  if (feature.get("properties") or {}).get("name")
-                  and (feature.get("properties") or {}).get("osm_key") not in PHOTON_UNNAMED_KEYS), None)
-    feature = named or (features[0] if features else None)
+    named = [feature for feature in features
+             if (feature.get("properties") or {}).get("name")
+             and (feature.get("properties") or {}).get("osm_key") not in PHOTON_UNNAMED_KEYS]
+    return features, named
+
+
+def _photon_candidates(lat, lon, radius):
+    candidates = []
+    for feature in _photon_features(lat, lon, radius, limit=15)[1]:
+        place = photon_result(feature)
+        candidates.append({**place, "name": place["place_name"], "place_lat": place["lat"], "place_lon": place["lon"],
+                           "distance_m": round(metres(lat, lon, place["lat"], place["lon"])), "source": "photon"})
+    return sorted(candidates, key=lambda place: place["distance_m"])
+
+
+def _photon_lookup(lat, lon, radius):
+    features, named = _photon_features(lat, lon, radius)
+    feature = named[0] if named else (features[0] if features else None)
     value = photon_result(feature) if feature else {"name": "Unknown place", "place_name": "", "address": ""}
-    if named is None:
+    if not named:
         value["place_name"] = ""
     kind = "place" if named else (feature or {}).get("properties", {}).get("type")
     return {**value, "name": value.get("place_name") or value.get("address") or "Unknown place",
             "lat": lat, "lon": lon}, kind
 
 
-def _geoapify_lookup(lat, lon, radius):
+def _geoapify_candidates(lat, lon, radius):
     features = []
     for categories in NEAREST_PLACE_CATEGORY_GROUPS:
         try:
@@ -1559,22 +1648,30 @@ def _geoapify_lookup(lat, lon, radius):
     # Each group arrives ordered by distance; merge so the nearest of both comes first.
     features.sort(key=lambda feature: (((feature or {}).get("properties") or {}).get("distance") is None,
                                        ((feature or {}).get("properties") or {}).get("distance") or 0))
-    result = geoapify_nearest_result({"features": features}, lat, lon)
-    if result is not None:
-        return result, "place"
+    return geoapify_candidates({"features": features})
+
+
+def _geoapify_lookup(lat, lon, radius):
+    candidates = _geoapify_candidates(lat, lon, radius)
+    if candidates:
+        return {**candidates[0], "lat": lat, "lon": lon, "result_type": "place"}, "place"
     data = provider_request("/v1/geocode/reverse", {"lat": lat, "lon": lon, "format": "json"})
     value = (data.get("results") or [{}])[0]
     return {**geoapify_reverse_result(value, lat, lon), "source": "geoapify_reverse"}, value.get("result_type")
 
 
+def _mapbox_candidates(lat, lon, radius):
+    return mapbox_candidates(mapbox_request("/search/searchbox/v1/reverse", {
+        "longitude": lon, "latitude": lat, "types": "poi", "limit": 10}), lat, lon, radius)
+
+
 def _mapbox_lookup(lat, lon, radius):
     try:
-        result = mapbox_nearest_result(mapbox_request("/search/searchbox/v1/reverse", {
-            "longitude": lon, "latitude": lat, "types": "poi", "limit": 10}), lat, lon, radius)
+        candidates = _mapbox_candidates(lat, lon, radius)
     except (OSError, TypeError, KeyError, ValueError):
-        result = None
-    if result is not None:
-        return result, "place"
+        candidates = []
+    if candidates:
+        return {**candidates[0], "lat": lat, "lon": lon, "result_type": "place"}, "place"
     data = mapbox_request("/search/searchbox/v1/reverse", {
         "longitude": lon, "latitude": lat, "types": "address,street", "limit": 1})
     feature = (data.get("features") or [None])[0]
@@ -1584,6 +1681,64 @@ def _mapbox_lookup(lat, lon, radius):
     place = mapbox_place(feature)
     return {**place, "name": place["address"] or place["name"], "place_name": "", "lat": lat, "lon": lon,
             "source": "mapbox_searchbox"}, place["result_type"]
+
+
+def _provider_cache_key(name):
+    # Versions the reverse cache and keeps providers apart. Geoapify v2 drops
+    # lookups made with the single mixed-category request, which cached
+    # street addresses where named places existed.
+    return {"photon": "photon:nearest-v1:" + os.environ.get("GEOTRACKER_PHOTON_URL", "").rstrip("/"),
+            "geoapify": "geoapify:nearest-v2", "mapbox": "mapbox:nearest-v1"}[name]
+
+
+def nearby_places(store, lat, lon, radius_m=None, limit=15):
+    """Named places around a position, nearest first, from the provider chosen in Settings.
+
+    Used to correct a visit that was named after the wrong neighbour in a busy
+    place, and to match name-only reminders against every place close by.
+    """
+    lat, lon = float(lat), float(lon)
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        raise ValueError("invalid coordinates")
+    radius = nearest_place_radius(radius_m)
+    name = _require_provider(store)
+    key = _provider_cache_key(name) + f":candidates:r{radius}"
+    with _reverse_lock:
+        candidates = store.reverse_region(key, lat, lon)
+        if candidates is None:
+            candidates = {"photon": _photon_candidates, "geoapify": _geoapify_candidates,
+                          "mapbox": _mapbox_candidates}[name](lat, lon, radius)
+            store.save_reverse_region(key, lat, lon, 15, candidates)
+    places = []
+    for place in candidates:
+        if place.get("place_lat") is not None and place.get("place_lon") is not None:
+            place = {**place, "distance_m": round(metres(lat, lon, place["place_lat"], place["place_lon"]))}
+        places.append(place)
+    places.sort(key=lambda place: (place.get("distance_m") is None, place.get("distance_m") or 0))
+    return places[:max(1, min(int(limit), 50))]
+
+
+def search_text(value):
+    """Lowercase words; apostrophes vanish so "Sam's" matches "sams" and "McDonald's" "mcdonalds"."""
+    text = re.sub(r"['’`]", "", str(value or "").casefold())
+    return " ".join(re.sub(r"[^\w]+", " ", text).split())
+
+
+def name_matches(pattern, name):
+    """Whether a place name matches what a reminder asked for.
+
+    Every word of the pattern must start a word of the name ("star" finds
+    "Starbucks Coffee") or, for words of four letters or more, be a close
+    spelling of one ("starbuks", "walgreens" for "Walgreen Co").
+    """
+    wanted, words = search_text(pattern).split(), search_text(name).split()
+    if not wanted or not words:
+        return False
+    def close(term):
+        return any(word.startswith(term)
+                   or (len(term) >= 4 and difflib.SequenceMatcher(None, term, word).ratio() >= 0.8)
+                   for word in words)
+    return all(close(term) for term in wanted)
 
 
 def reverse_geocode(store, lat, lon, radius_m=None):
@@ -1601,11 +1756,7 @@ def reverse_geocode(store, lat, lon, radius_m=None):
         raise ValueError("invalid coordinates")
     radius = nearest_place_radius(radius_m)
     name = _require_provider(store)
-    # The provider key versions the cache and keeps providers and radii apart.
-    # Geoapify v2 drops lookups made with the single mixed-category request,
-    # which cached street addresses where named places existed.
-    provider = {"photon": "photon:nearest-v1:" + os.environ.get("GEOTRACKER_PHOTON_URL", "").rstrip("/"),
-                "geoapify": "geoapify:nearest-v2", "mapbox": "mapbox:nearest-v1"}[name] + f":r{radius}"
+    provider = _provider_cache_key(name) + f":r{radius}"
     # A lock coalesces simultaneous browser/MCP requests within this process.
     with _reverse_lock:
         cached = store.reverse_region(provider, lat, lon)

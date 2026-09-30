@@ -11,7 +11,7 @@ TABLES = {
     "points": "id source external_id timestamp lat lon accuracy_m speed_mps speed_origin mode",
     "point_observations": "id point_id legacy_point_id source timestamp lat lon accuracy_m speed_mps speed_origin received_at fingerprint",
     "places": "id name lat lon radius_m address category provider_place_id saved",
-    "reminders": "id text place_id active repeat cooldown_minutes created_at last_triggered_at cancelled_at destination_name destination_address destination_category destination_provider_place_id",
+    "reminders": "id text place_id active repeat cooldown_minutes created_at last_triggered_at cancelled_at destination_name destination_address destination_category destination_provider_place_id match_name",
     "events": "id reminder_id point_id triggered_at webhook_status",
     "source_state": "source point_id",
     "observed_stays": "id source start_point_id end_point_id started_at ended_at lat lon point_count ongoing",

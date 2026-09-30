@@ -11,7 +11,7 @@ from importlib.resources import files
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from .core import PLACES_PROVIDERS, Store, configured_places_providers, current_location, deliver_webhook, geocode, places_provider, reverse_geocode
+from .core import PLACES_PROVIDERS, Store, configured_places_providers, current_location, deliver_webhook, geocode, nearby_places, places_provider, reverse_geocode
 from .analysis import daily_overview, day_summary, finalize_previous_day, insights, place_patterns, predict_next, resolve_place_patterns, search_visits, stays, transitions, visited_places
 from .mcp import SUPPORTED_VERSIONS, dispatch
 from .postgres import INTEGRITY_ERRORS
@@ -187,6 +187,7 @@ class Handler(BaseHTTPRequestHandler):
             elif url.path == "/api/events": value = store.events(q.get("since_id", 0), q.get("limit", 100))
             elif url.path == "/api/geocode": value = geocode(store, q.get("q", ""), q.get("lat"), q.get("lon"))
             elif url.path == "/api/reverse": value = reverse_geocode(store, q["lat"], q["lon"], q.get("radius_m"))
+            elif url.path == "/api/nearby-places": value = nearby_places(store, q["lat"], q["lon"], q.get("radius_m"), q.get("limit", 15))
             elif url.path == "/api/export.geojson": value = store.export_geojson(q.get("start"), q.get("end"))
             else:
                 self.error_json(404, "not found"); return

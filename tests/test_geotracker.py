@@ -11,7 +11,7 @@ from email.message import Message
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from geotracker.core import Store, classify_motion, current_location, deliver_webhook, geocode, mode_for, places_provider, places_provider_identity, reverse_cache_radius, reverse_geocode, route_segments_from_points, smooth_route_segment
+from geotracker.core import Store, classify_motion, current_location, deliver_webhook, geocode, mode_for, name_matches, nearby_places, places_provider, places_provider_identity, reverse_cache_radius, reverse_geocode, route_segments_from_points, smooth_route_segment
 from geotracker.analysis import daily_overview, day_summary, insights, place_patterns, predict_next, resolve_place_patterns, search_visits, stays, transitions, visited_places
 
 
@@ -968,7 +968,7 @@ class StoreTests(unittest.TestCase):
         migrated = Store(path)
         try:
             self.assertEqual(stays(migrated), [])
-            self.assertEqual(migrated.db.execute("PRAGMA user_version").fetchone()[0], 12)
+            self.assertEqual(migrated.db.execute("PRAGMA user_version").fetchone()[0], 13)
         finally:
             migrated.close()
 
@@ -1197,6 +1197,127 @@ class StoreTests(unittest.TestCase):
         day, _found, _overview = self.campus_day([still(CAMPUS, 90), line(CAMPUS, LAB, 1), still(LAB, 80)])
         self.assertEqual([move["mode"] for move in day["stays"][1]["internal_moves"]], ["walking"])
 
+    def test_one_daily_summary_per_date_in_the_configured_timezone(self):
+        self.store.save_settings({"timezone": "UTC"})
+        self.store.ingest(minute_fixes([still(HOME, 30)], start=datetime(2026, 9, 27, 13, tzinfo=timezone.utc)))
+        daily_overview(self.store, "2026-09-27")
+        # An agent asking in another zone or for one source gets an answer, but no second record.
+        other_zone = daily_overview(self.store, "2026-09-27", "America/Chicago")
+        one_source = daily_overview(self.store, "2026-09-27", source="phone")
+        self.assertEqual((other_zone["timezone"], one_source["source"]), ("America/Chicago", "phone"))
+        self.assertEqual([(row["date"], row["timezone"], row["source"]) for row in self.store.daily_overviews()],
+                         [("2026-09-27", "UTC", None)])
+        self.assertEqual(self.store.db.execute("SELECT COUNT(*) AS n FROM daily_summaries").fetchone()["n"], 1)
+        # Changing the timezone drops summaries stored for the old one.
+        self.store.save_settings({"timezone": "America/Chicago"})
+        self.assertEqual(self.store.daily_overviews(), [])
+        daily_overview(self.store, "2026-09-27")
+        self.assertEqual([row["timezone"] for row in self.store.daily_overviews()], ["America/Chicago"])
+
+    def test_upgrade_removes_duplicate_daily_summaries_and_keeps_reminders(self):
+        path = Path(self.tmp.name) / "before-name-reminders.db"
+        archive = Store(path)
+        archive.save_settings({"timezone": "UTC"})
+        place = archive.save_place({"name": "Market", "lat": 41, "lon": -87.9})
+        reminder = archive.create_reminder({"text": "Buy salt", "place_id": place["id"]})
+        archive.ingest({"source": "phone", "timestamp": "2026-09-27T10:00:00Z", "lat": 41, "lon": -87.9})
+        point_id = archive.points()[0]["id"]
+        archive.db.execute("INSERT INTO events(reminder_id,point_id,triggered_at) VALUES (?,?,?)",
+                           (reminder["id"], point_id, "2026-09-27T10:00:00+00:00"))
+        for zone, source in (("UTC", ""), ("America/Chicago", ""), ("UTC", "phone")):
+            archive.db.execute("""INSERT INTO daily_summaries(summary_date,timezone,source,watermark,points,distance_km,
+                trip_count,place_count,reminder_count,summary,created_at,updated_at) VALUES (?,?,?,?,0,0,0,0,0,'{}',?,?)""",
+                ("2026-09-27", zone, source, "w", "2026-09-28T00:00:00+00:00", "2026-09-28T00:00:00+00:00"))
+        # Recreate the pre-v13 reminders table, where place_id could not be empty.
+        archive.db.commit()
+        archive.db.execute("PRAGMA foreign_keys=OFF")
+        archive.db.execute("""CREATE TABLE reminders_legacy (id INTEGER PRIMARY KEY, text TEXT NOT NULL,
+            place_id INTEGER NOT NULL REFERENCES places(id), active INTEGER NOT NULL DEFAULT 1,
+            repeat INTEGER NOT NULL DEFAULT 0, cooldown_minutes INTEGER NOT NULL DEFAULT 1440,
+            created_at TEXT NOT NULL, last_triggered_at TEXT, cancelled_at TEXT, destination_name TEXT,
+            destination_address TEXT, destination_category TEXT, destination_provider_place_id TEXT,
+            FOREIGN KEY(place_id) REFERENCES places(id))""")
+        archive.db.execute("""INSERT INTO reminders_legacy SELECT id,text,place_id,active,repeat,cooldown_minutes,created_at,
+            last_triggered_at,cancelled_at,destination_name,destination_address,destination_category,
+            destination_provider_place_id FROM reminders""")
+        archive.db.execute("DROP TABLE reminders")
+        archive.db.execute("ALTER TABLE reminders_legacy RENAME TO reminders")
+        archive.db.execute("PRAGMA user_version=12")
+        archive.db.commit()
+        archive.close()
+        migrated = Store(path)
+        try:
+            self.assertEqual([(row["timezone"], row["source"]) for row in migrated.daily_overviews()], [("UTC", None)])
+            self.assertEqual(migrated.db.execute("SELECT COUNT(*) AS n FROM daily_summaries").fetchone()["n"], 1)
+            self.assertEqual([item["text"] for item in migrated.reminders()], ["Buy salt"])
+            self.assertEqual(len(migrated.events()), 1)
+            self.assertEqual(migrated.db.execute("PRAGMA foreign_key_check").fetchall(), [])
+            named = migrated.create_reminder({"text": "Get beans", "match_name": "Starbucks"})
+            self.assertIsNone(named["place_id"])
+        finally:
+            migrated.close()
+
+    def test_name_only_reminder_fires_after_a_short_stop_near_a_matching_place(self):
+        reminder = self.store.create_reminder({"text": "Get coffee beans", "match_name": "starbuks"})
+        self.assertEqual((reminder["place_name"], reminder["match_name"], reminder["place_id"]), ("starbuks", "starbuks", None))
+        cafe = shifted(HOME, 5000, 0)
+        nearby = [{"name": "Chipotle Mexican Grill", "distance_m": 12}, {"name": "Starbucks Coffee", "distance_m": 40},
+                  {"name": "Starbucks Reserve", "distance_m": 400}]
+        start = datetime.now(timezone.utc) - timedelta(minutes=20)
+        fixes = minute_fixes([line(HOME, cafe, 10), still(cafe, 8)], start=start)
+        events = []
+        with patch("geotracker.analysis.nearby_places", return_value=nearby) as lookup:
+            for fix in fixes[:12]:  # two minutes still: not yet
+                events += self.store.ingest(fix)["events"]
+            self.assertEqual(events, [])
+            for fix in fixes[12:]:
+                events += self.store.ingest(fix)["events"]
+        self.assertEqual([(event["text"], event["place"]) for event in events], [("Get coffee beans", "Starbucks Coffee")])
+        self.assertEqual(lookup.call_count, 1)  # looked up once per stop, not on every poll
+        self.assertEqual(self.store.reminders(), [])
+        history = self.store.reminder_history()[0]
+        self.assertEqual((history["status"], history["place_name"]), ("triggered", "starbuks"))
+        self.assertEqual(self.store.events()[0]["place_name"], "starbuks")
+
+    def test_name_only_reminder_ignores_other_places_and_old_data(self):
+        self.store.create_reminder({"text": "Get coffee beans", "match_name": "Starbucks"})
+        with patch("geotracker.analysis.nearby_places", return_value=[{"name": "Dunkin'", "distance_m": 5}]):
+            start = datetime.now(timezone.utc) - timedelta(minutes=10)
+            events = self.store.ingest(minute_fixes([still(HOME, 6)], start=start))["events"]
+        self.assertEqual(events, [])
+        with patch("geotracker.analysis.nearby_places", return_value=[{"name": "Starbucks", "distance_m": 5}]) as lookup:
+            old = self.store.ingest(minute_fixes([still(HOME, 6)], source="old", start=datetime(2026, 1, 1, tzinfo=timezone.utc)))
+        self.assertEqual((old["events"], lookup.call_count), ([], 0))
+        self.assertEqual(len(self.store.reminders()), 1)
+
+    def test_place_name_matching_tolerates_spelling_and_punctuation(self):
+        self.assertTrue(name_matches("starbucks", "Starbucks Coffee"))
+        self.assertTrue(name_matches("starbuks", "STARBUCKS #1234"))
+        self.assertTrue(name_matches("mcdonalds", "McDonald's"))
+        self.assertTrue(name_matches("chick fil a", "Chick-fil-A"))
+        self.assertTrue(name_matches("walgreens", "Walgreen Co"))
+        self.assertFalse(name_matches("starbucks", "Dunkin'"))
+        self.assertFalse(name_matches("target", "Walmart Supercenter"))
+        self.assertFalse(name_matches("  ", "Starbucks"))
+
+    def test_nearby_places_lists_candidates_nearest_first_and_caches_them(self):
+        everyday = {"features": [
+            {"properties": {"name": "Chipotle", "categories": ["catering.restaurant"], "distance": 12, "lat": 41.0001, "lon": -87.9}},
+            {"properties": {"name": "Bank ATM", "categories": ["service.financial.atm"], "distance": 3, "lat": 41, "lon": -87.9}},
+        ]}
+        travel = {"features": [{"properties": {"name": "Hampton Inn", "categories": ["accommodation.hotel"], "distance": 90,
+                                               "lat": 41.0008, "lon": -87.9}}]}
+        responses = lambda path, params: travel if "accommodation" in params["categories"] else everyday
+        with patch.dict(os.environ, {"GEOAPIFY_API_KEY": "test", "GEOTRACKER_PHOTON_URL": "", "MAPBOX_ACCESS_TOKEN": ""}), \
+                patch("geotracker.core.provider_request", side_effect=responses) as request:
+            places = nearby_places(self.store, 41, -87.9, 250)
+            again = nearby_places(self.store, 41.00005, -87.9, 250)
+        self.assertEqual([place["name"] for place in places], ["Chipotle", "Hampton Inn"])
+        self.assertEqual(places[0]["distance_m"], 11)
+        self.assertEqual(request.call_count, 2)
+        self.assertEqual([place["name"] for place in again], ["Chipotle", "Hampton Inn"])
+        self.assertEqual(request.call_args_list[0].args[1]["filter"], "circle:-87.9,41.0,300")
+
     def test_parked_out_and_back_run_is_one_visit(self):
         trail = shifted(HOME, 15000, 0)
         turn = shifted(trail, 0, 3000)
@@ -1254,7 +1375,7 @@ class StoreTests(unittest.TestCase):
         migrated = Store(path)
         try:
             self.assertEqual([row["kind"] for row in reversed(stays(migrated, limit=None))], ["stationary", "area", "stationary"])
-            self.assertEqual(migrated.db.execute("PRAGMA user_version").fetchone()[0], 12)
+            self.assertEqual(migrated.db.execute("PRAGMA user_version").fetchone()[0], 13)
         finally:
             migrated.close()
 
