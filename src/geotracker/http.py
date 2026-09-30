@@ -182,7 +182,7 @@ class Handler(BaseHTTPRequestHandler):
             elif url.path == "/api/reminder-history": value = store.reminder_history(q.get("limit", 200))
             elif url.path == "/api/events": value = store.events(q.get("since_id", 0), q.get("limit", 100))
             elif url.path == "/api/geocode": value = geocode(store, q.get("q", ""), q.get("lat"), q.get("lon"))
-            elif url.path == "/api/reverse": value = reverse_geocode(store, q["lat"], q["lon"])
+            elif url.path == "/api/reverse": value = reverse_geocode(store, q["lat"], q["lon"], q.get("radius_m"))
             elif url.path == "/api/export.geojson": value = store.export_geojson(q.get("start"), q.get("end"))
             else:
                 self.error_json(404, "not found"); return

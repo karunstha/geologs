@@ -635,44 +635,51 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(second["address"], "Market Street")
             self.assertEqual(request.call_count, 2)
 
-    def test_geoapify_place_details_wins_and_nearby_lookup_uses_cache(self):
-        response = {"features": [
-            {"geometry": {"type": "Polygon", "coordinates": []},
-             "properties": {"feature_type": "details", "name": "War Memorial Park",
-                            "formatted": "War Memorial Park, Little Rock",
-                            "categories": ["leisure.park"], "place_id": "park"}},
+    def test_nearest_named_place_from_places_api_names_a_position(self):
+        places = {"features": [
+            {"properties": {"name": "Bank ATM", "categories": ["service.financial.atm"], "distance": 12}},
+            {"properties": {"name": "Costco Wholesale", "formatted": "Costco Wholesale, 1 Warehouse Way",
+                            "categories": ["commercial", "commercial.supermarket"], "place_id": "costco", "distance": 48}},
+            {"properties": {"name": "Costco Gasoline", "categories": ["commercial.gas"], "place_id": "gas", "distance": 140}},
         ]}
         env = {"GEOAPIFY_API_KEY": "test", "GEOTRACKER_PHOTON_URL": ""}
-        with patch.dict(os.environ, env), patch("geotracker.core.provider_request", return_value=response) as request:
+        with patch.dict(os.environ, env), patch("geotracker.core.provider_request", return_value=places) as request:
             result = reverse_geocode(self.store, 34.749, -92.332)
             cached = reverse_geocode(self.store, 34.74903, -92.332)
-        self.assertEqual(result["place_name"], "War Memorial Park")
-        self.assertEqual(result["address"], "War Memorial Park, Little Rock")
-        self.assertEqual(result["provider_place_id"], "park")
-        self.assertEqual(result["source"], "geoapify_place_details")
-        self.assertEqual(result["cache"], "provider")
-        self.assertEqual(cached["cache"], "region")
-        self.assertTrue(cached["approximate"])
-        self.assertEqual(request.call_count, 1)
-        path, params = request.call_args.args
-        self.assertEqual(path, "/v2/place-details")
-        self.assertEqual(params, {"lat": 34.749, "lon": -92.332, "features": "details"})
+            wider = reverse_geocode(self.store, 34.749, -92.332, radius_m=515)
+        self.assertEqual((result["name"], result["place_name"]), ("Costco Wholesale", "Costco Wholesale"))
+        self.assertEqual(result["address"], "Costco Wholesale, 1 Warehouse Way")
+        self.assertEqual((result["category"], result["provider_place_id"], result["distance_m"]), ("commercial.supermarket", "costco", 48))
+        self.assertEqual((cached["cache"], cached["approximate"]), ("region", True))
+        # Each search radius is its own lookup: an area stay searches its whole extent.
+        self.assertEqual(wider["cache"], "provider")
+        self.assertEqual(request.call_count, 2)
+        path, params = request.call_args_list[0].args
+        self.assertEqual(path, "/v2/places")
+        self.assertEqual((params["filter"], params["bias"], params["conditions"], params["limit"]),
+                         ("circle:-92.332,34.749,150", "proximity:-92.332,34.749", "named", 20))
+        self.assertNotIn("highway", params["categories"].split(","))
+        self.assertEqual(request.call_args_list[1].args[1]["filter"], "circle:-92.332,34.749,600")
 
-    def test_unnamed_geoapify_place_details_falls_back_to_reverse_address(self):
-        details = {"features": [
-            {"geometry": {"type": "Polygon", "coordinates": []},
-             "properties": {"feature_type": "details", "formatted": "Unnamed nearby object"}},
-        ]}
-        reverse = {"results": [{"formatted": "5511 West Markham Street, Little Rock, AR",
-                                  "result_type": "building"}]}
-        responses = lambda path, params: details if path == "/v2/place-details" else reverse
+    def test_no_named_place_nearby_falls_back_to_the_address(self):
+        reverse = {"results": [{"formatted": "5511 West Markham Street, Little Rock, AR", "result_type": "building"}]}
+        responses = lambda path, params: {"features": []} if path == "/v2/places" else reverse
         env = {"GEOAPIFY_API_KEY": "test", "GEOTRACKER_PHOTON_URL": ""}
         with patch.dict(os.environ, env), patch("geotracker.core.provider_request", side_effect=responses) as request:
             result = reverse_geocode(self.store, 34.749, -92.332)
         self.assertEqual(result["name"], "5511 West Markham Street, Little Rock, AR")
         self.assertEqual(result["place_name"], "")
         self.assertEqual(result["source"], "geoapify_reverse")
-        self.assertEqual([call.args[0] for call in request.call_args_list], ["/v2/place-details", "/v1/geocode/reverse"])
+        self.assertEqual([call.args[0] for call in request.call_args_list], ["/v2/places", "/v1/geocode/reverse"])
+
+    def test_photon_searches_its_radius_and_skips_streets(self):
+        street = {"geometry": {"coordinates": [-87.9, 41]}, "properties": {"name": "Main Street", "osm_key": "highway"}}
+        cafe = {"geometry": {"coordinates": [-87.9, 41.0003]}, "properties": {"name": "Corner Cafe", "osm_key": "amenity", "osm_value": "cafe"}}
+        with patch.dict(os.environ, {"GEOTRACKER_PHOTON_URL": "http://127.0.0.1:2322"}), \
+                patch("geotracker.core.json_get", return_value={"features": [street, cafe]}) as request:
+            result = reverse_geocode(self.store, 41, -87.9, radius_m=250)
+        self.assertEqual(result["name"], "Corner Cafe")
+        self.assertIn("radius=0.3", request.call_args.args[0])
 
     def test_geoapify_reverse_prefers_place_name_and_keeps_address(self):
         response = {"results": [{"name": "War Memorial Park",
@@ -977,7 +984,7 @@ class StoreTests(unittest.TestCase):
         label = {"name": "Costco Wholesale", "address": "", "category": "commercial.supermarket",
                  "categories": ["commercial.supermarket"], "provider_place_id": "costco"}
         home = {"name": "Home Street", "address": "", "category": "", "categories": [], "provider_place_id": "home"}
-        def resolve(_store, lat, lon):
+        def resolve(_store, lat, lon, _radius=None):
             return label if lon > HOME[1] + .01 else home
         with patch("geotracker.analysis.place_for_coordinate", side_effect=resolve):
             found = search_visits(self.store, "costco", timezone_name="UTC")
@@ -1076,6 +1083,37 @@ class StoreTests(unittest.TestCase):
         process_stays_rebuild(self.store)
         self.assertEqual([(row["started_at"], row["went_elsewhere"]) for row in stays(self.store, limit=None)], live)
 
+    def test_place_is_named_at_the_sample_weighted_average_of_its_stays(self):
+        def row(id_, east, count, radius=None):
+            lat, lon = shifted(CAMPUS, east, 0)
+            return {"id": id_, "source": "phone", "lat": lat, "lon": lon, "place_id": None, "radius_m": radius,
+                    "activity": None, "started_at": f"2026-09-2{id_}T10:00:00+00:00", "ended_at": f"2026-09-2{id_}T11:00:00+00:00",
+                    "observed_minutes": 60, "point_count": count}
+        clusters, mapping = place_patterns(self.store, rows=[row(1, 0, 10), row(2, 60, 30)])
+        self.assertEqual(len(clusters), 1)
+        self.assertLess(metres_from(clusters[0], shifted(CAMPUS, 45, 0)), 1)
+        self.assertEqual(clusters[0]["extent_m"], 45)
+        self.assertNotIn("_members", clusters[0])
+        with patch("geotracker.analysis.place_for_coordinate", return_value={"name": "University"}) as lookup:
+            resolve_place_patterns(self.store, (clusters, mapping))
+        lat, lon, radius = lookup.call_args.args[1:]
+        self.assertEqual(round(lat, 6), round(clusters[0]["lat"], 6))
+        self.assertEqual(radius, 45)
+
+    def test_round_trip_names_where_it_stopped(self):
+        store = shifted(HOME, 4000, 0)
+        self.store.ingest(minute_fixes([still(HOME, 30), line(HOME, store, 8), still(store, 8), line(store, HOME, 8), still(HOME, 30)]))
+        with patch("geotracker.analysis.place_for_coordinate", side_effect=campus_label):
+            day = day_summary(self.store, "2026-09-27", "UTC")
+        trip = day["trips"][0]
+        self.assertTrue(trip["loop"])
+        self.assertEqual((trip["turnaround"]["name"], trip["turnaround"]["stop_minutes"]), ("Taco Place", 8))
+        self.assertAlmostEqual(trip["turnaround"]["distance_m"], 4000, delta=20)
+
+    def test_short_fast_looking_move_within_a_place_is_walking(self):
+        day, _found, _overview = self.campus_day([still(CAMPUS, 90), line(CAMPUS, LAB, 1), still(LAB, 80)])
+        self.assertEqual([move["mode"] for move in day["stays"][1]["internal_moves"]], ["walking"])
+
     def test_parked_out_and_back_run_is_one_visit(self):
         trail = shifted(HOME, 15000, 0)
         turn = shifted(trail, 0, 3000)
@@ -1104,7 +1142,7 @@ class StoreTests(unittest.TestCase):
                            "categories": ["commercial.supermarket"], "provider_place_id": "costco"},
                   club: {"name": "Sam's Club", "address": "9 Depot Road", "category": "commercial.supermarket",
                          "categories": ["commercial.supermarket"], "provider_place_id": "sams"}}
-        def label(_store, lat, lon):
+        def label(_store, lat, lon, _radius=None):
             return next(value for place, value in labels.items() if abs(place[0] - lat) + abs(place[1] - lon) < 1e-3)
         with patch("geotracker.analysis.place_for_coordinate", side_effect=label):
             result = search_visits(self.store, "costco", timezone_name="America/Chicago")
@@ -1142,7 +1180,7 @@ CAMPUS = shifted(HOME, 6000, 3000)
 LAB = shifted(CAMPUS, 400, 0)
 
 
-def campus_label(_store, lat, lon):
+def campus_label(_store, lat, lon, _radius=None):
     from geotracker.core import metres
     if metres(lat, lon, *CAMPUS) < 1500:
         return {"name": "University", "address": "Campus", "category": "education.university",

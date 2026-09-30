@@ -156,7 +156,7 @@ def classify_motion(moves):
     DRIVING_MIN_DISTANCE_M before they can mean a drive; a device-reported
     speed is trusted over any distance.
     """
-    samples, reported_fast = [], 0.0
+    samples, reported_fast, reported_any = [], 0.0, False
     for distance, seconds, reported, *uncertainty in moves:
         if seconds <= 0 or distance < 10:
             continue
@@ -164,6 +164,7 @@ def classify_motion(moves):
         samples.append((speed * 3.6, distance))
         if (reported or 0) * 3.6 >= 35:
             reported_fast += distance
+        reported_any = reported_any or reported is not None
     if not samples:
         return None
     total = sum(distance for _, distance in samples)
@@ -179,7 +180,8 @@ def classify_motion(moves):
     else:
         mode = "walking"
     moving_seconds = sum(move[1] for move in moves if move[1] > 0 and move[0] >= 10)
-    return {"mode": mode, "median_kmh": round(median, 1), "distance_m": total, "moving_seconds": moving_seconds}
+    return {"mode": mode, "median_kmh": round(median, 1), "distance_m": total, "moving_seconds": moving_seconds,
+            "speed_reported": reported_any}
 
 
 def _corridor_distance(point, origin, destination):
@@ -217,6 +219,30 @@ def went_elsewhere_between(points, origin, destination):
         return False
     span = datetime.fromisoformat(away[-1]["timestamp"]) - datetime.fromisoformat(away[0]["timestamp"])
     return span.total_seconds() >= AWAY_MIN_SECONDS
+
+
+def trip_turnaround(points, origin):
+    """Where a round trip went: its longest stop of two minutes or more, else its farthest fix."""
+    usable = [point for point in points if point["accuracy_m"] is None or point["accuracy_m"] <= 100]
+    best, index = None, 0
+    while index < len(usable):
+        end = index
+        while end + 1 < len(usable) and metres(usable[index]["lat"], usable[index]["lon"],
+                                               usable[end + 1]["lat"], usable[end + 1]["lon"]) <= 60:
+            end += 1
+        seconds = (datetime.fromisoformat(usable[end]["timestamp"]) - datetime.fromisoformat(usable[index]["timestamp"])).total_seconds()
+        if seconds >= 120 and (best is None or seconds > best[0]):
+            best = (seconds, index, end)
+        index = end + 1
+    if best:
+        seconds, first, last = best
+        stop = usable[first:last + 1]
+        return {"lat": sum(point["lat"] for point in stop) / len(stop), "lon": sum(point["lon"] for point in stop) / len(stop),
+                "stop_minutes": round(seconds / 60, 1), "arrived_at": stop[0]["timestamp"],
+                "distance_m": round(metres(origin["lat"], origin["lon"], stop[0]["lat"], stop[0]["lon"]))}
+    farthest = max(usable or points, key=lambda point: metres(origin["lat"], origin["lon"], point["lat"], point["lon"]))
+    return {"lat": farthest["lat"], "lon": farthest["lon"], "stop_minutes": 0, "arrived_at": farthest["timestamp"],
+            "distance_m": round(metres(origin["lat"], origin["lon"], farthest["lat"], farthest["lon"]))}
 
 
 def is_excursion(trip):
@@ -304,7 +330,8 @@ def trips_between_stays(points, stay_rows, start=None, end=None):
                 "source": source, "distance_km": round(motion["distance_m"] / 1000, 2),
                 "duration_minutes": round((arrival - departure).total_seconds() / 60, 1),
                 "moving_minutes": round(motion["moving_seconds"] / 60, 1),
-                "median_kmh": motion["median_kmh"], "max_excursion_m": max(0, round(excursion)),
+                "median_kmh": motion["median_kmh"], "speed_reported": motion["speed_reported"],
+                "max_excursion_m": max(0, round(excursion)),
                 "mode": motion["mode"], "modes": {motion["mode"]: len(moves)}, "loop": loop,
                 "went_elsewhere": None if left is None else bool(left),
                 "from_stay_id": origin["id"], "to_stay_id": destination["id"],
@@ -316,6 +343,8 @@ def trips_between_stays(points, stay_rows, start=None, end=None):
             # Two stays at one spot joined by drift or a GPS jump are one visit, not a trip.
             if loop and not is_excursion(trip):
                 continue
+            # Named only for round trips, where it says where you went.
+            trip["turnaround"] = trip_turnaround(trip_points[1:-1] or trip_points, origin)
             route_segments = [smooth_route_segment(segment) for segment in route_segments_from_points(trip_points)]
             trip.update({"route_segments": route_segments,
                          "coordinates": route_segments[0] if len(route_segments) == 1 else [],
@@ -693,7 +722,7 @@ class Store:
                 AND (cancelled_at IS NULL OR cancelled_at>?)) ORDER BY id""",
             (parse_time(start), parse_time(end), parse_time(start), parse_time(end),
              parse_time(start), parse_time(end), parse_time(end), parse_time(end), parse_time(end)))
-        value = ["stay-trips-v4", self.analysis_watermark(start, end, source), event_row["count"], event_row["max_id"], places, reminders]
+        value = ["stay-trips-v5", self.analysis_watermark(start, end, source), event_row["count"], event_row["max_id"], places, reminders]
         return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
     def stored_daily_overview(self, date, timezone_name, source=None, watermark=None):
@@ -1292,29 +1321,47 @@ def geoapify_reverse_result(value, lat, lon):
             "distance_m": value.get("distance")}
 
 
-def geoapify_place_details_result(data, lat, lon):
-    """Extract a named place from a coordinate based Place Details response."""
+# Place types a person visits. Roads, parking, transit stops, boundaries, and
+# street furniture would otherwise be "nearest" to almost every stay.
+NEAREST_PLACE_CATEGORIES = ",".join((
+    "accommodation", "activity", "adult", "airport", "beach", "building", "camping", "catering", "childcare",
+    "commercial", "education", "emergency", "entertainment", "healthcare", "heritage", "leisure", "memorial",
+    "national_park", "natural", "office", "pet", "production", "religion", "rental", "service", "ski", "sport",
+    "tourism"))
+SKIPPED_PLACE_SUFFIXES = (".atm", ".vending_machine", ".charging_station", ".bicycle_parking", ".post_box")
+# Search radii, smallest first. A stay's averaged position is searched within
+# the smallest radius that covers its extent; 150 m covers a big-box store
+# seen from its parking lot. Buckets keep the reverse cache reusable.
+NEAREST_PLACE_RADII_M = (150, 300, 600, 1000)
+PHOTON_UNNAMED_KEYS = ("highway", "boundary", "place", "railway", "landuse", "waterway", "power")
+
+
+def nearest_place_radius(extent_m=None):
+    """Search radius for a position whose samples spread over `extent_m`."""
+    extent = float(extent_m or 0)
+    return next((radius for radius in NEAREST_PLACE_RADII_M if radius >= extent), NEAREST_PLACE_RADII_M[-1])
+
+
+def geoapify_nearest_result(data, lat, lon):
+    """The first named place in a distance-ordered Places API response."""
     for feature in data.get("features", []) if isinstance(data, dict) else []:
         props = feature.get("properties") if isinstance(feature, dict) else None
-        if not isinstance(props, dict) or props.get("feature_type") not in (None, "details"):
+        if not isinstance(props, dict):
             continue
         name = str(props.get("name") or "").strip()
-        datasource = props.get("datasource") if isinstance(props.get("datasource"), dict) else {}
-        raw = datasource.get("raw") if isinstance(datasource.get("raw"), dict) else {}
-        if not name:
-            name = str(raw.get("name") or "").strip()
-        if not name:
+        categories = props.get("categories") if isinstance(props.get("categories"), list) else []
+        if not name or any(str(category).endswith(SKIPPED_PLACE_SUFFIXES) for category in categories):
             continue
         address = str(props.get("formatted") or "").strip()
         if not address:
             address = ", ".join(str(props.get(key)).strip() for key in ("address_line1", "address_line2") if props.get(key))
-        categories = props.get("categories") if isinstance(props.get("categories"), list) else []
         return {
-            "name": name, "place_name": name, "address": address,
-            "lat": lat, "lon": lon,
-            "result_type": "place", "category": categories[0] if categories else None,
+            "name": name, "place_name": name, "address": address, "lat": lat, "lon": lon,
+            "result_type": "place",
+            # The deepest category ("commercial.supermarket") says the most.
+            "category": max(categories, key=lambda category: str(category).count("."), default=None),
             "categories": categories, "provider_place_id": props.get("place_id"),
-            "source": "geoapify_place_details",
+            "distance_m": props.get("distance"), "source": "geoapify_places",
         }
     return None
 
@@ -1360,17 +1407,22 @@ def geocode(store, query, lat=None, lon=None):
     return value
 
 
-def reverse_geocode(store, lat, lon):
+def reverse_geocode(store, lat, lon, radius_m=None):
+    """Name a position after the nearest named place, else its street address.
+
+    Callers pass the averaged position of a stay and, for an area stay, its
+    extent as `radius_m`. Geoapify's Places API returns named places inside the
+    search circle ordered by distance; Photon's reverse endpoint does the same
+    with a radius. Only when nothing named is nearby does the result fall back
+    to reverse geocoding, whose name is then the address.
+    """
     lat, lon = float(lat), float(lon)
     if not (-90 <= lat <= 90 and -180 <= lon <= 180):
         raise ValueError("invalid coordinates")
+    radius = nearest_place_radius(radius_m)
     photon = os.environ.get("GEOTRACKER_PHOTON_URL", "").rstrip("/")
-    # Version the reverse cache because older rows stored the formatted address
-    # as `name`, even when Geoapify supplied a named venue or amenity.
-    if photon:
-        provider = "photon:v2:" + photon
-    else:
-        provider = "geoapify:place-details-v1"
+    # The provider key versions the cache and keeps each search radius apart.
+    provider = (f"photon:nearest-v1:{photon}" if photon else "geoapify:nearest-v1") + f":r{radius}"
     # A lock coalesces simultaneous browser/MCP requests within this process.
     with _reverse_lock:
         cached = store.reverse_region(provider, lat, lon)
@@ -1378,18 +1430,25 @@ def reverse_geocode(store, lat, lon):
             approximate = metres(lat, lon, cached["lat"], cached["lon"]) > 0.5
             return {**cached, "lat": lat, "lon": lon, "cache": "region", "approximate": approximate}
         if photon:
-            data = json_get(photon + "/reverse?" + urllib.parse.urlencode({"lat": lat, "lon": lon, "limit": 1}))
-            feature = data["features"][0] if data.get("features") else None
+            data = json_get(photon + "/reverse?" + urllib.parse.urlencode(
+                {"lat": lat, "lon": lon, "radius": radius / 1000, "limit": 10}))
+            features = data.get("features") or []
+            named = next((feature for feature in features
+                          if (feature.get("properties") or {}).get("name")
+                          and (feature.get("properties") or {}).get("osm_key") not in PHOTON_UNNAMED_KEYS), None)
+            feature = named or (features[0] if features else None)
             value = photon_result(feature) if feature else {"name": "Unknown place", "place_name": "", "address": ""}
-            kind = (feature or {}).get("properties", {}).get("type") or (feature or {}).get("properties", {}).get("osm_key")
+            if named is None:
+                value["place_name"] = ""
+            kind = "place" if named else (feature or {}).get("properties", {}).get("type")
             result = {**value, "name": value.get("place_name") or value.get("address") or "Unknown place",
                       "lat": lat, "lon": lon}
         else:
             try:
-                place_data = provider_request("/v2/place-details", {
-                    "lat": lat, "lon": lon, "features": "details",
-                })
-                result = geoapify_place_details_result(place_data, lat, lon)
+                result = geoapify_nearest_result(provider_request("/v2/places", {
+                    "categories": NEAREST_PLACE_CATEGORIES, "conditions": "named",
+                    "filter": f"circle:{lon},{lat},{radius}", "bias": f"proximity:{lon},{lat}", "limit": 20,
+                }), lat, lon)
             except (OSError, TypeError, KeyError, ValueError):
                 result = None
             if result is not None:
@@ -1403,10 +1462,10 @@ def reverse_geocode(store, lat, lon):
         return {**result, "cache": "provider", "approximate": False}
 
 
-def place_for_coordinate(store, lat, lon):
-    """Return the best cached/provider place label plus its full address."""
+def place_for_coordinate(store, lat, lon, radius_m=None):
+    """Return the nearest named place (or address) plus its full address."""
     try:
-        value = reverse_geocode(store, lat, lon)
+        value = reverse_geocode(store, lat, lon, radius_m)
         return {"name": str(value.get("place_name") or value.get("name") or value.get("address") or "")[:300],
                 "address": str(value.get("address") or "")[:300],
                 "category": str(value.get("category") or "")[:160],

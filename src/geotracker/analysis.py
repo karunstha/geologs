@@ -624,7 +624,7 @@ def place_patterns(store, limit=50, rows=None):
             target = len(clusters)
             clusters.append({"cluster_id": target, "place_id": stay["place_id"], "name": place["name"] if place else None,
                              "lat": stay["lat"], "lon": stay["lon"], "visits": 0, "observed_minutes": 0,
-                             "last_seen": stay["ended_at"], "radius_m": 0, "activities": {}, "_spans": []})
+                             "last_seen": stay["ended_at"], "radius_m": 0, "activities": {}, "_spans": [], "_members": []})
             bucket_index.setdefault(key, set()).add(target)
         cluster = clusters[target]
         if radius > 75 and cluster["radius_m"] <= 75 and target not in wide_clusters:
@@ -633,6 +633,7 @@ def place_patterns(store, limit=50, rows=None):
         if stay.get("activity"):
             cluster["activities"][stay["activity"]] = cluster["activities"].get(stay["activity"], 0) + 1
         cluster["_spans"].append((stay["id"], stay.get("previous_stay_id"), stay.get("went_elsewhere")))
+        cluster["_members"].append((stay["lat"], stay["lon"], radius, max(stay.get("point_count") or 1, 1)))
         cluster["observed_minutes"] += stay["observed_minutes"]
         if stay["ended_at"] > cluster["last_seen"]:
             cluster["last_seen"] = stay["ended_at"]
@@ -640,6 +641,15 @@ def place_patterns(store, limit=50, rows=None):
     # Spans stay attached so resolve_place_patterns can recount after clusters merge.
     counts = _count_visits([(*span, index) for index, cluster in enumerate(clusters) for span in cluster["_spans"]])
     for index, cluster in enumerate(clusters):
+        # Matching used each cluster's first stay; the place itself sits at the
+        # sample-weighted average of its stays (each already the average of its
+        # fixes), and extent_m covers their spread for the place-name search.
+        members = cluster.pop("_members")
+        weight = sum(member[3] for member in members)
+        cluster["lat"] = sum(lat * count for lat, _lon, _radius, count in members) / weight
+        cluster["lon"] = sum(lon * count for _lat, lon, _radius, count in members) / weight
+        cluster["extent_m"] = round(max(metres(cluster["lat"], cluster["lon"], lat, lon) + radius
+                                        for lat, lon, radius, _count in members))
         cluster["visits"] = counts.get(index, 0)
         cluster["observed_minutes"] = round(cluster["observed_minutes"], 1)
         cluster["display_name"] = cluster["name"] or f"{cluster['lat']:.5f}, {cluster['lon']:.5f}"
@@ -665,7 +675,7 @@ def resolve_place_patterns(store, patterns):
     resolved = []
     for cluster in clusters:
         place = saved.get(cluster["place_id"])
-        found = (place if place else place_for_coordinate(store, cluster["lat"], cluster["lon"]))
+        found = (place if place else place_for_coordinate(store, cluster["lat"], cluster["lon"], cluster.get("extent_m")))
         name = cluster.get("name") or found.get("name") or found.get("address") or ""
         categories = found.get("categories") if isinstance(found.get("categories"), list) else []
         category = found.get("category") or (categories[0] if categories else "")
@@ -950,7 +960,7 @@ def day_summary(store, date, timezone_name="UTC", source=None):
     start = day_start.isoformat()
     end = (day_end - timedelta(microseconds=1)).isoformat()
     provider = "photon:" + os.environ.get("GEOTRACKER_PHOTON_URL", "") if os.environ.get("GEOTRACKER_PHOTON_URL") else "geoapify:" + str(bool(os.environ.get("GEOAPIFY_API_KEY")))
-    cache_identity = json.dumps(["day-v8", date, timezone_name, source, provider], separators=(",", ":"))
+    cache_identity = json.dumps(["day-v9", date, timezone_name, source, provider], separators=(",", ":"))
     cache_key = "day:" + hashlib.sha256(cache_identity.encode()).hexdigest()
     watermark = store.analysis_watermark(start, end, source)
     cached = store.cached_analysis(cache_key, watermark)
@@ -1000,7 +1010,7 @@ def day_summary(store, date, timezone_name="UTC", source=None):
         for before, trip, after in zip(sequence, sequence[1:], sequence[2:]):
             if trip["mode"] == "cycling" and before["mode"] == after["mode"] == "driving":
                 trip.update(mode="driving", modes={"driving": sum(trip["modes"].values())}, mode_from_context=True)
-    kept_trips, internal_moves = [], {}
+    kept_trips, internal_moves, saved_places = [], {}, store.places()
     for trip in trips:
         trip["from_name"] = stay_labels.get(trip["from_stay_id"], trip.get("from_name"))
         trip["to_name"] = stay_labels.get(trip["to_stay_id"], trip.get("to_name"))
@@ -1011,12 +1021,26 @@ def day_summary(store, date, timezone_name="UTC", source=None):
             # "to" the place you were already at. A real round trip (lunch
             # off campus, a run from home) stays; drift is dropped.
             if trip.get("went_elsewhere") is False:
-                internal_moves[(trip["from_stay_id"], trip["to_stay_id"])] = {
-                    key: trip[key] for key in ("start", "end", "mode", "distance_km", "duration_minutes", "route_segments")}
+                move = {key: trip[key] for key in ("start", "end", "mode", "distance_km", "duration_minutes", "route_segments")}
+                # Crossing a campus from sparse fixes looks fast: the phone held
+                # its last position, then jumped. Under 1 km inside one place is
+                # walking between buildings, not a ride or the car you arrived
+                # in, unless the device itself reported the speed.
+                if (move["distance_km"] < 1 and not trip.get("speed_reported")
+                        and (move["mode"] in ("running", "cycling") or trip.get("mode_from_context"))):
+                    move["mode"] = "walking"
+                internal_moves[(trip["from_stay_id"], trip["to_stay_id"])] = move
                 continue
             if not is_excursion(trip):
                 continue
             trip["loop"] = True
+        if trip.get("loop"):
+            # Say where a round trip went, so Home -> Home reads as an errand, not a glitch.
+            turnaround = trip.get("turnaround")
+            if turnaround and turnaround["stop_minutes"]:
+                saved = _matching_place(turnaround["lat"], turnaround["lon"], saved_places)
+                turnaround["name"] = (saved["name"] if saved else
+                                      place_for_coordinate(store, turnaround["lat"], turnaround["lon"]).get("name") or None)
         kept_trips.append(trip)
     trips = kept_trips
     day_stays = merge_split_visits(day_stays, lambda stay: stay.get("cluster_id"), internal_moves)
