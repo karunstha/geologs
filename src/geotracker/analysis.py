@@ -736,8 +736,11 @@ def resolve_place_patterns(store, patterns):
 
     Provider IDs are authoritative. Equal normalized names are also merged when
     their coordinates are within 2.5 km, which joins large parks and lakes while
-    keeping distant branches of a chain separate. Places with no name, only a
-    street address, merge within ADDRESS_MERGE_M on the same street.
+    keeping distant branches of a chain separate. A place with no name, only a
+    street address, joins the nearest saved place or name correction on the
+    same street within ADDRESS_MERGE_M (indoor GPS drifted out of Home's
+    circle), else other address-only places there. Two saved places never
+    merge this way.
     """
     clusters, stay_mapping = patterns
     saved = {place["id"]: place for place in store.places(enrich=True)}
@@ -755,7 +758,8 @@ def resolve_place_patterns(store, patterns):
                          "address": found.get("address") or "", "category": category or "",
                          "categories": categories, "provider_place_id": found.get("provider_place_id") or "",
                          "saved": bool(place), "label_id": cluster.get("label_id") or found.get("label_id"),
-                         "_street": None if place or label or found.get("named", True) else street_key(found.get("address"))})
+                         "_street": street_key(found.get("address")),
+                         "_anchor": bool(place or label), "_address_only": not (place or label or found.get("named", True))})
 
     parent = list(range(len(resolved)))
     def root(index):
@@ -788,12 +792,26 @@ def resolve_place_patterns(store, patterns):
                 if metres(place["lat"], place["lon"], resolved[other]["lat"], resolved[other]["lon"]) <= 2500:
                     union(index, other)
             names.setdefault(name, []).append(index)
-        street = place.get("_street")
-        if street:
-            for other in streets.get(street, []):
-                if metres(place["lat"], place["lon"], resolved[other]["lat"], resolved[other]["lon"]) <= ADDRESS_MERGE_M:
-                    union(index, other)
-            streets.setdefault(street, []).append(index)
+    # Address-only places: join the nearest saved place or correction on the
+    # same street, else other address-only places there (never bridging two
+    # saved places through an address).
+    anchors = {}
+    for index, place in enumerate(resolved):
+        if place["_anchor"] and place["_street"]:
+            anchors.setdefault(place["_street"], []).append(index)
+    for index, place in enumerate(resolved):
+        if not (place["_address_only"] and place["_street"]):
+            continue
+        nearby = [(metres(place["lat"], place["lon"], resolved[other]["lat"], resolved[other]["lon"]), other)
+                  for other in anchors.get(place["_street"], [])]
+        nearby = [item for item in nearby if item[0] <= ADDRESS_MERGE_M]
+        if nearby:
+            union(min(nearby)[1], index)
+            continue
+        for other in streets.get(place["_street"], []):
+            if metres(place["lat"], place["lon"], resolved[other]["lat"], resolved[other]["lon"]) <= ADDRESS_MERGE_M:
+                union(index, other)
+        streets.setdefault(place["_street"], []).append(index)
 
     grouped, raw_to_merged = [], {}
     by_root = {}
@@ -836,8 +854,8 @@ def resolve_place_patterns(store, patterns):
         raw_to_merged[place["cluster_id"]] = target
     counts = _count_visits([(*span, index) for index, place in enumerate(grouped) for span in place.get("_spans") or []])
     for index, place in enumerate(grouped):
-        place.pop("_weight", None)
-        place.pop("_street", None)
+        for key in ("_weight", "_street", "_anchor", "_address_only"):
+            place.pop(key, None)
         if place.pop("_spans", None) is not None:
             place["visits"] = counts.get(index, 0)
     mapping = {stay_id: raw_to_merged[cluster_id] for stay_id, cluster_id in stay_mapping.items()}
@@ -852,8 +870,19 @@ def resolve_place_patterns(store, patterns):
 
 def visited_places(store, limit=500):
     """Observed places ordered by total sampled time, with cache-first labels."""
+    return place_overview(store, limit)["visited"]
+
+
+def place_overview(store, limit=100):
+    """Visited places (without Home) and visit totals for every saved place (with Home), from one pass."""
     clusters, _ = resolve_place_patterns(store, place_patterns(store, limit=None))
-    return [item for item in clusters if not _is_home_place(item)][:min(max(int(limit), 1), 5000)]
+    saved = {}
+    for item in clusters:
+        if item.get("place_id") is not None:
+            saved[str(item["place_id"])] = {"visits": item["visits"], "observed_minutes": item["observed_minutes"],
+                                            "last_seen": item.get("last_seen")}
+    return {"visited": [item for item in clusters if not _is_home_place(item)][:min(max(int(limit), 1), 5000)],
+            "saved": saved}
 
 
 def _search_text(value):
@@ -1258,6 +1287,27 @@ def daily_overview(store, date, timezone_name=None, source=None):
              "last_fix": day["last_fix"], "coverage_gaps": day["coverage_gaps"], "coverage_note": day["coverage_note"],
              "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
     return store.save_daily_overview(value, watermark) if canonical else value
+
+
+def stored_daily_record(store, date):
+    """Exactly what the catalog holds for a date, and whether its inputs changed since.
+
+    Reading never rebuilds the record; daily_overview() does that.
+    """
+    timezone_name = store.settings()["timezone"]
+    try:
+        local_start = datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=ZoneInfo(timezone_name))
+    except ValueError as exc:
+        raise ValueError("date must be YYYY-MM-DD") from exc
+    row = store.db.execute("""SELECT summary_date,timezone,watermark,summary,created_at,updated_at FROM daily_summaries
+        WHERE summary_date=? AND timezone=? AND source=''""", (date, timezone_name)).fetchone()
+    if row is None:
+        raise ValueError(f"no summary is stored for {date} yet")
+    start = local_start.astimezone(timezone.utc).isoformat()
+    end = ((local_start + timedelta(days=1)).astimezone(timezone.utc) - timedelta(microseconds=1)).isoformat()
+    return {"date": row["summary_date"], "timezone": row["timezone"], "created_at": row["created_at"],
+            "updated_at": row["updated_at"], "stale": row["watermark"] != store.daily_overview_watermark(start, end),
+            "summary": json.loads(row["summary"])}
 
 
 def finalize_previous_day(store, now=None):

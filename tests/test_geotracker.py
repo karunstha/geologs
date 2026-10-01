@@ -12,7 +12,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from geotracker.core import Store, classify_motion, current_location, deliver_webhook, geocode, mode_for, name_matches, nearby_places, places_provider, street_key, places_provider_identity, reverse_cache_radius, reverse_geocode, route_segments_from_points, smooth_route_segment
-from geotracker.analysis import daily_overview, day_summary, insights, place_patterns, predict_next, resolve_place_patterns, search_visits, stays, transitions, visited_places
+from geotracker.analysis import daily_overview, day_summary, insights, place_overview, stored_daily_record, place_patterns, predict_next, resolve_place_patterns, search_visits, stays, transitions, visited_places
 
 
 HOME = (41.0, -87.9)
@@ -1443,6 +1443,37 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(street_key("9004 Longacre Drive, Little Rock, Arkansas 72205, United States"), "longacre drive|little rock")
         self.assertIsNone(street_key("Lake Willastein Park, Maumelle, AR"))
         self.assertIsNone(street_key("9004 Longacre Drive"))
+
+    def test_saved_home_counts_its_visits_including_gps_drift_down_the_street(self):
+        house, drifted = shifted(HOME, 4000, 0), shifted(HOME, 4170, 0)             # 170 m: outside Home's circle
+        neighbour, elsewhere = shifted(HOME, 3850, 0), shifted(HOME, 4000, 400)
+        street = ", Little Rock, Arkansas 72205, United States"
+        home = self.store.save_place({"name": "Home", "lat": house[0], "lon": house[1], "radius_m": 150, "address": "9004 Longacre Drive" + street})
+        friend = self.store.save_place({"name": "Sam's", "lat": neighbour[0], "lon": neighbour[1], "radius_m": 50, "address": "8950 Longacre Drive" + street})
+        def resolve(_store, lat, lon, _radius=None):
+            text = ("1300 Pine Street" if lat > house[0] + .002 else "9109 Longacre Drive") + street
+            return {"name": text, "named": False, "address": text, "category": "", "categories": [], "provider_place_id": ""}
+        for day, spot in ((20, house), (21, drifted), (22, house), (23, neighbour), (24, elsewhere)):
+            self.store.ingest(minute_fixes([still(spot, 120)], start=datetime(2026, 9, day, 1, tzinfo=timezone.utc)))
+        with patch("geotracker.analysis.place_for_coordinate", side_effect=resolve):
+            overview = place_overview(self.store)
+        self.assertEqual(overview["saved"][str(home["id"])]["visits"], 3)
+        self.assertEqual(overview["saved"][str(friend["id"])]["visits"], 1)
+        self.assertEqual(sorted(place["name"].split(",")[0] for place in overview["visited"]), ["1300 Pine Street", "Sam's"])
+
+    def test_stored_daily_record_shows_what_is_stored_and_when_it_is_out_of_date(self):
+        self.store.save_settings({"timezone": "UTC"})
+        self.store.ingest(minute_fixes([still(HOME, 30)], start=datetime(2026, 9, 27, 13, tzinfo=timezone.utc)))
+        with self.assertRaisesRegex(ValueError, "no summary is stored for 2026-09-27"):
+            stored_daily_record(self.store, "2026-09-27")
+        built = daily_overview(self.store, "2026-09-27")
+        record = stored_daily_record(self.store, "2026-09-27")
+        self.assertEqual((record["date"], record["timezone"], record["stale"]), ("2026-09-27", "UTC", False))
+        self.assertEqual(record["summary"], built)
+        self.store.ingest({"source": "phone", "timestamp": "2026-09-27T18:00:00Z", "lat": HOME[0], "lon": HOME[1]})
+        self.assertTrue(stored_daily_record(self.store, "2026-09-27")["stale"])
+        daily_overview(self.store, "2026-09-27")
+        self.assertFalse(stored_daily_record(self.store, "2026-09-27")["stale"])
 
     def test_parked_out_and_back_run_is_one_visit(self):
         trail = shifted(HOME, 15000, 0)

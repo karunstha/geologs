@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from .core import PLACES_PROVIDERS, Store, configured_places_providers, current_location, deliver_webhook, geocode, nearby_places, places_provider, reverse_geocode
-from .analysis import daily_overview, day_summary, finalize_previous_day, insights, place_patterns, predict_next, resolve_place_patterns, search_visits, stays, transitions, visited_places
+from .analysis import daily_overview, day_summary, finalize_previous_day, insights, place_overview, stored_daily_record, place_patterns, predict_next, resolve_place_patterns, search_visits, stays, transitions, visited_places
 from .mcp import SUPPORTED_VERSIONS, dispatch
 from .postgres import INTEGRITY_ERRORS
 
@@ -174,6 +174,7 @@ class Handler(BaseHTTPRequestHandler):
             elif url.path == "/api/stays": value = stays(store, q.get("start"), q.get("end"), q.get("source"), q.get("limit", 500))
             elif url.path == "/api/frequent-places": value = resolve_place_patterns(store, place_patterns(store, None))[0][:min(int(q.get("limit", 50)), 5000)]
             elif url.path == "/api/visited-places": value = visited_places(store, q.get("limit", 100))
+            elif url.path == "/api/place-overview": value = place_overview(store, q.get("limit", 100))
             elif url.path == "/api/visits": value = search_visits(store, q.get("q", ""), q.get("start"), q.get("end"), q.get("limit", 50), q.get("timezone"))
             elif url.path == "/api/transitions": value = transitions(store, q.get("limit", 50))
             elif url.path == "/api/predict-next": value = predict_next(store)
@@ -181,6 +182,7 @@ class Handler(BaseHTTPRequestHandler):
             elif url.path == "/api/day": value = day_summary(store, q["date"], q.get("timezone") or store.settings()["timezone"], q.get("source"))
             elif url.path == "/api/daily-summary": value = daily_overview(store, q["date"], q.get("timezone"), q.get("source"))
             elif url.path == "/api/daily-summaries": value = store.daily_overviews(q.get("start"), q.get("end"), q.get("limit", 90))
+            elif url.path == "/api/daily-summary/stored": value = stored_daily_record(store, q["date"])
             elif url.path == "/api/places": value = store.places(enrich=True)
             elif url.path == "/api/place-labels": value = store.place_labels()
             elif url.path == "/api/reminders": value = store.reminders()
