@@ -74,18 +74,25 @@ function initMap(){
     const element=event.popup.getElement();
     element?.querySelectorAll('[data-copy]').forEach(button=>button.onclick=()=>copyText(button.dataset.copy,'Coordinates copied'));
     element?.querySelectorAll('[data-edit-place]').forEach(button=>button.onclick=()=>{map.closePopup();editVisitedPlace(state.day?.places_including_home.find(place=>place.cluster_id===+button.dataset.editPlace))});
+    element?.querySelectorAll('[data-edit-stay]').forEach(button=>button.onclick=()=>{
+      map.closePopup();
+      const stay=state.day?.stays.find(item=>item.id===+button.dataset.editStay);
+      if(stay)editVisitedPlace({...stay,name:stay.display_name,cluster_id:null});
+    });
   });
   pathLayer=L.layerGroup().addTo(map);placeLayer=L.layerGroup().addTo(map);highlightLayer=L.layerGroup().addTo(map);searchLayer=L.layerGroup().addTo(map);
   map.on('click',async e=>{const q=params();q.set('lat',e.latlng.lat);q.set('lon',e.latlng.lng);q.set('radius_m',250);q.set('limit',10);try{const rows=await api('/api/near?'+q);$('map-detail-section').hidden=false;$('map-detail').innerHTML=rows.map(p=>`<div class="list-item"><div><strong>${safe(formatTime(p.timestamp))}</strong><small>${safe(modeName(p.mode))} · ${safe(kmh(p))} · ${Math.round(p.distance_m)} m away · ${safe(coordinateText(p.lat,p.lon))}</small></div></div>`).join('')||'<p class="empty">No recorded fixes within 250 m on this day.</p>'}catch(err){toast(err.message)}});
 }
 function mapPath(segment){return segment.map(c=>[c[1],c[0]])}
 function coordinateText(lat,lon){return `${Number(lat).toFixed(6)}, ${Number(lon).toFixed(6)}`}
-function pointPopup(title,lines,lat,lon,clusterId=null){
+function pointPopup(title,lines,lat,lon,edit=''){
   // Every point on the map shows its coordinates, ready to copy; visits can be renamed from here.
   const coordinates=coordinateText(lat,lon);
-  const edit=clusterId!=null?`<button type="button" class="popup-action" data-edit-place="${clusterId}">Edit place</button>`:'';
   return `<div class="map-popup"><strong>${safe(title)}</strong>${lines.filter(Boolean).map(line=>`<span>${safe(line)}</span>`).join('')}<div class="popup-actions"><button type="button" class="popup-copy" data-copy="${safe(coordinates)}" title="Copy coordinates">${safe(coordinates)}</button>${edit}</div></div>`;
 }
+// A pin stands for a place (all its visits); a selected stay is one visit's spot.
+function editPlaceAction(clusterId){return `<button type="button" class="popup-action" data-edit-place="${clusterId}">Edit place</button>`}
+function editStayAction(stayId){return `<button type="button" class="popup-action" data-edit-stay="${stayId}">Fix this visit's name</button>`}
 async function copyText(value,label='Copied'){try{await navigator.clipboard.writeText(value);toast(label)}catch(_error){toast(value)}}
 function tripKey(trip){return `${trip.from_stay_id}-${trip.to_stay_id}`}
 function stayColor(stay){return modeInfo[stay.activity]?.color||'#176d69'}
@@ -139,7 +146,7 @@ function drawMap(fit=false){
     const icon=L.divIcon({className:'visit-pin'+(number?'':' home'),html:number?String(number):placeIcons.home,iconSize:[28,28],iconAnchor:[14,14]});
     const minutes=durationText(place.observed_minutes);
     L.marker([place.lat,place.lon],{icon,title:place.name||place.display_name})
-      .bindPopup(pointPopup(place.name||place.display_name,[place.address&&place.address!==place.name?place.address:'',minutes+' · '+place.visits+' visit'+(place.visits===1?'':'s')],place.lat,place.lon,place.cluster_id)).addTo(placeLayer);
+      .bindPopup(pointPopup(place.name||place.display_name,[place.address&&place.address!==place.name?place.address:'',minutes+' · '+place.visits+' visit'+(place.visits===1?'':'s')],place.lat,place.lon,editPlaceAction(place.cluster_id))).addTo(placeLayer);
   }
   if(state.current){
     const point=state.current;
@@ -165,7 +172,7 @@ function drawSelection(zoom){
   const lines=[...(subject.route_segments||[]),...(subject.internal_moves||[]).flatMap(move=>move.route_segments||[])].map(mapPath);
   for(const line of lines){L.polyline(line,{color:'#fff',weight:10,opacity:.95,interactive:false}).addTo(highlightLayer);L.polyline(line,{color,weight:6,opacity:1,interactive:false}).addTo(highlightLayer)}
   if(item.type==='stay')L.circleMarker([item.stay.lat,item.stay.lon],{radius:item.stay.kind==='area'?6:10,color:'#fff',weight:3,fillColor:color,fillOpacity:1})
-    .bindPopup(pointPopup(item.stay.display_name||'Stay',[stayWhen(item.stay,state.day)+' · '+durationText(item.stay.observed_minutes)],item.stay.lat,item.stay.lon,item.stay.cluster_id)).addTo(highlightLayer);
+    .bindPopup(pointPopup(item.stay.display_name||'Stay',[stayWhen(item.stay,state.day)+' · '+durationText(item.stay.observed_minutes)],item.stay.lat,item.stay.lon,editStayAction(item.stay.id))).addTo(highlightLayer);
   const turn=item.type==='trip'&&item.trip.loop?item.trip.turnaround:null;
   if(turn)L.circleMarker([turn.lat,turn.lon],{radius:8,color:'#fff',weight:3,fillColor:color,fillOpacity:1})
     .bindPopup(pointPopup(turn.stop_minutes?(turn.name||'Stop'):'Farthest point',[turn.stop_minutes?`Stopped ${durationText(turn.stop_minutes)} · ${clock(turn.arrived_at)}`:clock(turn.arrived_at)],turn.lat,turn.lon)).addTo(highlightLayer);
@@ -321,44 +328,55 @@ function fillPlaceSelectors(){const select=$('reminder-place'),value=select.valu
 function toggleReminderDestination(){const choice=$('reminder-place').value,custom=choice==='other',named=choice==='named';$('reminder-custom-place').hidden=!custom;$('reminder-named-place').hidden=!named;$('reminder-match-name').required=named;for(const id of ['reminder-lat','reminder-lon'])$(id).required=custom}
 function reminderWhere(reminder){return reminder.match_name?`Any place named “${reminder.match_name}”`:reminder.place_name}
 function setReminderDestination(place){$('reminder-place-name').value=(place.name||place.place_name||'').slice(0,120);$('reminder-lat').value=place.lat??'';$('reminder-lon').value=place.lon??'';$('reminder-address').value=place.address||'';$('reminder-category').value=place.category||'';$('reminder-provider-id').value=place.provider_place_id||'';$('reminder-search-results').innerHTML=''}
-function openPlaceDialog(place={},visit=null){
-  $('place-form').reset();$('search-results').innerHTML='';$('search').value='';$('place-id').value=place.id||'';$('place-category').value=place.category||'';$('place-provider-id').value=place.provider_place_id||'';$('place-name').value=place.name||'';$('place-lat').value=place.lat??'';$('place-lon').value=place.lon??'';$('place-radius').value=place.radius_m||150;$('place-address').value=place.address||'';
-  $('place-dialog-title').textContent=visit?(place.id?'Edit place':'Name this place'):place.id?'Edit place':'Add place';
-  $('place-dialog-note').textContent=visit?'Pick where you were. It is saved at this visit, so later visits here get the same name.':'Search near your latest fix or enter coordinates.';
-  $('nearby-section').hidden=!visit;
-  if(visit)loadNearbyPlaces(visit);
-  $('place-dialog').showModal();
+function openPlaceDialog(place={}){
+  $('place-form').reset();$('search-results').innerHTML='';$('search').value='';$('place-id').value=place.id||'';$('place-category').value=place.category||'';$('place-provider-id').value=place.provider_place_id||'';$('place-name').value=place.name||'';$('place-lat').value=place.lat??'';$('place-lon').value=place.lon??'';$('place-radius').value=place.radius_m||150;$('place-address').value=place.address||'';$('place-dialog-title').textContent=place.id?'Edit place':'Add place';$('place-dialog').showModal();
 }
-function visitRadius(place){
-  // Tight enough that the shop next door keeps its own name; an area covers its extent.
-  const extent=place.extent_m||place.radius_m||0;
-  return Math.round(Math.min(1000,Math.max(50,extent?extent+25:50)));
+function metresBetween(aLat,aLon,bLat,bLon){
+  const rad=Math.PI/180,dLat=(bLat-aLat)*rad,dLon=(bLon-aLon)*rad;
+  const h=Math.sin(dLat/2)**2+Math.cos(aLat*rad)*Math.cos(bLat*rad)*Math.sin(dLon/2)**2;
+  return 12742000*Math.asin(Math.min(1,Math.sqrt(h)));
+}
+function labelTarget(place){
+  // Cover this place's visits on the day shown, or its observed extent elsewhere, with a margin.
+  const visits=(state.day?.stays||[]).filter(stay=>stay.cluster_id===place.cluster_id&&place.cluster_id!=null);
+  const reach=visits.length?Math.max(...visits.map(stay=>metresBetween(place.lat,place.lon,stay.lat,stay.lon)+(stay.radius_m||0)))
+    :(place.extent_m||place.radius_m||0);
+  return {lat:+Number(place.lat).toFixed(6),lon:+Number(place.lon).toFixed(6),radius_m:Math.round(Math.min(1000,Math.max(50,reach?reach+25:50)))};
 }
 function editVisitedPlace(place){
   if(!place)return;
-  const saved=place.place_id!=null?state.places.find(item=>item.id===place.place_id):null;
-  openPlaceDialog(saved||{name:place.name||'',lat:+Number(place.lat).toFixed(6),lon:+Number(place.lon).toFixed(6),radius_m:visitRadius(place),address:place.address||'',category:place.category||'',provider_place_id:place.provider_place_id||''},place);
+  const target=labelTarget(place);
+  state.labelEdit={...target,label_id:place.label_id||null};
+  $('label-form').reset();
+  $('label-name').value=place.name||place.display_name||'';
+  $('label-category').value=place.category||'';$('label-provider-id').value=place.provider_place_id||'';$('label-address').value=place.address||'';
+  $('label-where').textContent=`Applies to visits within ${target.radius_m} m of ${coordinateText(target.lat,target.lon)}.`;
+  $('reset-label').hidden=!place.label_id;
+  loadNearbyPlaces(target);
+  $('label-dialog').showModal();
 }
-async function loadNearbyPlaces(visit){
+async function loadNearbyPlaces(target){
   const box=$('nearby-places'),request=++loadNearbyPlaces.request;
   box.innerHTML='<p class="empty">Looking for places around this visit…</p>';
   $('nearby-note').textContent='';
   try{
-    const radius=Math.max(250,Math.round((visit.extent_m||visit.radius_m||0)+50));
-    const places=await api('/api/nearby-places?'+new URLSearchParams({lat:visit.lat,lon:visit.lon,radius_m:radius,limit:15}));
+    const radius=Math.max(250,target.radius_m+50);
+    const places=await api('/api/nearby-places?'+new URLSearchParams({lat:target.lat,lon:target.lon,radius_m:radius,limit:15}));
     if(request!==loadNearbyPlaces.request)return;
     $('nearby-note').textContent=places.length?`${places.length} within ${radius>=1000?(radius/1000).toFixed(1)+' km':radius+' m'}`:'';
     box.innerHTML=places.map((place,index)=>`<div class="result-item"><div class="place-main">${placeIcon(place)}<div><strong>${safe(place.name)}</strong><span>${safe([place.distance_m!=null?place.distance_m+' m away':'',place.address&&place.address!==place.name?place.address:''].filter(Boolean).join(' · '))}</span></div></div><button type="button" data-nearby="${index}">Use</button></div>`).join('')||'<p class="empty">No named places nearby. Type the name below.</p>';
     box.querySelectorAll('[data-nearby]').forEach(button=>button.onclick=()=>{
       const place=places[+button.dataset.nearby];
-      // Keep the visit's own position; only the name and details come from the listing.
-      $('place-name').value=place.name.slice(0,120);$('place-category').value=place.category||'';$('place-provider-id').value=place.provider_place_id||'';$('place-address').value=place.address||'';
+      $('label-name').value=place.name.slice(0,120);$('label-category').value=place.category||'';$('label-provider-id').value=place.provider_place_id||'';$('label-address').value=place.address||'';
       box.querySelectorAll('.result-item').forEach(item=>item.classList.toggle('chosen',item===button.closest('.result-item')));
-      $('place-name').focus();
+      $('label-name').focus();
     });
   }catch(error){if(request===loadNearbyPlaces.request)box.innerHTML=`<p class="empty">${safe(error.message)}</p>`}
 }
 loadNearbyPlaces.request=0;
+async function afterPlaceNamesChanged(message){
+  await refreshMeta();await Promise.all([refreshExplore(false),refreshInsights()]);toast(message);
+}
 function revealMap(){
   // Bring the map on screen only when it is not already fully visible, so a list below keeps its place.
   const shell=document.querySelector('.map-shell'),box=shell.getBoundingClientRect();
@@ -376,9 +394,14 @@ function renderPlaces(){
   fillPlaceSelectors();
   const usage=new Map(state.visitedPlaces.filter(p=>p.place_id!=null).map(p=>[p.place_id,p]));
   const saved=[...state.places].sort((a,b)=>(usage.get(b.id)?.observed_minutes||0)-(usage.get(a.id)?.observed_minutes||0)||a.name.localeCompare(b.name));
-  $('places-list').innerHTML=saved.map(p=>{const seen=usage.get(p.id);const activity=seen?`${seen.visits} visit${seen.visits===1?'':'s'} · ${seen.observed_minutes.toFixed(0)} min observed`:'No confirmed visits yet';return `<div class="list-item"><div class="place-main">${placeIcon(p)}<div><strong>${safe(p.name)}</strong><small>${safe(activity)} · ${Math.round(p.radius_m)} m radius${p.address?' · '+safe(p.address):''}</small></div></div><div class="actions"><button data-focus="${p.id}">Map</button><button data-edit="${p.id}">Edit</button></div></div>`}).join('')||'<div class="empty">No saved places yet.</div>';
+  $('places-list').innerHTML=saved.map(p=>{const seen=usage.get(p.id);const activity=seen?`${seen.visits} visit${seen.visits===1?'':'s'} · ${seen.observed_minutes.toFixed(0)} min observed`:'No confirmed visits yet';return `<div class="list-item"><div class="place-main">${placeIcon(p)}<div><strong>${safe(p.name)}</strong><small>${safe(activity)} · ${Math.round(p.radius_m)} m radius${p.address?' · '+safe(p.address):''}</small></div></div><div class="actions"><button data-focus="${p.id}">Map</button><button data-edit="${p.id}">Edit</button><button data-delete-place="${p.id}" class="danger-button">Delete</button></div></div>`}).join('')||'<div class="empty">No saved places yet.</div>';
   $('places-list').querySelectorAll('[data-focus]').forEach(button=>button.onclick=()=>focusPlaceOnMap(state.places.find(place=>place.id===+button.dataset.focus)));
   $('places-list').querySelectorAll('[data-edit]').forEach(button=>button.onclick=()=>openPlaceDialog(state.places.find(place=>place.id===+button.dataset.edit)));
+  $('places-list').querySelectorAll('[data-delete-place]').forEach(button=>button.onclick=async()=>{
+    const place=state.places.find(item=>item.id===+button.dataset.deletePlace);
+    if(!place||!confirm(`Delete “${place.name}”? Visits there will be named automatically again. Reminders that use it keep working.`))return;
+    try{await post('/api/places/delete',{id:place.id});await afterPlaceNamesChanged('Place deleted')}catch(error){toast(error.message)}
+  });
   $('all-visited-places').innerHTML=state.visitedPlaces.map((place,index)=>`<div class="list-item"><div class="place-main">${placeIcon(place)}<div><strong>${safe(place.display_name)}</strong><small>${place.visits} visit${place.visits===1?'':'s'} · ${place.observed_minutes.toFixed(0)} min observed · Last ${safe(formatTime(place.last_seen))}</small></div></div><div class="actions"><button data-map-visited="${index}">Map</button><button data-edit-visited="${index}">Edit place</button></div></div>`).join('')||'<div class="empty">No confirmed visited places yet.</div>';
   $('all-visited-places').querySelectorAll('[data-map-visited]').forEach(button=>button.onclick=()=>focusPlaceOnMap(state.visitedPlaces[+button.dataset.mapVisited]));
   $('all-visited-places').querySelectorAll('[data-edit-visited]').forEach(button=>button.onclick=()=>editVisitedPlace(state.visitedPlaces[+button.dataset.editVisited]));
@@ -483,6 +506,22 @@ $('search-form').onsubmit=async e=>{e.preventDefault();try{const q=new URLSearch
 $('place-form').onsubmit=async e=>{e.preventDefault();try{await post('/api/places',{...($('place-id').value?{id:+$('place-id').value}:{}),name:$('place-name').value,lat:+$('place-lat').value,lon:+$('place-lon').value,radius_m:+$('place-radius').value,address:$('place-address').value,category:$('place-category').value,provider_place_id:$('place-provider-id').value});$('place-dialog').close();await refreshMeta();await Promise.all([refreshExplore(),refreshInsights()]);toast('Place saved')}catch(err){toast(err.message)}};
 $('reverse').onclick=async()=>{if(!$('place-lat').value||!$('place-lon').value){toast('Enter coordinates first');return}try{const q=new URLSearchParams({lat:$('place-lat').value,lon:$('place-lon').value});const result=await api('/api/reverse?'+q);$('place-address').value=result.address||'';$('place-category').value=result.category||'';$('place-provider-id').value=result.provider_place_id||'';if(!$('place-name').value)$('place-name').value=(result.name||'').slice(0,120);toast(result.approximate?'Nearby cached place found — verify before saving':'Place found')}catch(err){toast(err.message)}};
 $('add-place').onclick=()=>openPlaceDialog();
+$('label-form').onsubmit=async event=>{
+  event.preventDefault();
+  const target=state.labelEdit;if(!target)return;
+  try{
+    await post('/api/place-labels',{...(target.label_id?{id:target.label_id}:{}),name:$('label-name').value,lat:target.lat,lon:target.lon,radius_m:target.radius_m,
+      address:$('label-address').value,category:$('label-category').value,provider_place_id:$('label-provider-id').value});
+    $('label-dialog').close();
+    await afterPlaceNamesChanged('Name saved for this place');
+  }catch(error){toast(error.message)}
+};
+$('reset-label').onclick=async()=>{
+  const target=state.labelEdit;if(!target?.label_id)return;
+  try{await post('/api/place-labels/delete',{id:target.label_id});$('label-dialog').close();await afterPlaceNamesChanged('Automatic name restored')}catch(error){toast(error.message)}
+};
+$('close-label-dialog').onclick=$('cancel-label').onclick=()=>$('label-dialog').close();
+$('label-dialog').addEventListener('click',event=>{if(event.target===$('label-dialog'))$('label-dialog').close()});
 $('close-place-dialog').onclick=$('cancel-place').onclick=()=>$('place-dialog').close();
 $('place-dialog').addEventListener('click',event=>{if(event.target===$('place-dialog'))$('place-dialog').close()});
 $('speed-strategy').onchange=updateSpeedSettingsVisibility;

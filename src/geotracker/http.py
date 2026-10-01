@@ -182,6 +182,7 @@ class Handler(BaseHTTPRequestHandler):
             elif url.path == "/api/daily-summary": value = daily_overview(store, q["date"], q.get("timezone"), q.get("source"))
             elif url.path == "/api/daily-summaries": value = store.daily_overviews(q.get("start"), q.get("end"), q.get("limit", 90))
             elif url.path == "/api/places": value = store.places(enrich=True)
+            elif url.path == "/api/place-labels": value = store.place_labels()
             elif url.path == "/api/reminders": value = store.reminders()
             elif url.path == "/api/reminder-history": value = store.reminder_history(q.get("limit", 200))
             elif url.path == "/api/events": value = store.events(q.get("since_id", 0), q.get("limit", 100))
@@ -270,6 +271,9 @@ class Handler(BaseHTTPRequestHandler):
                 deliver_webhook(store, result["events"])
             elif path == "/api/settings": result = store.save_settings(payload)
             elif path == "/api/places": result = store.save_place(payload)
+            elif path == "/api/places/delete": result = store.delete_place(payload["id"])
+            elif path == "/api/place-labels": result = store.save_place_label(payload)
+            elif path == "/api/place-labels/delete": result = store.delete_place_label(payload["id"])
             elif path == "/api/reminders": result = store.create_reminder(payload)
             elif path == "/api/reminders/cancel": result = store.cancel_reminder(payload["id"])
             else:

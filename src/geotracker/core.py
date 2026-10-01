@@ -490,6 +490,11 @@ class Store:
             destination_category TEXT, destination_provider_place_id TEXT, match_name TEXT
         );
         CREATE INDEX IF NOT EXISTS reminders_active_created ON reminders(active,created_at);
+        CREATE TABLE IF NOT EXISTS place_labels (
+            id INTEGER PRIMARY KEY, name TEXT NOT NULL, lat REAL NOT NULL, lon REAL NOT NULL,
+            radius_m REAL NOT NULL, address TEXT, category TEXT, provider_place_id TEXT,
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS events (
             id INTEGER PRIMARY KEY, reminder_id INTEGER NOT NULL REFERENCES reminders(id),
             point_id INTEGER NOT NULL REFERENCES points(id), triggered_at TEXT NOT NULL,
@@ -784,7 +789,8 @@ class Store:
                 AND (cancelled_at IS NULL OR cancelled_at>?)) ORDER BY id""",
             (parse_time(start), parse_time(end), parse_time(start), parse_time(end),
              parse_time(start), parse_time(end), parse_time(end), parse_time(end), parse_time(end)))
-        value = ["stay-trips-v5", self.analysis_watermark(start, end, source), event_row["count"], event_row["max_id"], places, reminders]
+        labels = self._rows("SELECT id,name,lat,lon,radius_m,updated_at FROM place_labels ORDER BY id")
+        value = ["stay-trips-v5", self.analysis_watermark(start, end, source), event_row["count"], event_row["max_id"], places, reminders, labels]
         return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
     def stored_daily_overview(self, date, timezone_name, source=None, watermark=None):
@@ -1070,6 +1076,66 @@ class Store:
         self.db.execute("DELETE FROM analysis_cache")
         self.db.commit()
         return self._rows("SELECT id,name,lat,lon,radius_m,address,category,provider_place_id FROM places WHERE id=?", (id_,))[0]
+
+    def delete_place(self, id_):
+        """Remove a saved place from the list and from naming visits.
+
+        A place that a reminder points at is hidden instead, so the reminder
+        keeps its destination and its history stays readable.
+        """
+        place = self.db.execute("SELECT id FROM places WHERE id=? AND COALESCE(saved,1)=1", (int(id_),)).fetchone()
+        if not place:
+            raise ValueError("saved place not found")
+        if self.db.execute("SELECT 1 FROM reminders WHERE place_id=? LIMIT 1", (int(id_),)).fetchone():
+            # Names are unique; the hidden row must not block reusing this one.
+            self.db.execute("UPDATE places SET saved=0,name=? WHERE id=?", ("Deleted place " + os.urandom(8).hex(), int(id_)))
+        else:
+            self.db.execute("DELETE FROM places WHERE id=?", (int(id_),))
+        self.db.execute("DELETE FROM analysis_cache")
+        self.db.commit()
+        return {"deleted": int(id_)}
+
+    def place_labels(self):
+        """Name corrections: each names every visit whose position falls inside it."""
+        return self._rows("""SELECT id,name,lat,lon,radius_m,address,category,provider_place_id,created_at,updated_at
+            FROM place_labels ORDER BY name,id""")
+
+    def save_place_label(self, raw):
+        """Pin a name to a position, overriding saved places and provider lookups there.
+
+        Renaming the same visit again replaces its label rather than stacking another.
+        """
+        name = str(raw.get("name") or "").strip()
+        if not name or len(name) > 120:
+            raise ValueError("name is required (max 120 characters)")
+        lat, lon = float(raw["lat"]), float(raw["lon"])
+        radius = float(raw.get("radius_m") or 50)
+        if not (-90 <= lat <= 90 and -180 <= lon <= 180 and 20 <= radius <= 1000):
+            raise ValueError("invalid label coordinates or radius (20–1000 m)")
+        values = (name, lat, lon, radius, str(raw.get("address") or "")[:300], str(raw.get("category") or "")[:160],
+                  str(raw.get("provider_place_id") or "")[:300], parse_time(None))
+        target = int(raw["id"]) if raw.get("id") else next(
+            (label["id"] for label in self.place_labels() if metres(lat, lon, label["lat"], label["lon"]) <= 25), None)
+        if target is not None:
+            updated = self.db.execute("""UPDATE place_labels SET name=?,lat=?,lon=?,radius_m=?,address=?,category=?,
+                provider_place_id=?,updated_at=? WHERE id=?""", (*values, target))
+            if not updated.rowcount:
+                raise ValueError("label not found")
+        else:
+            target = self.db.execute("""INSERT INTO place_labels
+                (name,lat,lon,radius_m,address,category,provider_place_id,updated_at,created_at)
+                VALUES (?,?,?,?,?,?,?,?,?) RETURNING id""", (*values, values[-1])).fetchone()["id"]
+        self.db.execute("DELETE FROM analysis_cache")
+        self.db.commit()
+        return next(label for label in self.place_labels() if label["id"] == target)
+
+    def delete_place_label(self, id_):
+        result = self.db.execute("DELETE FROM place_labels WHERE id=?", (int(id_),))
+        if not result.rowcount:
+            raise ValueError("label not found")
+        self.db.execute("DELETE FROM analysis_cache")
+        self.db.commit()
+        return {"deleted": int(id_)}
 
     def reminders(self):
         """Active one-shot reminders waiting for their next arrival."""
@@ -1768,8 +1834,27 @@ def reverse_geocode(store, lat, lon, radius_m=None):
         return {**result, "cache": "provider", "approximate": False}
 
 
+def label_at(labels, lat, lon):
+    """The name correction covering a position; overlapping labels go to the nearest centre."""
+    covering = [(metres(lat, lon, label["lat"], label["lon"]), label) for label in labels]
+    covering = [(distance, label) for distance, label in covering if distance <= label["radius_m"]]
+    return min(covering, key=lambda item: item[0])[1] if covering else None
+
+
+def _label_place(label):
+    return {"name": label["name"], "address": label.get("address") or "", "category": label.get("category") or "",
+            "categories": [label["category"]] if label.get("category") else [],
+            "provider_place_id": label.get("provider_place_id") or "", "label_id": label["id"]}
+
+
 def place_for_coordinate(store, lat, lon, radius_m=None):
-    """Return the nearest named place (or address) plus its full address."""
+    """Return the nearest named place (or address) plus its full address.
+
+    A name you pinned to this spot wins over the provider.
+    """
+    label = label_at(store.place_labels(), lat, lon)
+    if label:
+        return _label_place(label)
     try:
         value = reverse_geocode(store, lat, lon, radius_m)
         return {"name": str(value.get("place_name") or value.get("name") or value.get("address") or "")[:300],
@@ -1786,6 +1871,10 @@ def current_location(store):
     point = store.latest()
     if not point:
         return None
+    label = label_at(store.place_labels(), point["lat"], point["lon"])
+    if label:
+        point.update({"place_id": None, **_label_place(label), "place_name": label["name"]})
+        return point
     matches = [(metres(point["lat"], point["lon"], place["lat"], place["lon"]), place)
                for place in store.places()]
     matches = [(distance, place) for distance, place in matches if distance <= place["radius_m"]]

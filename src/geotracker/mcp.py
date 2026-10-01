@@ -41,6 +41,10 @@ TOOLS = [
     {"name": "predict_next_destination", "description": "Evidence-based next place estimate from at least three observed departures; may return no prediction.", "inputSchema": schema({})},
     {"name": "list_places", "description": "Saved named places and geofence radii. Use this first to resolve a place_id for a location reminder.", "inputSchema": schema({})},
     {"name": "save_place", "description": "Create or edit a named place and arrival geofence.", "inputSchema": schema({"id": INTEGER, "name": STRING, "lat": NUMBER, "lon": NUMBER, "radius_m": NUMBER, "address": STRING, "category": STRING, "provider_place_id": STRING}, ["name", "lat", "lon"])},
+    {"name": "delete_place", "description": "Delete a saved place. It stops naming visits; a place that a reminder uses is hidden instead so the reminder keeps working.", "inputSchema": schema({"id": INTEGER}, ["id"])},
+    {"name": "list_place_labels", "description": "Name corrections pinned to locations. Each one names every visit whose position falls inside its radius, ahead of saved places and provider lookups.", "inputSchema": schema({})},
+    {"name": "set_place_label", "description": "Correct the name of a visited place: pin a name to the visit's coordinates (radius_m 20-1000, default 50; use the area's extent for an area stay). History, summaries, and visit search use it instead of the provider's guess. Re-labelling within 25 m replaces the earlier label. Use list_nearby_places to find the right name.", "inputSchema": schema({"name": STRING, "lat": NUMBER, "lon": NUMBER, "radius_m": NUMBER, "address": STRING, "category": STRING, "provider_place_id": STRING}, ["name", "lat", "lon"])},
+    {"name": "remove_place_label", "description": "Remove a name correction so visits there are named automatically again.", "inputSchema": schema({"id": INTEGER}, ["id"])},
     {"name": "list_reminders", "description": "Active one-shot location reminders waiting for arrival.", "inputSchema": schema({})},
     {"name": "list_reminder_history", "description": "Past triggered or cancelled location reminders.", "inputSchema": schema({"limit": INTEGER})},
     {"name": "create_reminder", "description": "Create a one-shot reminder. Three kinds: at a saved place_id (arrival geofence); at an unsaved destination (place_name with lat/lon, or place_name alone for the nearest geocoding match); or match_name alone for any place with that name, such as 'Starbucks', which fires after about three minutes stopped within 150 m of a place whose name matches (word prefixes, tolerant of small typos).", "inputSchema": schema({"text": STRING, "place_id": INTEGER, "place_name": STRING, "match_name": STRING, "lat": NUMBER, "lon": NUMBER, "radius_m": NUMBER, "address": STRING, "category": STRING, "provider_place_id": STRING}, ["text"])},
@@ -84,7 +88,7 @@ def call_tool(store, name, args):
         return visited_places(store, args.get("limit", 100))
     if name == "get_unlabeled_frequent_places":
         return [p for p in resolve_place_patterns(store, place_patterns(store, None))[0]
-                if p["place_id"] is None][:min(int(args.get("limit", 50)), 500)]
+                if p["place_id"] is None and not p.get("label_id")][:min(int(args.get("limit", 50)), 500)]
     if name == "get_time_at_place":
         return store.place_visits(args["place_id"], args.get("start"), args.get("end"))
     if name == "get_day_summary":
@@ -101,6 +105,14 @@ def call_tool(store, name, args):
         return store.places(enrich=True)
     if name == "save_place":
         return store.save_place(args)
+    if name == "delete_place":
+        return store.delete_place(args["id"])
+    if name == "list_place_labels":
+        return store.place_labels()
+    if name == "set_place_label":
+        return store.save_place_label(args)
+    if name == "remove_place_label":
+        return store.delete_place_label(args["id"])
     if name == "list_reminders":
         return store.reminders()
     if name == "list_reminder_history":

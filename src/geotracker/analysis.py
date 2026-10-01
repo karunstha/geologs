@@ -8,7 +8,8 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .core import (MAX_CONNECTED_GAP_SECONDS, MAX_PLAUSIBLE_SPEED_MPS, MAX_SAMPLE_GAP_SECONDS, MOVEMENT_MODES,
-                   classify_motion, is_excursion, went_elsewhere_between, metres, name_matches, nearby_places,
+                   _label_place, classify_motion, is_excursion, label_at, went_elsewhere_between, metres, name_matches,
+                   nearby_places,
                    parse_time, place_for_coordinate,
                    places_provider_identity, reported_speed, search_text,
                    route_segments_from_points, smooth_route_segment, stats_from_points, trips_between_stays)
@@ -444,7 +445,7 @@ def check_name_reminders(store, sources, now=None):
         if (now - datetime.fromisoformat(candidate["end"])).total_seconds() > 1800:
             continue  # historical data never fires reminders
         if "nearby_names" not in candidate:
-            names = [place["name"] for place in store.places()
+            names = [place["name"] for place in store.places() + store.place_labels()
                      if metres(candidate["lat"], candidate["lon"], place["lat"], place["lon"]) <= place["radius_m"]]
             try:
                 names += [place["name"] for place in
@@ -624,12 +625,16 @@ def stays(store, start=None, end=None, source=None, limit=500):
     # previous_stay_id lets callers tell whether went_elsewhere refers to the stay they hold.
     rows = store._rows("""SELECT * FROM (SELECT s.*,LAG(s.id) OVER (PARTITION BY s.source ORDER BY s.started_at,s.id)
         AS previous_stay_id FROM observed_stays_v2 s""" + where + ") ordered ORDER BY started_at DESC" + suffix, args)
-    places = store.places()
+    places, labels = store.places(), store.place_labels()
     for row in rows:
         row["observed_minutes"] = round((datetime.fromisoformat(row["ended_at"]) - datetime.fromisoformat(row["started_at"])).total_seconds() / 60, 1)
-        place = _matching_place(row["lat"], row["lon"], places)
+        # A name you pinned to this spot is the most specific statement about
+        # it, so it wins over a saved place that happens to cover it too.
+        label = label_at(labels, row["lat"], row["lon"])
+        place = None if label else _matching_place(row["lat"], row["lon"], places)
+        row["label_id"] = label["id"] if label else None
         row["place_id"] = place["id"] if place else None
-        row["place_name"] = place["name"] if place else None
+        row["place_name"] = label["name"] if label else place["name"] if place else None
     return rows
 
 
@@ -652,13 +657,16 @@ def _bucket(lat, lon):
 def place_patterns(store, limit=50, rows=None):
     rows = rows if rows is not None else stays(store, limit=None)
     places = {p["id"]: p for p in store.places()}
+    labels = {label["id"]: label for label in store.place_labels()}
     clusters, bucket_index, mapping = [], {}, {}
     wide_clusters = []
     for stay in rows:
         key = _bucket(stay["lat"], stay["lon"])
         radius = stay.get("radius_m") or 0
         target = None
-        if stay["place_id"] is not None:
+        if stay.get("label_id") is not None:
+            target = next((i for i, c in enumerate(clusters) if c.get("label_id") == stay["label_id"]), None)
+        elif stay["place_id"] is not None:
             target = next((i for i, c in enumerate(clusters) if c["place_id"] == stay["place_id"]), None)
         else:
             candidates = set()
@@ -666,17 +674,19 @@ def place_patterns(store, limit=50, rows=None):
                 for dy in (-1, 0, 1):
                     for dz in (-1, 0, 1):
                         candidates.update(bucket_index.get((key[0]+dx, key[1]+dy, key[2]+dz), ()))
-            target = next((i for i in candidates if clusters[i]["place_id"] is None and metres(stay["lat"], stay["lon"], clusters[i]["lat"], clusters[i]["lon"]) <= 75), None)
+            target = next((i for i in candidates if clusters[i]["place_id"] is None and clusters[i].get("label_id") is None
+                           and metres(stay["lat"], stay["lon"], clusters[i]["lat"], clusters[i]["lon"]) <= 75), None)
             if target is None and radius > 75:
                 # Laps of one lake or park do not share a centre, so wide areas
                 # join when their centres fall inside each other's extent.
-                target = next((i for i in wide_clusters if clusters[i]["place_id"] is None
+                target = next((i for i in wide_clusters if clusters[i]["place_id"] is None and clusters[i].get("label_id") is None
                                and metres(stay["lat"], stay["lon"], clusters[i]["lat"], clusters[i]["lon"])
                                <= min(max(radius, clusters[i]["radius_m"]), 500)), None)
         if target is None:
-            place = places.get(stay["place_id"])
+            place = labels.get(stay.get("label_id")) or places.get(stay["place_id"])
             target = len(clusters)
-            clusters.append({"cluster_id": target, "place_id": stay["place_id"], "name": place["name"] if place else None,
+            clusters.append({"cluster_id": target, "place_id": stay["place_id"], "label_id": stay.get("label_id"),
+                             "name": place["name"] if place else None,
                              "lat": stay["lat"], "lon": stay["lon"], "visits": 0, "observed_minutes": 0,
                              "last_seen": stay["ended_at"], "radius_m": 0, "activities": {}, "_spans": [], "_members": []})
             bucket_index.setdefault(key, set()).add(target)
@@ -726,17 +736,20 @@ def resolve_place_patterns(store, patterns):
     """
     clusters, stay_mapping = patterns
     saved = {place["id"]: place for place in store.places(enrich=True)}
+    labels = {label["id"]: label for label in store.place_labels()}
     resolved = []
     for cluster in clusters:
         place = saved.get(cluster["place_id"])
-        found = (place if place else place_for_coordinate(store, cluster["lat"], cluster["lon"], cluster.get("extent_m")))
+        label = labels.get(cluster.get("label_id"))
+        found = (_label_place(label) if label else place if place
+                 else place_for_coordinate(store, cluster["lat"], cluster["lon"], cluster.get("extent_m")))
         name = cluster.get("name") or found.get("name") or found.get("address") or ""
         categories = found.get("categories") if isinstance(found.get("categories"), list) else []
         category = found.get("category") or (categories[0] if categories else "")
         resolved.append({**cluster, "name": name, "display_name": name or cluster["display_name"],
                          "address": found.get("address") or "", "category": category or "",
                          "categories": categories, "provider_place_id": found.get("provider_place_id") or "",
-                         "saved": bool(place)})
+                         "saved": bool(place), "label_id": cluster.get("label_id") or found.get("label_id")})
 
     parent = list(range(len(resolved)))
     def root(index):
@@ -799,6 +812,7 @@ def resolve_place_patterns(store, patterns):
                 for field in ("address", "category", "provider_place_id"):
                     item[field] = item.get(field) or place.get(field) or ""
             item["saved"] = item.get("saved") or place.get("saved")
+            item["label_id"] = item.get("label_id") or place.get("label_id")
             item["categories"] = list(dict.fromkeys((item.get("categories") or []) + (place.get("categories") or [])))
             item["radius_m"] = max(item.get("radius_m") or 0, place.get("radius_m") or 0)
             activities = dict(item.get("activities") or {})
@@ -946,7 +960,7 @@ def insights(store, limit=50):
     rows = stays(store, limit=None)
     patterns = resolve_place_patterns(store, place_patterns(store, limit=None, rows=rows))
     edges = transitions(store, limit=None, patterns=patterns, rows=rows)
-    unlabeled = [p for p in patterns[0] if p["place_id"] is None][:limit]
+    unlabeled = [p for p in patterns[0] if p["place_id"] is None and not p.get("label_id")][:limit]
     return {"frequent_places": patterns[0][:limit],
             "unlabeled_places": unlabeled,
             "transitions": edges[:limit],
@@ -1063,7 +1077,7 @@ def day_summary(store, date, timezone_name="UTC", source=None):
         for before, trip, after in zip(sequence, sequence[1:], sequence[2:]):
             if trip["mode"] == "cycling" and before["mode"] == after["mode"] == "driving":
                 trip.update(mode="driving", modes={"driving": sum(trip["modes"].values())}, mode_from_context=True)
-    kept_trips, internal_moves, saved_places = [], {}, store.places()
+    kept_trips, internal_moves, saved_places, saved_labels = [], {}, store.places(), store.place_labels()
     for trip in trips:
         trip["from_name"] = stay_labels.get(trip["from_stay_id"], trip.get("from_name"))
         trip["to_name"] = stay_labels.get(trip["to_stay_id"], trip.get("to_name"))
@@ -1091,7 +1105,8 @@ def day_summary(store, date, timezone_name="UTC", source=None):
             # Say where a round trip went, so Home -> Home reads as an errand, not a glitch.
             turnaround = trip.get("turnaround")
             if turnaround and turnaround["stop_minutes"]:
-                saved = _matching_place(turnaround["lat"], turnaround["lon"], saved_places)
+                saved = (label_at(saved_labels, turnaround["lat"], turnaround["lon"])
+                         or _matching_place(turnaround["lat"], turnaround["lon"], saved_places))
                 turnaround["name"] = (saved["name"] if saved else
                                       place_for_coordinate(store, turnaround["lat"], turnaround["lon"]).get("name") or None)
         kept_trips.append(trip)

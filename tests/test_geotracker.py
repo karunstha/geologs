@@ -1318,6 +1318,68 @@ class StoreTests(unittest.TestCase):
         self.assertEqual([place["name"] for place in again], ["Chipotle", "Hampton Inn"])
         self.assertEqual(request.call_args_list[0].args[1]["filter"], "circle:-87.9,41.0,300")
 
+    def test_corrected_name_replaces_the_providers_guess_everywhere(self):
+        cafe = shifted(HOME, 5000, 0)
+        self.store.ingest(minute_fixes([still(HOME, 30), line(HOME, cafe, 8), still(cafe, 25), line(cafe, HOME, 8), still(HOME, 30)]))
+        wrong = {"name": "Chipotle Mexican Grill", "address": "1 Strip Mall", "category": "catering.restaurant",
+                 "categories": ["catering.restaurant"], "provider_place_id": "chipotle"}
+        home = {"name": "Home Street", "address": "", "category": "", "categories": [], "provider_place_id": "home"}
+        resolve = lambda _store, lat, lon, _radius=None: wrong if lon > HOME[1] + .01 else home
+        with patch("geotracker.analysis.place_for_coordinate", side_effect=resolve):
+            before = day_summary(self.store, "2026-09-27", "UTC")
+            self.assertEqual(before["stays"][1]["display_name"], "Chipotle Mexican Grill")
+            visit = before["stays"][1]
+            label = self.store.save_place_label({"name": "Starbucks", "lat": visit["lat"], "lon": visit["lon"],
+                                                 "category": "catering.cafe", "provider_place_id": "starbucks"})
+            after = day_summary(self.store, "2026-09-27", "UTC")
+            overview = daily_overview(self.store, "2026-09-27", "UTC")
+            found = search_visits(self.store, "starbucks", timezone_name="UTC")
+            missed = search_visits(self.store, "chipotle", timezone_name="UTC")
+        self.assertEqual(label["radius_m"], 50)
+        self.assertEqual(after["stays"][1]["display_name"], "Starbucks")
+        corrected = next(place for place in after["visited_places"] if place["name"] == "Starbucks")
+        self.assertEqual(corrected["label_id"], label["id"])
+        self.assertNotIn("Chipotle Mexican Grill", [place["name"] for place in after["visited_places"]])
+        self.assertIn("Starbucks", [visit["place"] for visit in overview["visits"]])
+        self.assertEqual((found["total_visits"], missed["total_visits"]), (1, 0))
+        # No saved place was created.
+        self.assertEqual(self.store.places(), [])
+        # Renaming the same visit again replaces the correction; removing it restores the automatic name.
+        again = self.store.save_place_label({"name": "Starbucks Reserve", "lat": visit["lat"] + .0001, "lon": visit["lon"]})
+        self.assertEqual((again["id"], len(self.store.place_labels())), (label["id"], 1))
+        self.store.delete_place_label(label["id"])
+        with patch("geotracker.analysis.place_for_coordinate", side_effect=resolve):
+            self.assertEqual(day_summary(self.store, "2026-09-27", "UTC")["stays"][1]["display_name"], "Chipotle Mexican Grill")
+
+    def test_correction_inside_a_large_saved_place_wins_only_where_it_points(self):
+        self.store.save_place({"name": "Campus", "lat": CAMPUS[0], "lon": CAMPUS[1], "radius_m": 600})
+        self.store.save_place_label({"name": "Ottenheimer Library", "lat": CAMPUS[0], "lon": CAMPUS[1]})
+        day, _found, _overview = self.campus_day([still(CAMPUS, 60), line(CAMPUS, shifted(LAB, 0, 3000), 8),
+                                                   line(shifted(LAB, 0, 3000), LAB, 8), still(LAB, 40)])
+        self.assertEqual([stay["display_name"] for stay in day["stays"]], ["Home Street", "Ottenheimer Library", "Campus", "Home Street"])
+        latest = {"source": "phone", "timestamp": datetime.now(timezone.utc).isoformat(), "lat": CAMPUS[0], "lon": CAMPUS[1]}
+        self.store.ingest(latest)
+        self.assertEqual(current_location(self.store)["place_name"], "Ottenheimer Library")
+
+    def test_deleting_a_saved_place_keeps_reminders_that_use_it(self):
+        unused = self.store.save_place({"name": "Gym", "lat": 41.1, "lon": -87.9})
+        market = self.store.save_place({"name": "Market", "lat": 41, "lon": -87.9})
+        self.store.create_reminder({"text": "Buy salt", "place_id": market["id"]})
+        self.store.delete_place(unused["id"])
+        self.store.delete_place(market["id"])
+        self.assertEqual(self.store.places(), [])
+        self.assertIsNone(self.store.db.execute("SELECT 1 FROM places WHERE id=?", (unused["id"],)).fetchone())
+        # The reminder still knows where to fire and what to call it.
+        self.assertEqual([(item["text"], item["place_name"]) for item in self.store.reminders()], [("Buy salt", "Market")])
+        now = datetime.now(timezone.utc)
+        self.store.ingest({"source": "phone", "timestamp": (now - timedelta(minutes=5)).isoformat(), "lat": 41.01, "lon": -87.9})
+        event = self.store.ingest({"source": "phone", "timestamp": now.isoformat(), "lat": 41, "lon": -87.9})["events"][0]
+        self.assertEqual(event["place"], "Market")
+        # The name is free to use again.
+        self.assertEqual(self.store.save_place({"name": "Market", "lat": 41.2, "lon": -87.9})["name"], "Market")
+        with self.assertRaisesRegex(ValueError, "saved place not found"):
+            self.store.delete_place(unused["id"])
+
     def test_parked_out_and_back_run_is_one_visit(self):
         trail = shifted(HOME, 15000, 0)
         turn = shifted(trail, 0, 3000)
