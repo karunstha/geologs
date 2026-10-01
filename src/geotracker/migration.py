@@ -18,7 +18,7 @@ TABLES = {
     "stay_processing_state": "source last_point_id last_timestamp candidate",
     "observed_stays_v2": "id source start_observation_id end_observation_id started_at ended_at lat lon point_count ongoing kind activity distance_m radius_m went_elsewhere",
     "stay_observation_state": "source last_observation_id last_timestamp candidate",
-    "place_labels": "id name lat lon radius_m address category provider_place_id created_at updated_at",
+    "place_labels": "id name lat lon radius_m address category provider_place_id created_at updated_at source started_at ended_at",
     "app_settings": "key value",
     "analysis_cache": "cache_key watermark value created_at",
     "daily_summaries": "id summary_date timezone source watermark points distance_km trip_count place_count reminder_count summary created_at updated_at",

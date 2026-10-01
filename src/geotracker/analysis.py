@@ -445,7 +445,7 @@ def check_name_reminders(store, sources, now=None):
         if (now - datetime.fromisoformat(candidate["end"])).total_seconds() > 1800:
             continue  # historical data never fires reminders
         if "nearby_names" not in candidate:
-            names = [place["name"] for place in store.places() + store.place_labels()
+            names = [place["name"] for place in store.places() + [label for label in store.place_labels() if not label["started_at"]]
                      if metres(candidate["lat"], candidate["lon"], place["lat"], place["lon"]) <= place["radius_m"]]
             try:
                 names += [place["name"] for place in
@@ -630,7 +630,7 @@ def stays(store, start=None, end=None, source=None, limit=500):
         row["observed_minutes"] = round((datetime.fromisoformat(row["ended_at"]) - datetime.fromisoformat(row["started_at"])).total_seconds() / 60, 1)
         # A name you pinned to this spot is the most specific statement about
         # it, so it wins over a saved place that happens to cover it too.
-        label = label_at(labels, row["lat"], row["lon"])
+        label = label_at(labels, row["lat"], row["lon"], row["source"], row["started_at"], row["ended_at"])
         place = None if label else _matching_place(row["lat"], row["lon"], places)
         row["label_id"] = label["id"] if label else None
         row["place_id"] = place["id"] if place else None

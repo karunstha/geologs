@@ -77,7 +77,7 @@ function initMap(){
     element?.querySelectorAll('[data-edit-stay]').forEach(button=>button.onclick=()=>{
       map.closePopup();
       const stay=state.day?.stays.find(item=>item.id===+button.dataset.editStay);
-      if(stay)editVisitedPlace({...stay,name:stay.display_name,cluster_id:null});
+      if(stay)editVisitedPlace({...stay,name:stay.display_name},[stay]);
     });
   });
   pathLayer=L.layerGroup().addTo(map);placeLayer=L.layerGroup().addTo(map);highlightLayer=L.layerGroup().addTo(map);searchLayer=L.layerGroup().addTo(map);
@@ -336,22 +336,38 @@ function metresBetween(aLat,aLon,bLat,bLon){
   const h=Math.sin(dLat/2)**2+Math.cos(aLat*rad)*Math.cos(bLat*rad)*Math.sin(dLon/2)**2;
   return 12742000*Math.asin(Math.min(1,Math.sqrt(h)));
 }
-function labelTarget(place){
-  // Cover this place's visits on the day shown, or its observed extent elsewhere, with a margin.
-  const visits=(state.day?.stays||[]).filter(stay=>stay.cluster_id===place.cluster_id&&place.cluster_id!=null);
-  const reach=visits.length?Math.max(...visits.map(stay=>metresBetween(place.lat,place.lon,stay.lat,stay.lon)+(stay.radius_m||0)))
+function labelTarget(place,visits){
+  // Cover the visits being corrected (or the place's observed extent) with a margin.
+  const center=visits.length===1?visits[0]:place;
+  const reach=visits.length?Math.max(...visits.map(stay=>metresBetween(center.lat,center.lon,stay.lat,stay.lon)+(stay.radius_m||0)))
     :(place.extent_m||place.radius_m||0);
-  return {lat:+Number(place.lat).toFixed(6),lon:+Number(place.lon).toFixed(6),radius_m:Math.round(Math.min(1000,Math.max(50,reach?reach+25:50)))};
+  return {lat:+Number(center.lat).toFixed(6),lon:+Number(center.lon).toFixed(6),radius_m:Math.round(Math.min(1000,Math.max(50,reach?reach+25:50)))};
 }
-function editVisitedPlace(place){
+function visitTimes(visits){return visits.map(stay=>`${clock(stay.started_at)} – ${clock(stay.ended_at)}`).join(', ')}
+function editVisitedPlace(place,visits=null){
+  // visits: the stays this fix is about. A pin or day row covers the place's visits that day;
+  // the Places page has no particular visit, so only the every-visit choice applies there.
   if(!place)return;
-  const target=labelTarget(place);
-  state.labelEdit={...target,label_id:place.label_id||null};
+  visits=visits??(state.day&&place.cluster_id!=null?state.day.stays.filter(stay=>stay.cluster_id===place.cluster_id):[]);
+  const target=labelTarget(place,visits);
+  const labelIds=[...new Set([place.label_id,...visits.map(stay=>stay.label_id)].filter(id=>id!=null))];
+  const current=(state.labels||[]).find(label=>label.id===labelIds[0]);
+  state.labelEdit={...target,visits,labelIds,editing:labelIds.length===1?labelIds[0]:null};
   $('label-form').reset();
   $('label-name').value=place.name||place.display_name||'';
   $('label-category').value=place.category||'';$('label-provider-id').value=place.provider_place_id||'';$('label-address').value=place.address||'';
-  $('label-where').textContent=`Applies to visits within ${target.radius_m} m of ${coordinateText(target.lat,target.lon)}.`;
-  $('reset-label').hidden=!place.label_id;
+  $('scope-visit-option').hidden=!visits.length;
+  if(visits.length){
+    const [year,month,day]=(state.day?.date||'').split('-').map(Number);
+    const dayName=state.day?new Date(year,month-1,day).toLocaleDateString(undefined,{weekday:'short',month:'short',day:'numeric'}):'';
+    $('scope-visit-title').textContent=visits.length===1?'Only this visit':`Only the visits on ${dayName}`;
+    $('scope-visit-detail').textContent=visitTimes(visits)+(visits.length===1?'':` (${visits.length} visits)`);
+  }
+  $('scope-spot-detail').textContent=`Past and future visits within ${target.radius_m} m`;
+  const scope=!visits.length||(current&&!current.started_at)?'spot':'visit';
+  document.querySelector(`input[name="label-scope"][value="${scope}"]`).checked=true;
+  $('label-where').textContent=`Pinned at ${coordinateText(target.lat,target.lon)}.`;
+  $('reset-label').hidden=!labelIds.length;
   loadNearbyPlaces(target);
   $('label-dialog').showModal();
 }
@@ -414,7 +430,7 @@ function renderReminders(){
 function renderInsights(){const data=state.insights;if(!data)return;const prediction=data.prediction;$('prediction').textContent=prediction.prediction?`Likely next from ${prediction.from}: ${prediction.prediction} (${Math.round(prediction.frequency*100)}% of ${prediction.observations} observed departures).${prediction.current_fix_stale?' Latest location is stale; verify before acting.':''}`:`Next place: insufficient evidence (${prediction.reason}).`;$('pattern-places').innerHTML=data.frequent_places.slice(0,8).map((place,index)=>`<div class="list-item"><div class="place-main">${placeIcon(place)}<div><strong>${safe(place.display_name)}</strong><small>${place.visits} visit${place.visits===1?'':'s'} · ${place.observed_minutes.toFixed(0)} min observed</small></div></div><button data-pattern-place="${index}">Map</button></div>`).join('')||'<div class="empty">Common places appear after confirmed stays.</div>';$('pattern-places').querySelectorAll('[data-pattern-place]').forEach(button=>button.onclick=()=>focusPlaceOnMap(data.frequent_places[+button.dataset.patternPlace]));$('transitions').innerHTML=data.transitions.slice(0,8).map((t,index)=>`<div class="list-item"><div><strong>${safe(t.from_name)} → ${safe(t.to_name)}</strong><small>${t.count} observed transition${t.count===1?'':'s'}</small></div><button data-transition="${index}">Map arrival</button></div>`).join('')||'<div class="empty">Transitions appear after visits to two or more places.</div>';$('transitions').querySelectorAll('[data-transition]').forEach(button=>button.onclick=()=>{const transition=data.transitions[+button.dataset.transition];focusPlaceOnMap({lat:transition.to_lat,lon:transition.to_lon,display_name:transition.to_name})})}
 async function refreshCoverage(){const data=await api('/api/coverage');$('coverage').innerHTML=data.sources.map(s=>`<div class="list-item"><div><strong>${safe(s.source)} · ${s.points.toLocaleString()} fixes</strong><small>${safe(formatTime(s.first))} → ${safe(formatTime(s.last))}</small></div></div>`).join('')+(data.gaps_over_24h.length?`<p class="muted">${data.gaps_over_24h.length} gaps over 24 hours. Missing coverage cannot establish where you were.</p>`:'')||'<div class="empty">No source data yet.</div>'}
 async function refreshInsights(){state.insights=await api('/api/insights?limit=50');renderInsights()}
-async function refreshMeta(){[state.places,state.visitedPlaces,state.reminders,state.reminderHistory,state.events]=await Promise.all([api('/api/places'),api('/api/visited-places?limit=100'),api('/api/reminders'),api('/api/reminder-history?limit=200'),api('/api/events')]);renderPlaces();renderReminders();drawMap()}
+async function refreshMeta(){[state.places,state.visitedPlaces,state.reminders,state.reminderHistory,state.events,state.labels]=await Promise.all([api('/api/places'),api('/api/visited-places?limit=100'),api('/api/reminders'),api('/api/reminder-history?limit=200'),api('/api/events'),api('/api/place-labels')]);renderPlaces();renderReminders();drawMap()}
 async function refreshRawPage(){
   const query=params();
   query.set('limit',state.rawPageSize);
@@ -509,16 +525,20 @@ $('add-place').onclick=()=>openPlaceDialog();
 $('label-form').onsubmit=async event=>{
   event.preventDefault();
   const target=state.labelEdit;if(!target)return;
+  const onlyVisits=document.querySelector('input[name="label-scope"]:checked').value==='visit'&&target.visits.length;
+  // A visit-only fix covers the visits' time window, and their device when they share one.
+  const sources=[...new Set(target.visits.map(stay=>stay.source))];
+  const window=onlyVisits?{started_at:target.visits.map(stay=>stay.started_at).sort()[0],ended_at:target.visits.map(stay=>stay.ended_at).sort().at(-1),source:sources.length===1?sources[0]:''}:{};
   try{
-    await post('/api/place-labels',{...(target.label_id?{id:target.label_id}:{}),name:$('label-name').value,lat:target.lat,lon:target.lon,radius_m:target.radius_m,
+    await post('/api/place-labels',{...(target.editing?{id:target.editing}:{}),...window,name:$('label-name').value,lat:target.lat,lon:target.lon,radius_m:target.radius_m,
       address:$('label-address').value,category:$('label-category').value,provider_place_id:$('label-provider-id').value});
     $('label-dialog').close();
     await afterPlaceNamesChanged('Name saved for this place');
   }catch(error){toast(error.message)}
 };
 $('reset-label').onclick=async()=>{
-  const target=state.labelEdit;if(!target?.label_id)return;
-  try{await post('/api/place-labels/delete',{id:target.label_id});$('label-dialog').close();await afterPlaceNamesChanged('Automatic name restored')}catch(error){toast(error.message)}
+  const target=state.labelEdit;if(!target?.labelIds.length)return;
+  try{for(const id of target.labelIds)await post('/api/place-labels/delete',{id});$('label-dialog').close();await afterPlaceNamesChanged('Automatic name restored')}catch(error){toast(error.message)}
 };
 $('close-label-dialog').onclick=$('cancel-label').onclick=()=>$('label-dialog').close();
 $('label-dialog').addEventListener('click',event=>{if(event.target===$('label-dialog'))$('label-dialog').close()});

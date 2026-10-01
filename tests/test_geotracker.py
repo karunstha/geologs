@@ -1351,6 +1351,49 @@ class StoreTests(unittest.TestCase):
         with patch("geotracker.analysis.place_for_coordinate", side_effect=resolve):
             self.assertEqual(day_summary(self.store, "2026-09-27", "UTC")["stays"][1]["display_name"], "Chipotle Mexican Grill")
 
+    def test_visit_only_correction_leaves_other_visits_to_the_same_spot_alone(self):
+        cafe = shifted(HOME, 5000, 0)
+        for day in (26, 27):
+            self.store.ingest(minute_fixes([still(cafe, 30)], start=datetime(2026, 9, day, 15, tzinfo=timezone.utc)))
+        wrong = {"name": "Chipotle Mexican Grill", "address": "", "category": "catering.restaurant",
+                 "categories": ["catering.restaurant"], "provider_place_id": "chipotle"}
+        names = lambda: {stay["started_at"][:10]: stay["place_name"] for stay in stays(self.store, limit=None)}
+        first = next(stay for stay in stays(self.store, limit=None) if stay["started_at"].startswith("2026-09-26"))
+        only_first = self.store.save_place_label({"name": "Starbucks", "lat": first["lat"], "lon": first["lon"], "source": first["source"],
+                                                  "started_at": first["started_at"], "ended_at": first["ended_at"]})
+        self.assertEqual((only_first["source"], only_first["started_at"]), ("phone", first["started_at"]))
+        self.assertEqual(names(), {"2026-09-26": "Starbucks", "2026-09-27": None})
+        with patch("geotracker.analysis.place_for_coordinate", return_value=wrong):
+            self.assertEqual(day_summary(self.store, "2026-09-27", "UTC")["stays"][0]["display_name"], "Chipotle Mexican Grill")
+            self.assertEqual([visit["date"] for visit in search_visits(self.store, "starbucks", timezone_name="UTC")["visits"]], ["2026-09-26"])
+        # An every-visit correction names both days; the visit-only one still wins for its own visit.
+        everywhere = self.store.save_place_label({"name": "Coffee Corner", "lat": first["lat"], "lon": first["lon"]})
+        self.assertEqual(names(), {"2026-09-26": "Starbucks", "2026-09-27": "Coffee Corner"})
+        # Correcting the same visit again replaces it; another visit gets its own.
+        again = self.store.save_place_label({"name": "Starbucks Reserve", "lat": first["lat"], "lon": first["lon"],
+                                             "source": "phone", "started_at": first["started_at"], "ended_at": first["ended_at"]})
+        self.assertEqual(again["id"], only_first["id"])
+        self.assertEqual(len(self.store.place_labels()), 2)
+        self.assertNotEqual(everywhere["id"], only_first["id"])
+        # Every-visit corrections only name the spot itself when there is no visit to match.
+        from geotracker.core import place_for_coordinate
+        self.assertEqual(place_for_coordinate(self.store, first["lat"], first["lon"])["name"], "Coffee Corner")
+        with self.assertRaisesRegex(ValueError, "together"):
+            self.store.save_place_label({"name": "X", "lat": 41, "lon": -87.9, "started_at": first["started_at"]})
+
+    def test_current_location_keeps_a_visit_only_correction_while_you_are_there(self):
+        cafe = shifted(HOME, 5000, 0)
+        start = datetime.now(timezone.utc) - timedelta(minutes=40)
+        fixes = minute_fixes([still(cafe, 40)], start=start)
+        self.store.ingest(fixes[:30])
+        visit = stays(self.store, limit=None)[0]
+        self.store.save_place_label({"name": "Starbucks", "lat": visit["lat"], "lon": visit["lon"], "source": "phone",
+                                     "started_at": visit["started_at"], "ended_at": visit["ended_at"]})
+        self.store.ingest(fixes[30:])  # still there, past the corrected window
+        with patch("geotracker.core.place_for_coordinate", return_value={"name": "Chipotle", "address": "", "category": "",
+                                                                       "provider_place_id": ""}):
+            self.assertEqual(current_location(self.store)["place_name"], "Starbucks")
+
     def test_correction_inside_a_large_saved_place_wins_only_where_it_points(self):
         self.store.save_place({"name": "Campus", "lat": CAMPUS[0], "lon": CAMPUS[1], "radius_m": 600})
         self.store.save_place_label({"name": "Ottenheimer Library", "lat": CAMPUS[0], "lon": CAMPUS[1]})

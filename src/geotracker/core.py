@@ -493,7 +493,8 @@ class Store:
         CREATE TABLE IF NOT EXISTS place_labels (
             id INTEGER PRIMARY KEY, name TEXT NOT NULL, lat REAL NOT NULL, lon REAL NOT NULL,
             radius_m REAL NOT NULL, address TEXT, category TEXT, provider_place_id TEXT,
-            created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+            source TEXT, started_at TEXT, ended_at TEXT
         );
         CREATE TABLE IF NOT EXISTS events (
             id INTEGER PRIMARY KEY, reminder_id INTEGER NOT NULL REFERENCES reminders(id),
@@ -550,6 +551,10 @@ class Store:
         BEGIN DELETE FROM reverse_regions_spatial WHERE id=old.id; END;
             """)
         if not self.postgres:
+            label_columns = {row[1] for row in self.db.execute("PRAGMA table_info(place_labels)")}
+            for column in ("source", "started_at", "ended_at"):
+                if column not in label_columns:
+                    self.db.execute(f"ALTER TABLE place_labels ADD COLUMN {column} TEXT")
             version = self.db.execute("PRAGMA user_version").fetchone()[0]
             rebuild_analysis = version < 12
             if version < 1:
@@ -789,7 +794,7 @@ class Store:
                 AND (cancelled_at IS NULL OR cancelled_at>?)) ORDER BY id""",
             (parse_time(start), parse_time(end), parse_time(start), parse_time(end),
              parse_time(start), parse_time(end), parse_time(end), parse_time(end), parse_time(end)))
-        labels = self._rows("SELECT id,name,lat,lon,radius_m,updated_at FROM place_labels ORDER BY id")
+        labels = self._rows("SELECT id,name,lat,lon,radius_m,source,started_at,ended_at,updated_at FROM place_labels ORDER BY id")
         value = ["stay-trips-v5", self.analysis_watermark(start, end, source), event_row["count"], event_row["max_id"], places, reminders, labels]
         return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
@@ -1096,14 +1101,18 @@ class Store:
         return {"deleted": int(id_)}
 
     def place_labels(self):
-        """Name corrections: each names every visit whose position falls inside it."""
-        return self._rows("""SELECT id,name,lat,lon,radius_m,address,category,provider_place_id,created_at,updated_at
-            FROM place_labels ORDER BY name,id""")
+        """Name corrections. Without a time window one names every visit to its spot;
+        with one (and usually a source) it names only the visit it was made for."""
+        return self._rows("""SELECT id,name,lat,lon,radius_m,address,category,provider_place_id,source,started_at,ended_at,
+            created_at,updated_at FROM place_labels ORDER BY name,id""")
 
     def save_place_label(self, raw):
         """Pin a name to a position, overriding saved places and provider lookups there.
 
-        Renaming the same visit again replaces its label rather than stacking another.
+        With started_at and ended_at it applies only to stays overlapping that
+        window (from `source`, when given): one visit, untouched by later ones.
+        Without them it names every visit to the spot, past and future.
+        Correcting the same visit, or the same spot, again replaces the label.
         """
         name = str(raw.get("name") or "").strip()
         if not name or len(name) > 120:
@@ -1112,19 +1121,30 @@ class Store:
         radius = float(raw.get("radius_m") or 50)
         if not (-90 <= lat <= 90 and -180 <= lon <= 180 and 20 <= radius <= 1000):
             raise ValueError("invalid label coordinates or radius (20–1000 m)")
+        if bool(raw.get("started_at")) != bool(raw.get("ended_at")):
+            raise ValueError("started_at and ended_at must be given together")
+        started_at = parse_time(raw["started_at"]) if raw.get("started_at") else None
+        ended_at = parse_time(raw["ended_at"]) if raw.get("ended_at") else None
+        if started_at and ended_at < started_at:
+            raise ValueError("ended_at must not be before started_at")
+        source = str(raw.get("source") or "").strip()[:80] or None if started_at else None
         values = (name, lat, lon, radius, str(raw.get("address") or "")[:300], str(raw.get("category") or "")[:160],
-                  str(raw.get("provider_place_id") or "")[:300], parse_time(None))
+                  str(raw.get("provider_place_id") or "")[:300], source, started_at, ended_at, parse_time(None))
+        def same_correction(label):
+            if metres(lat, lon, label["lat"], label["lon"]) > 25 or bool(label["started_at"]) != bool(started_at):
+                return False
+            return not started_at or (label["source"] == source and label["started_at"] <= ended_at and label["ended_at"] >= started_at)
         target = int(raw["id"]) if raw.get("id") else next(
-            (label["id"] for label in self.place_labels() if metres(lat, lon, label["lat"], label["lon"]) <= 25), None)
+            (label["id"] for label in self.place_labels() if same_correction(label)), None)
         if target is not None:
             updated = self.db.execute("""UPDATE place_labels SET name=?,lat=?,lon=?,radius_m=?,address=?,category=?,
-                provider_place_id=?,updated_at=? WHERE id=?""", (*values, target))
+                provider_place_id=?,source=?,started_at=?,ended_at=?,updated_at=? WHERE id=?""", (*values, target))
             if not updated.rowcount:
                 raise ValueError("label not found")
         else:
             target = self.db.execute("""INSERT INTO place_labels
-                (name,lat,lon,radius_m,address,category,provider_place_id,updated_at,created_at)
-                VALUES (?,?,?,?,?,?,?,?,?) RETURNING id""", (*values, values[-1])).fetchone()["id"]
+                (name,lat,lon,radius_m,address,category,provider_place_id,source,started_at,ended_at,updated_at,created_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id""", (*values, values[-1])).fetchone()["id"]
         self.db.execute("DELETE FROM analysis_cache")
         self.db.commit()
         return next(label for label in self.place_labels() if label["id"] == target)
@@ -1834,11 +1854,29 @@ def reverse_geocode(store, lat, lon, radius_m=None):
         return {**result, "cache": "provider", "approximate": False}
 
 
-def label_at(labels, lat, lon):
-    """The name correction covering a position; overlapping labels go to the nearest centre."""
-    covering = [(metres(lat, lon, label["lat"], label["lon"]), label) for label in labels]
-    covering = [(distance, label) for distance, label in covering if distance <= label["radius_m"]]
-    return min(covering, key=lambda item: item[0])[1] if covering else None
+def label_at(labels, lat, lon, source=None, started_at=None, ended_at=None):
+    """The name correction for a position, or for a stay when its source and times are given.
+
+    A visit-only correction applies to a stay from its source that overlaps its
+    window at that spot, and beats an every-visit one; among equals the nearest
+    centre wins. Without a stay's times only every-visit corrections apply.
+    """
+    covering = []
+    for label in labels:
+        distance = metres(lat, lon, label["lat"], label["lon"])
+        if distance > label["radius_m"]:
+            continue
+        if label.get("started_at"):
+            if not started_at or (label.get("source") and label["source"] != source):
+                continue
+            if started_at > label["ended_at"] or ended_at < label["started_at"]:
+                continue
+        covering.append((not label.get("started_at"), distance, label))
+    return min(covering, key=lambda item: item[:2])[2] if covering else None
+
+
+def labels_by_id(labels):
+    return {label["id"]: label for label in labels}
 
 
 def _label_place(label):
@@ -1871,7 +1909,12 @@ def current_location(store):
     point = store.latest()
     if not point:
         return None
-    label = label_at(store.place_labels(), point["lat"], point["lon"])
+    from .analysis import stays
+    ongoing = next((stay for stay in stays(store, start=point["timestamp"], source=point["source"], limit=5)
+                    if stay["ongoing"] and stay["started_at"] <= point["timestamp"]), None)
+    labels = store.place_labels()
+    label = (labels_by_id(labels).get(ongoing["label_id"]) if ongoing and ongoing.get("label_id") else None) \
+        or label_at(labels, point["lat"], point["lon"])
     if label:
         point.update({"place_id": None, **_label_place(label), "place_name": label["name"]})
         return point
