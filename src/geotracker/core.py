@@ -27,7 +27,11 @@ DEFAULT_SETTINGS = {"speed_strategy": "reported", "reported_speed_offset_kmh": 0
                     "places_provider": ""}
 MAX_CONNECTED_GAP_SECONDS = 900
 MAX_PLAUSIBLE_SPEED_MPS = 55.6
-MOVEMENT_MODES = ("driving", "cycling", "running", "walking")
+# Transit (bus, train) is never guessed from speed; it only comes from a correction.
+MOVEMENT_MODES = ("driving", "transit", "cycling", "running", "walking")
+# A correction applies to a trip or area stay that overlaps its window by at
+# least this share, so it survives trips being recalculated a minute either way.
+MODE_OVERRIDE_MIN_OVERLAP = .5
 # A stay may bridge this much time without samples; longer gaps split it.
 MAX_SAMPLE_GAP_SECONDS = 1800
 # Travel that leaves and returns to one place is kept only when it really went somewhere;
@@ -490,6 +494,11 @@ class Store:
             destination_category TEXT, destination_provider_place_id TEXT, match_name TEXT
         );
         CREATE INDEX IF NOT EXISTS reminders_active_created ON reminders(active,created_at);
+        CREATE TABLE IF NOT EXISTS mode_overrides (
+            id INTEGER PRIMARY KEY, source TEXT NOT NULL, target TEXT NOT NULL,
+            started_at TEXT NOT NULL, ended_at TEXT NOT NULL, mode TEXT NOT NULL,
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS place_labels (
             id INTEGER PRIMARY KEY, name TEXT NOT NULL, lat REAL NOT NULL, lon REAL NOT NULL,
             radius_m REAL NOT NULL, address TEXT, category TEXT, provider_place_id TEXT,
@@ -795,7 +804,8 @@ class Store:
             (parse_time(start), parse_time(end), parse_time(start), parse_time(end),
              parse_time(start), parse_time(end), parse_time(end), parse_time(end), parse_time(end)))
         labels = self._rows("SELECT id,name,lat,lon,radius_m,source,started_at,ended_at,updated_at FROM place_labels ORDER BY id")
-        value = ["stay-trips-v6", self.analysis_watermark(start, end, source), event_row["count"], event_row["max_id"], places, reminders, labels]
+        modes = self._rows("SELECT id,source,target,started_at,ended_at,mode FROM mode_overrides ORDER BY id")
+        value = ["stay-trips-v7", modes, self.analysis_watermark(start, end, source), event_row["count"], event_row["max_id"], places, reminders, labels]
         return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
     def stored_daily_overview(self, date, timezone_name, source=None, watermark=None):
@@ -1148,6 +1158,45 @@ class Store:
         self.db.execute("DELETE FROM analysis_cache")
         self.db.commit()
         return next(label for label in self.place_labels() if label["id"] == target)
+
+    def mode_overrides(self):
+        """Travel mode corrections, each for one trip or area stay identified by source and time."""
+        return self._rows("SELECT id,source,target,started_at,ended_at,mode,created_at,updated_at FROM mode_overrides ORDER BY started_at,id")
+
+    def save_mode_override(self, raw):
+        """Set (or with mode "auto", clear) the travel mode of one trip or area stay.
+
+        Trips are recalculated from raw points, so a correction is keyed by
+        source and time window, not an ID. Setting it again for the same trip
+        replaces it.
+        """
+        source = str(raw.get("source") or "").strip()[:80]
+        target = str(raw.get("target") or "trip")
+        mode = str(raw.get("mode") or "").strip()
+        if not source:
+            raise ValueError("source is required")
+        if target not in ("trip", "stay"):
+            raise ValueError("target must be trip or stay")
+        if mode != "auto" and mode not in MOVEMENT_MODES:
+            raise ValueError("mode must be one of: auto, " + ", ".join(MOVEMENT_MODES))
+        started_at, ended_at = parse_time(raw["started_at"]), parse_time(raw["ended_at"])
+        if ended_at <= started_at:
+            raise ValueError("ended_at must be after started_at")
+        existing = mode_override_for(self.mode_overrides(), source, target, started_at, ended_at)
+        if mode == "auto":
+            if existing:
+                self.db.execute("DELETE FROM mode_overrides WHERE id=?", (existing["id"],))
+            result = None
+        elif existing:
+            self.db.execute("UPDATE mode_overrides SET started_at=?,ended_at=?,mode=?,updated_at=? WHERE id=?",
+                            (started_at, ended_at, mode, parse_time(None), existing["id"]))
+            result = existing["id"]
+        else:
+            result = self.db.execute("""INSERT INTO mode_overrides(source,target,started_at,ended_at,mode,created_at,updated_at)
+                VALUES (?,?,?,?,?,?,?) RETURNING id""", (source, target, started_at, ended_at, mode, parse_time(None), parse_time(None))).fetchone()["id"]
+        self.db.execute("DELETE FROM analysis_cache")
+        self.db.commit()
+        return next((item for item in self.mode_overrides() if item["id"] == result), {"source": source, "target": target, "mode": "auto"})
 
     def delete_place_label(self, id_):
         result = self.db.execute("DELETE FROM place_labels WHERE id=?", (int(id_),))
@@ -1883,6 +1932,21 @@ def label_at(labels, lat, lon, source=None, started_at=None, ended_at=None):
                 continue
         covering.append((not label.get("started_at"), distance, label))
     return min(covering, key=lambda item: item[:2])[2] if covering else None
+
+
+def mode_override_for(overrides, source, target, started_at, ended_at):
+    """The correction for a trip or area stay: same source and target, overlapping most of either span."""
+    start, end = datetime.fromisoformat(started_at), datetime.fromisoformat(ended_at)
+    best = None
+    for item in overrides:
+        if item["source"] != source or item["target"] != target:
+            continue
+        item_start, item_end = datetime.fromisoformat(item["started_at"]), datetime.fromisoformat(item["ended_at"])
+        overlap = (min(end, item_end) - max(start, item_start)).total_seconds()
+        shorter = max(1.0, min((end - start).total_seconds(), (item_end - item_start).total_seconds()))
+        if overlap >= MODE_OVERRIDE_MIN_OVERLAP * shorter and (best is None or overlap > best[0]):
+            best = (overlap, item)
+    return best[1] if best else None
 
 
 def labels_by_id(labels):

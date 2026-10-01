@@ -1475,6 +1475,55 @@ class StoreTests(unittest.TestCase):
         daily_overview(self.store, "2026-09-27")
         self.assertFalse(stored_daily_record(self.store, "2026-09-27")["stale"])
 
+    def test_travel_mode_corrections_override_the_speed_guess(self):
+        office = shifted(HOME, 2000, 0)
+        # Crawling 2 km in 25 minutes reads as walking at these speeds.
+        self.store.ingest(minute_fixes([still(HOME, 30), line(HOME, office, 25), still(office, 30)]))
+        day = day_summary(self.store, "2026-09-27", "UTC")
+        trip = day["trips"][0]
+        self.assertEqual(trip["mode"], "walking")
+        # Saved a couple of minutes off, as if the trip had been recalculated since.
+        self.store.save_mode_override({"source": trip["source"], "target": "trip", "mode": "driving",
+                                       "started_at": (datetime.fromisoformat(trip["start"]) + timedelta(minutes=2)).isoformat(),
+                                       "ended_at": (datetime.fromisoformat(trip["end"]) + timedelta(minutes=1)).isoformat()})
+        corrected = day_summary(self.store, "2026-09-27", "UTC")
+        self.assertEqual((corrected["trips"][0]["mode"], corrected["trips"][0]["detected_mode"]), ("driving", "walking"))
+        self.assertEqual((corrected["activity_totals"]["driving"]["count"], corrected["activity_totals"]["walking"]["count"]), (1, 0))
+        self.assertTrue(daily_overview(self.store, "2026-09-27", "UTC")["trips"][0]["mode_corrected"])
+        self.assertEqual([item["mode"] for item in self.store.trips("2026-09-27T00:00:00Z", "2026-09-28T00:00:00Z")], ["driving"])
+        # Setting it again replaces the correction; "auto" restores the guess.
+        self.store.save_mode_override({"source": trip["source"], "mode": "transit", "started_at": trip["start"], "ended_at": trip["end"]})
+        self.assertEqual(len(self.store.mode_overrides()), 1)
+        self.assertEqual(day_summary(self.store, "2026-09-27", "UTC")["activity_totals"]["transit"]["count"], 1)
+        self.store.save_mode_override({"source": trip["source"], "mode": "auto", "started_at": trip["start"], "ended_at": trip["end"]})
+        self.assertEqual((self.store.mode_overrides(), day_summary(self.store, "2026-09-27", "UTC")["trips"][0]["mode"]), ([], "walking"))
+        with self.assertRaisesRegex(ValueError, "mode must be one of"):
+            self.store.save_mode_override({"source": "phone", "mode": "skateboard", "started_at": trip["start"], "ended_at": trip["end"]})
+        with self.assertRaisesRegex(ValueError, "target must be"):
+            self.store.save_mode_override({"source": "phone", "target": "place", "mode": "driving", "started_at": trip["start"], "ended_at": trip["end"]})
+
+    def test_corrected_ride_between_drives_is_not_turned_back_into_driving(self):
+        lot_a, lot_b = shifted(CAMPUS, -200, -300), shifted(CAMPUS, 900, 500)
+        middle = [line(CAMPUS, lot_a, 1), still(lot_a, 90), line(lot_a, lot_b, 4), still(lot_b, 80)]
+        fixes = minute_fixes([still(HOME, 30), line(HOME, CAMPUS, 12), *middle, line(lot_b, HOME, 12), still(HOME, 30)])
+        self.store.ingest(fixes)
+        with patch("geotracker.analysis.place_for_coordinate", return_value={"name": "Street"}):
+            move = [trip for trip in anchored_trips_for_day(self.store) if 1 < trip["distance_km"] < 2][0]
+            self.store.save_mode_override({"source": move["source"], "mode": "cycling", "started_at": move["start"], "ended_at": move["end"]})
+            day = day_summary(self.store, "2026-09-27", "UTC")
+        modes = [trip["mode"] for trip in day["trips"]] + [item["mode"] for stay in day["stays"] for item in stay["internal_moves"]]
+        self.assertIn("cycling", modes)
+
+    def test_area_stay_activity_can_be_corrected(self):
+        self.store.ingest(lake_run_day())
+        lake = next(row for row in stays(self.store, limit=None) if row["kind"] == "area")
+        self.store.save_mode_override({"source": lake["source"], "target": "stay", "mode": "cycling",
+                                       "started_at": lake["started_at"], "ended_at": lake["ended_at"]})
+        corrected = next(row for row in stays(self.store, limit=None) if row["kind"] == "area")
+        self.assertEqual((corrected["activity"], corrected["detected_activity"], corrected["activity_corrected"]), ("cycling", "running", True))
+        totals = day_summary(self.store, "2026-09-27", "UTC")["activity_totals"]
+        self.assertEqual((totals["cycling"]["count"], totals["running"]["count"]), (1, 0))
+
     def test_parked_out_and_back_run_is_one_visit(self):
         trail = shifted(HOME, 15000, 0)
         turn = shifted(trail, 0, 3000)
@@ -1549,6 +1598,11 @@ def campus_label(_store, lat, lon, _radius=None):
     if metres(lat, lon, *HOME) < 200:
         return {"name": "Home Street", "address": "", "category": "", "categories": [], "provider_place_id": "home"}
     return {"name": "Taco Place", "address": "", "category": "catering", "categories": ["catering"], "provider_place_id": "taco"}
+
+
+def anchored_trips_for_day(store):
+    from geotracker.analysis import anchored_trips
+    return anchored_trips(store, "2026-09-27T00:00:00+00:00", "2026-09-27T23:59:59+00:00")
 
 
 def metres_from(row, place):

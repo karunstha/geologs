@@ -44,6 +44,7 @@ TOOLS = [
     {"name": "delete_place", "description": "Delete a saved place. It stops naming visits; a place that a reminder uses is hidden instead so the reminder keeps working.", "inputSchema": schema({"id": INTEGER}, ["id"])},
     {"name": "list_place_labels", "description": "Name corrections pinned to locations. Each one names every visit whose position falls inside its radius, ahead of saved places and provider lookups.", "inputSchema": schema({})},
     {"name": "set_place_label", "description": "Correct the name of a visited place: pin a name to the visit's coordinates (radius_m 20-1000, default 50; use the area's extent for an area stay). History, summaries, and visit search use it instead of the provider's guess. Re-labelling within 25 m replaces the earlier label. Use list_nearby_places to find the right name.", "inputSchema": schema({"name": STRING, "lat": NUMBER, "lon": NUMBER, "radius_m": NUMBER, "address": STRING, "category": STRING, "provider_place_id": STRING}, ["name", "lat", "lon"])},
+    {"name": "set_travel_mode", "description": "Correct how a trip (target 'trip') or an area stay such as a lake loop (target 'stay') was travelled: walking, running, cycling, driving, or transit; 'auto' restores the speed-based guess. Identify it by source and its start/end times from get_day_summary or get_trips; the correction applies to the trip that overlaps most of that window, so small recalculations do not lose it.", "inputSchema": schema({"source": STRING, "target": STRING, "started_at": STRING, "ended_at": STRING, "mode": STRING}, ["source", "started_at", "ended_at", "mode"])},
     {"name": "remove_place_label", "description": "Remove a name correction so visits there are named automatically again.", "inputSchema": schema({"id": INTEGER}, ["id"])},
     {"name": "list_reminders", "description": "Active one-shot location reminders waiting for arrival.", "inputSchema": schema({})},
     {"name": "list_reminder_history", "description": "Past triggered or cancelled location reminders.", "inputSchema": schema({"limit": INTEGER})},
@@ -111,6 +112,8 @@ def call_tool(store, name, args):
         return store.place_labels()
     if name == "set_place_label":
         return store.save_place_label(args)
+    if name == "set_travel_mode":
+        return store.save_mode_override(args)
     if name == "remove_place_label":
         return store.delete_place_label(args["id"])
     if name == "list_reminders":

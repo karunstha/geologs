@@ -15,11 +15,12 @@ const modeInfo={
   driving:{label:'Drive',noun:'Driving',color:'#3567ad',icon:'<svg viewBox="0 0 24 24"><path d="M5 11l1.6-4.2A2 2 0 0 1 8.5 5.5h7a2 2 0 0 1 1.9 1.3L19 11"/><path d="M3.5 11h17v5.5h-17z"/><path d="M6 16.5v2M18 16.5v2"/><circle cx="7.5" cy="13.7" r=".6"/><circle cx="16.5" cy="13.7" r=".6"/></svg>'},
   cycling:{label:'Ride',noun:'Cycling',color:'#8352bd',icon:'<svg viewBox="0 0 24 24"><circle cx="6" cy="16" r="3.5"/><circle cx="18" cy="16" r="3.5"/><path d="M6 16l3.5-7h6L18 16M9.5 9l3 7H6M14 5.5h2.5l-1 3.5"/></svg>'},
   running:{label:'Run',noun:'Running',color:'#cf5f22',icon:'<svg viewBox="0 0 24 24"><circle cx="15.5" cy="4.5" r="1.8"/><path d="M5 20.5l3.5-.5 2.2-3.8M10.7 16.2l3.3 2.3v3M7 11.5l2.5-3.3 4.3.8 2.4 3.3 3 .7M10.8 16.2l2.9-7.2"/></svg>'},
+  transit:{label:'Transit',noun:'Transit',color:'#a83f78',icon:'<svg viewBox="0 0 24 24"><rect x="5" y="3.5" width="14" height="14" rx="2.5"/><path d="M5 11h14M8 17.5v2.5M16 17.5v2.5"/><circle cx="8.5" cy="14.2" r=".7"/><circle cx="15.5" cy="14.2" r=".7"/></svg>'},
   walking:{label:'Walk',noun:'Walking',color:'#2d8a57',icon:'<svg viewBox="0 0 24 24"><circle cx="13" cy="4.5" r="1.8"/><path d="M10 21l1.8-6.2-2.3-2.3.9-4.3 3 .9 1.6 3 2.4.9M11.8 14.8l2.9 2.7.8 3.5M10.4 8.2L7.4 10v3"/></svg>'}
 };
 function modeName(mode){return mode==='running_cycling'?'Running / cycling':modeInfo[mode]?.noun||(mode?mode[0].toUpperCase()+mode.slice(1):'Unknown')}
 function modeIcon(mode){const info=modeInfo[mode];return info?`<span class="mode-icon" style="--mode:${info.color}" aria-hidden="true">${info.icon}</span>`:''}
-function stayActivityText(stay){if(stay.kind!=='area')return'';const distance=stay.distance_m?` · ${distanceText(stay.distance_m/1000)}`:'';return stay.activity?`${modeInfo[stay.activity]?.noun||stay.activity}${distance}`:'Moving around'}
+function stayActivityText(stay){if(stay.kind!=='area')return'';const distance=stay.distance_m?` · ${distanceText(stay.distance_m/1000)}`:'';return stay.activity?`${modeInfo[stay.activity]?.noun||stay.activity}${distance}${stay.activity_corrected?' · set by you':''}`:'Moving around'}
 function roleName(role){return ({arrival:'Arrival',departure:'Departure',latest:'Latest at stop',movement:'Movement'})[role]||'Raw sample'}
 function kmh(point){return point?.speed_mps==null?'—':`${(point.speed_mps*3.6).toFixed(1)} km/h`}
 const placeIcons={
@@ -156,11 +157,46 @@ function drawMap(fit=false){
   if(fit)fitDay();
   drawSelection(false);
 }
+const TRIP_MODES=['walking','running','cycling','driving','transit'],AREA_MODES=['walking','running','cycling'];
+function modeStrip(subject,options,current,corrected,detected){
+  // subject: what the correction is for (source, target, start, end).
+  const buttons=options.map(mode=>`<button type="button" class="mode-option${mode===current?' active':''}" style="--mode:${modeInfo[mode].color}" data-set-mode="${mode}" aria-pressed="${mode===current}">${modeIcon(mode)}${safe(modeInfo[mode].label)}</button>`).join('');
+  const note=corrected?`<span class="mode-note">Detected: ${safe(modeName(detected))}</span><button type="button" class="text-button" data-set-mode="auto">Automatic</button>`:'<span class="mode-note">Detected from speed</span>';
+  return `<li class="tl-mode-picker" data-mode-subject='${safe(JSON.stringify(subject))}'><div class="mode-options">${buttons}</div><div class="mode-meta">${note}</div></li>`;
+}
+function renderModePicker(){
+  document.querySelectorAll('#day-timeline .tl-mode-picker').forEach(item=>item.remove());
+  const item=selectedItem();
+  if(!item)return;
+  const row=document.querySelector(`#day-timeline [data-item="${state.selected.type}:${state.selected.key}"]`)?.closest('li');
+  if(!row)return;
+  let html='';
+  if(item.type==='trip'){
+    const trip=item.trip;
+    html=modeStrip({source:trip.source,target:'trip',started_at:trip.start,ended_at:trip.end},TRIP_MODES,trip.mode,trip.mode_corrected,trip.detected_mode);
+  }else{
+    const stay=item.stay;
+    if(stay.kind==='area')html+=modeStrip({source:stay.source,target:'stay',started_at:stay.started_at,ended_at:stay.ended_at},AREA_MODES,stay.activity,stay.activity_corrected,stay.detected_activity);
+    for(const move of stay.internal_moves||[])html+=modeStrip({source:move.source||stay.source,target:'trip',started_at:move.start,ended_at:move.end},TRIP_MODES,move.mode,move.mode_corrected,null)
+      .replace('<div class="mode-options">',`<div class="mode-caption">Moved within · ${safe(distanceText(move.distance_km))} · ${safe(clock(move.start))}</div><div class="mode-options">`);
+  }
+  if(!html)return;
+  row.insertAdjacentHTML('afterend',html);
+  document.querySelectorAll('#day-timeline .tl-mode-picker [data-set-mode]').forEach(button=>button.onclick=async()=>{
+    const subject=JSON.parse(button.closest('.tl-mode-picker').dataset.modeSubject);
+    try{
+      await post('/api/mode-overrides',{...subject,mode:button.dataset.setMode});
+      toast(button.dataset.setMode==='auto'?'Automatic mode restored':`Set to ${modeInfo[button.dataset.setMode].noun.toLowerCase()}`);
+      await refreshExplore(false);
+    }catch(error){toast(error.message)}
+  });
+}
 function drawSelection(zoom){
   highlightLayer?.clearLayers();
   const item=selectedItem();
   const key=state.selected?`${state.selected.type}:${state.selected.key}`:null;
   document.querySelectorAll('#day-timeline [data-item]').forEach(row=>{const active=row.dataset.item===key;row.classList.toggle('selected',active);row.setAttribute('aria-pressed',String(active))});
+  renderModePicker();
   $('fit-day').hidden=!item;
   if(!item){if(state.day)$('map-note').textContent=mapNote(state.day);return}
   const subject=item.type==='trip'?item.trip:item.stay;
@@ -246,6 +282,7 @@ function renderTimeline(day){
     const trip=item.trip,info=modeInfo[trip.mode]||{label:'Trip',color:'#6f7b76'};
     const notes=[`${clock(trip.start)} – ${clock(trip.end)}`,durationText(trip.duration_minutes)];
     if(!trip.coverage_complete)notes.push('coverage gap');
+    if(trip.mode_corrected)notes.push('set by you');
     // A trip that ends where it began left and came back; say so rather than implying travel to where you already were.
     const title=trip.loop?`Round trip · ${info.label} ${distanceText(trip.distance_km)}`:`${info.label} · ${distanceText(trip.distance_km)}`;
     const from=trip.loop?`<span class="tl-within">${safe(roundTripNote(trip))}</span>`:'';

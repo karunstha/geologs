@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .core import (MAX_CONNECTED_GAP_SECONDS, MAX_PLAUSIBLE_SPEED_MPS, MAX_SAMPLE_GAP_SECONDS, MOVEMENT_MODES,
-                   _label_place, classify_motion, is_excursion, label_at, went_elsewhere_between, metres, name_matches,
+                   _label_place, classify_motion, is_excursion, label_at, mode_override_for, went_elsewhere_between, metres, name_matches,
                    nearby_places,
                    parse_time, place_for_coordinate,
                    places_provider_identity, reported_speed, search_text, street_key,
@@ -629,7 +629,7 @@ def stays(store, start=None, end=None, source=None, limit=500):
     # previous_stay_id lets callers tell whether went_elsewhere refers to the stay they hold.
     rows = store._rows("""SELECT * FROM (SELECT s.*,LAG(s.id) OVER (PARTITION BY s.source ORDER BY s.started_at,s.id)
         AS previous_stay_id FROM observed_stays_v2 s""" + where + ") ordered ORDER BY started_at DESC" + suffix, args)
-    places, labels = store.places(), store.place_labels()
+    places, labels, overrides = store.places(), store.place_labels(), store.mode_overrides()
     for row in rows:
         row["observed_minutes"] = round((datetime.fromisoformat(row["ended_at"]) - datetime.fromisoformat(row["started_at"])).total_seconds() / 60, 1)
         # A name you pinned to this spot is the most specific statement about
@@ -639,6 +639,10 @@ def stays(store, start=None, end=None, source=None, limit=500):
         row["label_id"] = label["id"] if label else None
         row["place_id"] = place["id"] if place else None
         row["place_name"] = label["name"] if label else place["name"] if place else None
+        if row.get("kind") == "area":
+            override = mode_override_for(overrides, row["source"], "stay", row["started_at"], row["ended_at"])
+            if override:
+                row.update(detected_activity=row.get("activity"), activity=override["mode"], activity_corrected=True)
     return rows
 
 
@@ -648,7 +652,15 @@ def anchored_trips(store, start=None, end=None, source=None):
     context_end = (datetime.fromisoformat(parse_time(end)) + timedelta(days=1)).isoformat() if end else None
     anchors = stays(store, context_start, context_end, source=source, limit=None)
     points = list(reversed(store.observations(context_start, context_end, source=source, limit=None)))
-    return trips_between_stays(points, anchors, start, end)
+    trips = trips_between_stays(points, anchors, start, end)
+    overrides = store.mode_overrides()
+    for trip in trips:
+        override = mode_override_for(overrides, trip["source"], "trip", trip["start"], trip["end"])
+        if override:
+            # Your correction beats the speed-based guess (kept as detected_mode).
+            trip.update(detected_mode=trip["mode"], mode=override["mode"], mode_corrected=True,
+                        modes={override["mode"]: sum(trip["modes"].values())})
+    return trips
 
 
 def _bucket(lat, lon):
@@ -1069,7 +1081,7 @@ def day_summary(store, date, timezone_name="UTC", source=None):
     end = (day_end - timedelta(microseconds=1)).isoformat()
     # Switching the places provider in Settings re-resolves every day's names.
     provider = places_provider_identity(store)
-    cache_identity = json.dumps(["day-v11", date, timezone_name, source, provider], separators=(",", ":"))
+    cache_identity = json.dumps(["day-v12", date, timezone_name, source, provider], separators=(",", ":"))
     cache_key = "day:" + hashlib.sha256(cache_identity.encode()).hexdigest()
     watermark = store.analysis_watermark(start, end, source)
     cached = store.cached_analysis(cache_key, watermark)
@@ -1117,7 +1129,7 @@ def day_summary(store, date, timezone_name="UTC", source=None):
         by_source.setdefault(trip["source"], []).append(trip)
     for sequence in by_source.values():
         for before, trip, after in zip(sequence, sequence[1:], sequence[2:]):
-            if trip["mode"] == "cycling" and before["mode"] == after["mode"] == "driving":
+            if trip["mode"] == "cycling" and not trip.get("mode_corrected") and before["mode"] == after["mode"] == "driving":
                 trip.update(mode="driving", modes={"driving": sum(trip["modes"].values())}, mode_from_context=True)
     kept_trips, internal_moves, saved_places, saved_labels = [], {}, store.places(), store.place_labels()
     for trip in trips:
@@ -1130,12 +1142,13 @@ def day_summary(store, date, timezone_name="UTC", source=None):
             # "to" the place you were already at. A real round trip (lunch
             # off campus, a run from home) stays; drift is dropped.
             if trip.get("went_elsewhere") is False:
-                move = {key: trip[key] for key in ("start", "end", "mode", "distance_km", "duration_minutes", "route_segments")}
+                move = {key: trip.get(key) for key in ("source", "start", "end", "mode", "distance_km", "duration_minutes",
+                                                       "route_segments", "mode_corrected")}
                 # Crossing a campus from sparse fixes looks fast: the phone held
                 # its last position, then jumped. Under 1 km inside one place is
                 # walking between buildings, not a ride or the car you arrived
                 # in, unless the device itself reported the speed.
-                if (move["distance_km"] < 1 and not trip.get("speed_reported")
+                if (move["distance_km"] < 1 and not trip.get("speed_reported") and not trip.get("mode_corrected")
                         and (move["mode"] in ("running", "cycling") or trip.get("mode_from_context"))):
                     move["mode"] = "walking"
                 internal_moves[(trip["from_stay_id"], trip["to_stay_id"])] = move
@@ -1255,7 +1268,8 @@ def daily_overview(store, date, timezone_name=None, source=None):
                       "mode": trip["mode"], "distance_km": trip["distance_km"],
                       "from": trip.get("from_name") or endpoint_name([trip["from_lon"], trip["from_lat"]]),
                       "to": trip.get("to_name") or endpoint_name([trip["to_lon"], trip["to_lat"]]),
-                      "round_trip": bool(trip.get("loop")), "coverage_complete": trip["coverage_complete"]})
+                      "round_trip": bool(trip.get("loop")), "mode_corrected": bool(trip.get("mode_corrected")),
+                      "coverage_complete": trip["coverage_complete"]})
     visits = [{"place": stay.get("display_name") or stay.get("place_name"),
                "arrival": stay["started_at"], "departure": stay["ended_at"],
                "observed_minutes": stay["observed_minutes"], "kind": stay["kind"],
