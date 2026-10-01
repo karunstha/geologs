@@ -11,7 +11,7 @@ from .core import (MAX_CONNECTED_GAP_SECONDS, MAX_PLAUSIBLE_SPEED_MPS, MAX_SAMPL
                    _label_place, classify_motion, is_excursion, label_at, went_elsewhere_between, metres, name_matches,
                    nearby_places,
                    parse_time, place_for_coordinate,
-                   places_provider_identity, reported_speed, search_text,
+                   places_provider_identity, reported_speed, search_text, street_key,
                    route_segments_from_points, smooth_route_segment, stats_from_points, trips_between_stays)
 
 
@@ -36,6 +36,10 @@ AREA_MIN_ACTIVITY_EXTENT_M = 150
 # Everything between parking and driving away is one visit (an out-and-back
 # trail run) when it circulates as a whole and stays within this extent.
 AREA_PARKED_MAX_EXTENT_M = 5000
+# Places known only by a street address merge with others on the same street
+# this close: indoor GPS drifts 100 m or more, and every drift picks another
+# house number.
+ADDRESS_MERGE_M = 200
 # Name-only reminders check the places around you after this long still. A
 # full 15 minute stay would miss a quick coffee run.
 NAME_REMINDER_DWELL_SECONDS = 180
@@ -732,7 +736,8 @@ def resolve_place_patterns(store, patterns):
 
     Provider IDs are authoritative. Equal normalized names are also merged when
     their coordinates are within 2.5 km, which joins large parks and lakes while
-    keeping distant branches of a chain separate.
+    keeping distant branches of a chain separate. Places with no name, only a
+    street address, merge within ADDRESS_MERGE_M on the same street.
     """
     clusters, stay_mapping = patterns
     saved = {place["id"]: place for place in store.places(enrich=True)}
@@ -749,7 +754,8 @@ def resolve_place_patterns(store, patterns):
         resolved.append({**cluster, "name": name, "display_name": name or cluster["display_name"],
                          "address": found.get("address") or "", "category": category or "",
                          "categories": categories, "provider_place_id": found.get("provider_place_id") or "",
-                         "saved": bool(place), "label_id": cluster.get("label_id") or found.get("label_id")})
+                         "saved": bool(place), "label_id": cluster.get("label_id") or found.get("label_id"),
+                         "_street": None if place or label or found.get("named", True) else street_key(found.get("address"))})
 
     parent = list(range(len(resolved)))
     def root(index):
@@ -762,7 +768,7 @@ def resolve_place_patterns(store, patterns):
         if a != b:
             parent[b] = a
 
-    saved_ids, provider_ids, names = {}, {}, {}
+    saved_ids, provider_ids, names, streets = {}, {}, {}, {}
     for index, place in enumerate(resolved):
         if place.get("place_id") is not None:
             key = place["place_id"]
@@ -782,6 +788,12 @@ def resolve_place_patterns(store, patterns):
                 if metres(place["lat"], place["lon"], resolved[other]["lat"], resolved[other]["lon"]) <= 2500:
                     union(index, other)
             names.setdefault(name, []).append(index)
+        street = place.get("_street")
+        if street:
+            for other in streets.get(street, []):
+                if metres(place["lat"], place["lon"], resolved[other]["lat"], resolved[other]["lon"]) <= ADDRESS_MERGE_M:
+                    union(index, other)
+            streets.setdefault(street, []).append(index)
 
     grouped, raw_to_merged = [], {}
     by_root = {}
@@ -825,6 +837,7 @@ def resolve_place_patterns(store, patterns):
     counts = _count_visits([(*span, index) for index, place in enumerate(grouped) for span in place.get("_spans") or []])
     for index, place in enumerate(grouped):
         place.pop("_weight", None)
+        place.pop("_street", None)
         if place.pop("_spans", None) is not None:
             place["visits"] = counts.get(index, 0)
     mapping = {stay_id: raw_to_merged[cluster_id] for stay_id, cluster_id in stay_mapping.items()}
@@ -1027,7 +1040,7 @@ def day_summary(store, date, timezone_name="UTC", source=None):
     end = (day_end - timedelta(microseconds=1)).isoformat()
     # Switching the places provider in Settings re-resolves every day's names.
     provider = places_provider_identity(store)
-    cache_identity = json.dumps(["day-v10", date, timezone_name, source, provider], separators=(",", ":"))
+    cache_identity = json.dumps(["day-v11", date, timezone_name, source, provider], separators=(",", ":"))
     cache_key = "day:" + hashlib.sha256(cache_identity.encode()).hexdigest()
     watermark = store.analysis_watermark(start, end, source)
     cached = store.cached_analysis(cache_key, watermark)

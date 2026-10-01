@@ -11,7 +11,7 @@ from email.message import Message
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from geotracker.core import Store, classify_motion, current_location, deliver_webhook, geocode, mode_for, name_matches, nearby_places, places_provider, places_provider_identity, reverse_cache_radius, reverse_geocode, route_segments_from_points, smooth_route_segment
+from geotracker.core import Store, classify_motion, current_location, deliver_webhook, geocode, mode_for, name_matches, nearby_places, places_provider, street_key, places_provider_identity, reverse_cache_radius, reverse_geocode, route_segments_from_points, smooth_route_segment
 from geotracker.analysis import daily_overview, day_summary, insights, place_patterns, predict_next, resolve_place_patterns, search_visits, stays, transitions, visited_places
 
 
@@ -1422,6 +1422,27 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(self.store.save_place({"name": "Market", "lat": 41.2, "lon": -87.9})["name"], "Market")
         with self.assertRaisesRegex(ValueError, "saved place not found"):
             self.store.delete_place(unused["id"])
+
+    def test_unnamed_places_on_one_street_are_one_place_despite_gps_drift(self):
+        house, drifted = shifted(HOME, 4000, 0), shifted(HOME, 4140, 30)        # 143 m apart
+        far_down, cross_street = shifted(HOME, 4600, 0), shifted(HOME, 4000, 120)
+        cafe = shifted(HOME, 4000, -150)                                             # named, 150 m away
+        labels = {house: "9004 Longacre Drive", drifted: "9109 Longacre Drive", far_down: "9600 Longacre Drive",
+                  cross_street: "1200 Pine Street", cafe: "Corner Cafe"}
+        def resolve(_store, lat, lon, _radius=None):
+            spot = min(labels, key=lambda key: abs(key[0] - lat) + abs(key[1] - lon))
+            named = labels[spot] == "Corner Cafe"
+            address = labels[spot] if named else labels[spot] + ", Little Rock, Arkansas 72205, United States"
+            return {"name": address, "named": named, "address": address, "category": "", "categories": [], "provider_place_id": ""}
+        for day, spot, hours in ((20, house, 8), (21, drifted, 5), (22, house, 8), (23, far_down, 2), (24, cross_street, 2), (25, cafe, 1)):
+            self.store.ingest(minute_fixes([still(spot, hours * 60)], start=datetime(2026, 9, day, 1, tzinfo=timezone.utc)))
+        with patch("geotracker.analysis.place_for_coordinate", side_effect=resolve):
+            places = {place["name"].split(",")[0]: place["visits"] for place in visited_places(self.store)}
+        # The drifted stay joins the place where most time was spent; the rest stay apart.
+        self.assertEqual(places, {"9004 Longacre Drive": 3, "9600 Longacre Drive": 1, "1200 Pine Street": 1, "Corner Cafe": 1})
+        self.assertEqual(street_key("9004 Longacre Drive, Little Rock, Arkansas 72205, United States"), "longacre drive|little rock")
+        self.assertIsNone(street_key("Lake Willastein Park, Maumelle, AR"))
+        self.assertIsNone(street_key("9004 Longacre Drive"))
 
     def test_parked_out_and_back_run_is_one_visit(self):
         trail = shifted(HOME, 15000, 0)

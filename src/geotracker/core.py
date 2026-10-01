@@ -795,7 +795,7 @@ class Store:
             (parse_time(start), parse_time(end), parse_time(start), parse_time(end),
              parse_time(start), parse_time(end), parse_time(end), parse_time(end), parse_time(end)))
         labels = self._rows("SELECT id,name,lat,lon,radius_m,source,started_at,ended_at,updated_at FROM place_labels ORDER BY id")
-        value = ["stay-trips-v5", self.analysis_watermark(start, end, source), event_row["count"], event_row["max_id"], places, reminders, labels]
+        value = ["stay-trips-v6", self.analysis_watermark(start, end, source), event_row["count"], event_row["max_id"], places, reminders, labels]
         return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
     def stored_daily_overview(self, date, timezone_name, source=None, watermark=None):
@@ -1810,6 +1810,16 @@ def search_text(value):
     return " ".join(re.sub(r"[^\w]+", " ", text).split())
 
 
+def street_key(address):
+    """The street and town of a house address: "9004 Longacre Drive, Little Rock, ..." -> "longacre drive|little rock".
+
+    None when the first part does not start with a house number.
+    """
+    parts = [part.strip() for part in str(address or "").split(",") if part.strip()]
+    match = re.match(r"^\d+[\w/-]*\s+(.+)$", parts[0]) if len(parts) >= 2 else None
+    return search_text(match.group(1)) + "|" + search_text(parts[1]) if match else None
+
+
 def name_matches(pattern, name):
     """Whether a place name matches what a reminder asked for.
 
@@ -1880,7 +1890,7 @@ def labels_by_id(labels):
 
 
 def _label_place(label):
-    return {"name": label["name"], "address": label.get("address") or "", "category": label.get("category") or "",
+    return {"name": label["name"], "named": True, "address": label.get("address") or "", "category": label.get("category") or "",
             "categories": [label["category"]] if label.get("category") else [],
             "provider_place_id": label.get("provider_place_id") or "", "label_id": label["id"]}
 
@@ -1895,13 +1905,15 @@ def place_for_coordinate(store, lat, lon, radius_m=None):
         return _label_place(label)
     try:
         value = reverse_geocode(store, lat, lon, radius_m)
+        # `named` is false when only a street address was found nearby.
         return {"name": str(value.get("place_name") or value.get("name") or value.get("address") or "")[:300],
+                "named": bool(value.get("place_name")),
                 "address": str(value.get("address") or "")[:300],
                 "category": str(value.get("category") or "")[:160],
                 "categories": value.get("categories") if isinstance(value.get("categories"), list) else [],
                 "provider_place_id": str(value.get("provider_place_id") or "")[:300]}
     except (ValueError, OSError, KeyError):
-        return {"name": "", "address": "", "category": "", "categories": [], "provider_place_id": ""}
+        return {"name": "", "named": False, "address": "", "category": "", "categories": [], "provider_place_id": ""}
 
 
 def current_location(store):
