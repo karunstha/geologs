@@ -65,7 +65,7 @@ async function api(path,options={}){
   const value=await response.json();if(!response.ok)throw Error(value.error||`HTTP ${response.status}`);return value;
 }
 async function post(path,body){return api(path,{method:'POST',body:JSON.stringify(body)})}
-function showView(view){document.querySelectorAll('.view').forEach(el=>el.classList.toggle('active',el.id===view+'-view'));document.querySelectorAll('.nav').forEach(el=>el.classList.toggle('active',el.dataset.view===view));if(view==='explore'&&map)setTimeout(()=>map.invalidateSize(),20);if(view==='summaries')refreshSummaries().catch(error=>toast(error.message))}
+function showView(view){document.querySelectorAll('.view').forEach(el=>el.classList.toggle('active',el.id===view+'-view'));document.querySelectorAll('.nav').forEach(el=>{const active=el.dataset.view===view;el.classList.toggle('active',active);if(active)el.setAttribute('aria-current','page');else el.removeAttribute('aria-current')});if(view==='explore'&&map)setTimeout(()=>map.invalidateSize(),20);if(view==='summaries')refreshSummaries().catch(error=>toast(error.message))}
 function initMap(){
   if(!window.L){$('map').innerHTML='<div class="empty" style="padding:30px">Map library could not load. Check your internet connection.</div>';return}
   map=L.map('map',{zoomControl:false}).setView([39.5,-98.35],4);
@@ -272,6 +272,7 @@ function renderTimeline(day){
   const counts=[`${day.stays.length} stay${day.stays.length===1?'':'s'}`,`${day.trips.length} trip${day.trips.length===1?'':'s'}`];
   if((day.timeline_sources||[]).length>1)counts.push(`${day.timeline_sources.length} sources`);
   $('timeline-count').textContent=day.stays.length||day.trips.length?counts.join(' · '):'';
+  $('timeline-count').hidden=!(day.stays.length||day.trips.length);
   $('timeline-count').title=(day.timeline_sources||[]).length>1?`Combined from ${day.timeline_sources.join(', ')}; where sources overlap, the one with the most samples is shown.`:'';
   $('day-timeline').innerHTML=items.map(item=>{
     if(item.type==='gap')return `<li class="tl-gap"><span>No location data</span><small>${safe(clock(item.gap.start))} – ${safe(clock(item.gap.end))} · ${safe(durationText(item.gap.minutes))}</small></li>`;
@@ -307,8 +308,10 @@ function renderSummary(day){
   $('stat-moving').textContent=durationText(day.movement_minutes);
   $('stat-places').textContent=day.visited_places.length.toLocaleString();
   $('stat-trips').textContent=day.trips.length.toLocaleString();
-  $('activity-chips').innerHTML=Object.entries(day.activity_totals).filter(([,totals])=>totals.count).map(([mode,totals])=>
+  const activity=Object.entries(day.activity_totals).filter(([,totals])=>totals.count).map(([mode,totals])=>
     `<span class="chip" style="--mode:${modeInfo[mode].color}">${modeIcon(mode)}<strong>${modeInfo[mode].noun}</strong><span>${distanceText(totals.distance_km)} · ${durationText(totals.minutes)}</span></span>`).join('');
+  $('activity-chips').innerHTML=activity;
+  document.querySelector('.history-activity').hidden=!activity;
   const modes=new Set([...day.trips.map(trip=>trip.mode),...day.stays.flatMap(stay=>[stay.activity,...(stay.internal_moves||[]).map(move=>move.mode)]).filter(Boolean)]);
   $('map-legend').innerHTML='<span><i class="legend-line" style="--mode:#8ea8a2"></i>Recorded path</span>'+[...modes].filter(mode=>modeInfo[mode]).map(mode=>`<span><i class="legend-line" style="--mode:${modeInfo[mode].color}"></i>${modeInfo[mode].noun}</span>`).join('');
 }
@@ -324,7 +327,7 @@ function renderExplore(day,coverage){
   $('today').disabled=day.date===localDateKey();
   const empty=$('history-empty');
   empty.querySelector('strong').textContent=hasArchive?'No fixes for this day':'No locations recorded';
-  empty.querySelector('span').textContent=hasArchive?'Choose another date to explore your history.':'Connect a location source to see your history here.';
+  $('history-empty-copy').textContent=hasArchive?'Choose another date to explore your history.':'Connect a location source to see your history here.';
   $('summary').hidden=!hasArchive;
   $('history-details').hidden=!hasHistory;
   $('inspector').hidden=!hasHistory;
@@ -334,8 +337,9 @@ function renderExplore(day,coverage){
   $('locate').hidden=!(state.current||day.last_location);
   $('history-layout').classList.toggle('no-data',!hasMapContent);
   $('history-layout').classList.toggle('map-only',!hasHistory);
-  $('day-context').hidden=!hasHistory;
-  if(hasHistory)$('day-context').textContent=(day.points===1?'One fix at '+clock(day.first_fix):'Fixes from '+clock(day.first_fix)+' to '+clock(day.last_fix))+' · '+day.points.toLocaleString()+' samples · gaps are unobserved';
+  $('day-context').hidden=false;
+  $('day-context').textContent=hasHistory?(day.points===1?'One fix at '+clock(day.first_fix):'Fixes from '+clock(day.first_fix)+' to '+clock(day.last_fix))+' · '+day.points.toLocaleString()+' samples · gaps are unobserved'
+    :hasArchive?'No fixes were recorded on this date. Choose another day to keep exploring.':'Connect a location source to begin building your private history.';
   // Keep the map where the viewer left it on background refreshes; fit only for a new day or source.
   const viewKey=`${day.date}|${day.source||''}`;
   const newView=state.fitKey!==viewKey;
@@ -356,9 +360,11 @@ function renderCurrent(){
   const point=state.current;
   $('current-location').hidden=!point;
   if(!point)return;
+  $('current-location').classList.toggle('stale',!!point.stale);
   $('current-place').innerHTML=placeIcon({...point,name:point.place_name})+'<span>'+safe(point.place_name||point.address||'Unknown place')+'</span>';
   const age=point.age_seconds<60?'just now':point.age_seconds<3600?`${Math.floor(point.age_seconds/60)} min ago`:`${Math.floor(point.age_seconds/3600)} hr ago`;
   $('current-updated').textContent=`Updated ${formatTime(point.timestamp)} · ${age}${point.stale?' · stale':''}`;
+  document.querySelector('.live-badge').textContent=point.stale?'Stale fix':'Latest fix';
   $('current-coordinates').textContent=`${Number(point.lat).toFixed(6)}, ${Number(point.lon).toFixed(6)}`;
 }
 function fillPlaceSelectors(){const select=$('reminder-place'),value=select.value;select.innerHTML='<option value="">Select a saved place</option>'+state.places.map(p=>`<option value="${p.id}">${safe(p.name)}</option>`).join('')+'<option value="other">Other place or coordinates…</option><option value="named">Any place named…</option>';select.value=[...select.options].some(option=>option.value===value)?value:'';toggleReminderDestination()}
@@ -448,6 +454,8 @@ function renderPlaces(){
   // Saved-place totals include Home, which the visited list leaves out.
   const usage=new Map(Object.entries(state.savedStats||{}).map(([id,stats])=>[+id,stats]));
   const saved=[...state.places].sort((a,b)=>(usage.get(b.id)?.observed_minutes||0)-(usage.get(a.id)?.observed_minutes||0)||a.name.localeCompare(b.name));
+  $('saved-place-count').textContent=saved.length.toLocaleString();
+  $('saved-place-count').hidden=!saved.length;
   $('places-list').innerHTML=saved.map(p=>{const seen=usage.get(p.id);const activity=seen?`${seen.visits} visit${seen.visits===1?'':'s'} · ${seen.observed_minutes.toFixed(0)} min observed`:'No confirmed visits yet';return `<div class="list-item"><div class="place-main">${placeIcon(p)}<div><strong>${safe(p.name)}</strong><small>${safe(activity)} · ${Math.round(p.radius_m)} m radius${p.address?' · '+safe(p.address):''}</small></div></div><div class="actions"><button data-focus="${p.id}">Map</button><button data-edit="${p.id}">Edit</button><button data-delete-place="${p.id}" class="danger-button">Delete</button></div></div>`}).join('')||'<div class="empty">No saved places yet.</div>';
   $('places-list').querySelectorAll('[data-focus]').forEach(button=>button.onclick=()=>focusPlaceOnMap(state.places.find(place=>place.id===+button.dataset.focus)));
   $('places-list').querySelectorAll('[data-edit]').forEach(button=>button.onclick=()=>openPlaceDialog(state.places.find(place=>place.id===+button.dataset.edit)));
@@ -457,10 +465,16 @@ function renderPlaces(){
     try{await post('/api/places/delete',{id:place.id});await afterPlaceNamesChanged('Place deleted')}catch(error){toast(error.message)}
   });
   $('all-visited-places').innerHTML=state.visitedPlaces.map((place,index)=>`<div class="list-item"><div class="place-main">${placeIcon(place)}<div><strong>${safe(place.display_name)}</strong><small>${place.visits} visit${place.visits===1?'':'s'} · ${place.observed_minutes.toFixed(0)} min observed · Last ${safe(formatTime(place.last_seen))}</small></div></div><div class="actions"><button data-map-visited="${index}">Map</button><button data-edit-visited="${index}">Edit place</button></div></div>`).join('')||'<div class="empty">No confirmed visited places yet.</div>';
+  $('visited-place-count').textContent=state.visitedPlaces.length.toLocaleString();
+  $('visited-place-count').hidden=!state.visitedPlaces.length;
   $('all-visited-places').querySelectorAll('[data-map-visited]').forEach(button=>button.onclick=()=>focusPlaceOnMap(state.visitedPlaces[+button.dataset.mapVisited]));
   $('all-visited-places').querySelectorAll('[data-edit-visited]').forEach(button=>button.onclick=()=>editVisitedPlace(state.visitedPlaces[+button.dataset.editVisited]));
 }
 function renderReminders(){
+  $('active-reminder-count').textContent=state.reminders.length.toLocaleString();
+  $('active-reminder-count').hidden=!state.reminders.length;
+  $('reminder-history-count').textContent=state.reminderHistory.length.toLocaleString();
+  $('reminder-history-count').hidden=!state.reminderHistory.length;
   $('reminders-list').innerHTML=state.reminders.map(r=>`<div class="list-item"><div class="place-main">${placeIcon(r)}<div><strong>${safe(r.text)}</strong><small>${safe(r.match_name?reminderWhere(r):'At '+r.place_name)} · Created ${safe(formatTime(r.created_at))}</small></div></div><button data-cancel-reminder="${r.id}">Cancel</button></div>`).join('')||'<div class="empty">No active reminders.</div>';
   $('reminders-list').querySelectorAll('[data-cancel-reminder]').forEach(button=>button.onclick=async()=>{try{await post('/api/reminders/cancel',{id:+button.dataset.cancelReminder});await refreshMeta();toast('Reminder cancelled')}catch(error){toast(error.message)}});
   $('reminder-history').innerHTML=state.reminderHistory.map(item=>`<div class="list-item"><div class="place-main">${placeIcon(item)}<div><strong>${safe(item.text)}</strong><small>${safe(reminderWhere(item))} · ${item.status==='triggered'?'Triggered '+safe(formatTime(item.triggered_at)):'Cancelled '+safe(formatTime(item.cancelled_at||item.created_at))}</small></div></div></div>`).join('')||'<div class="empty">Triggered and cancelled reminders will appear here.</div>';
@@ -513,71 +527,95 @@ async function refreshExplore(resetRawPage=true){
   renderExplore(day,coverage);
 }
 function renderDailySummaries(){$('daily-summaries').innerHTML=state.dailySummaries.slice(0,10).map(item=>`<div class="list-item"><div><strong>${safe(item.date)}</strong><small>${item.trip_count} trips · ${Number(item.distance_km).toFixed(1)} km · ${item.place_count} places · ${item.reminder_count} reminders</small></div><button type="button" data-open-summary="${safe(item.date)}">View</button></div>`).join('')||'<div class="empty">A summary will be saved after the first completed day.</div>';
-  $('daily-summaries').querySelectorAll('[data-open-summary]').forEach(button=>button.onclick=()=>{showView('summaries');openSummary(button.dataset.openSummary)})}
+  $('daily-summaries').querySelectorAll('[data-open-summary]').forEach(button=>button.onclick=()=>{showView('summaries');openSummary(button.dataset.openSummary,false,true)})}
 function longDate(value){const [year,month,day]=value.split('-').map(Number);return new Date(year,month-1,day).toLocaleDateString(undefined,{weekday:'short',month:'short',day:'numeric',year:'numeric'})}
 function summaryLine(item){return `${item.trip_count} trip${item.trip_count===1?'':'s'} · ${Number(item.distance_km).toFixed(1)} km · ${item.place_count} place${item.place_count===1?'':'s'}${item.reminder_count?` · ${item.reminder_count} reminder${item.reminder_count===1?'':'s'}`:''}`}
+function summaryDateParts(value){const [year,month,day]=value.split('-').map(Number),date=new Date(year,month-1,day);return{month:date.toLocaleDateString(undefined,{month:'long',year:'numeric'}),weekday:date.toLocaleDateString(undefined,{weekday:'short'}),day}}
+function summaryCatalogMarkup(items){
+  const groups=new Map();
+  for(const item of items){const parts=summaryDateParts(item.date);if(!groups.has(parts.month))groups.set(parts.month,[]);groups.get(parts.month).push({...item,...parts})}
+  return [...groups.entries()].map(([month,days])=>`<section class="summary-month"><h3>${safe(month)}</h3>${days.map(item=>`<button type="button" class="summary-day${item.date===state.summaryDate?' selected':''}" data-summary="${safe(item.date)}" aria-current="${item.date===state.summaryDate?'date':'false'}" aria-label="${safe(longDate(item.date)+', '+summaryLine(item))}"><span class="summary-day-calendar"><span>${safe(item.weekday)}</span><strong>${item.day}</strong></span><span class="summary-day-copy"><strong>${Number(item.distance_km).toFixed(1)} km</strong><small>${item.trip_count} trip${item.trip_count===1?'':'s'} · ${item.place_count} place${item.place_count===1?'':'s'}${item.reminder_count?` · ${item.reminder_count} reminder${item.reminder_count===1?'':'s'}`:''}</small></span><span class="summary-day-arrow" aria-hidden="true">›</span></button>`).join('')}</section>`).join('');
+}
 async function refreshSummaries(){
   state.summaryCatalog=await api('/api/daily-summaries?limit=1000');
-  $('summary-count').textContent=state.summaryCatalog.length?`${state.summaryCatalog.length} day${state.summaryCatalog.length===1?'':'s'}`:'';
-  $('summary-index').innerHTML=state.summaryCatalog.map(item=>`<button type="button" class="summary-day${item.date===state.summaryDate?' selected':''}" data-summary="${safe(item.date)}"><strong>${safe(longDate(item.date))}</strong><small>${safe(summaryLine(item))}</small></button>`).join('')
-    ||'<p class="empty">Nothing stored yet. The first record is written after midnight, or open a day above to build one.</p>';
-  $('summary-index').querySelectorAll('[data-summary]').forEach(button=>button.onclick=()=>openSummary(button.dataset.summary));
+  $('summary-count').textContent=state.summaryCatalog.length?state.summaryCatalog.length.toLocaleString():'';
+  $('summary-count').hidden=!state.summaryCatalog.length;
+  $('summary-date').max=localDateKey();
+  $('summary-index').innerHTML=summaryCatalogMarkup(state.summaryCatalog)
+    ||'<div class="summary-index-empty"><strong>No saved days yet</strong><p>A summary is saved after the first completed day. You can also jump to a past date to build one.</p></div>';
+  $('summary-index').querySelectorAll('[data-summary]').forEach(button=>button.onclick=()=>openSummary(button.dataset.summary,false,true));
   if(!state.summaryDate&&state.summaryCatalog[0])openSummary(state.summaryCatalog[0].date);
 }
-async function openSummary(date,build=false){
+async function openSummary(date,build=false,reveal=false){
   state.summaryDate=date;$('summary-date').value=date;
-  document.querySelectorAll('#summary-index [data-summary]').forEach(button=>button.classList.toggle('selected',button.dataset.summary===date));
+  document.querySelectorAll('#summary-index [data-summary]').forEach(button=>{const selected=button.dataset.summary===date;button.classList.toggle('selected',selected);button.setAttribute('aria-current',selected?'date':'false')});
   const box=$('summary-detail');
-  box.innerHTML=`<p class="empty">${build?'Building':'Loading'} the summary for ${safe(longDate(date))}…</p>`;
+  box.setAttribute('aria-busy','true');
+  box.innerHTML=`<div class="summary-loading"><span class="summary-spinner" aria-hidden="true"></span><strong>${build?'Building your summary':'Opening your summary'}</strong><span>${safe(longDate(date))}</span></div>`;
+  if(reveal&&window.matchMedia('(max-width:950px)').matches)box.scrollIntoView({behavior:window.matchMedia('(prefers-reduced-motion: reduce)').matches?'auto':'smooth',block:'start'});
   try{
     // Building writes the record (or refreshes it if its data changed); reading shows exactly what is stored.
     if(build){await api('/api/daily-summary?'+new URLSearchParams({date}));await refreshSummaries()}
     renderSummaryDetail(await api('/api/daily-summary/stored?'+new URLSearchParams({date})));
   }catch(error){
     if(state.summaryDate!==date)return;
-    box.innerHTML=`<div class="summary-missing"><h2>${safe(longDate(date))}</h2><p class="empty">${safe(error.message)}.</p><button type="button" class="primary-button" id="build-summary">Build and store it</button></div>`;
+    box.removeAttribute('aria-busy');
+    box.innerHTML=`<div class="summary-missing"><span class="summary-empty-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M6 3v3M18 3v3M4 9h16M5 5h14a1 1 0 0 1 1 1v13a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a1 1 0 0 1 1-1Z"/><path d="M9 14h6"/></svg></span><div><span class="page-kicker">Not saved yet</span><h2>${safe(longDate(date))}</h2><p>${safe(error.message)}.</p></div><button type="button" class="primary-button" id="build-summary">Build this summary</button></div>`;
     $('build-summary').onclick=()=>openSummary(date,true);
   }
 }
-function summarySection(title,rows,empty){return `<section class="summary-block"><h3>${safe(title)}</h3>${rows.length?`<div class="list">${rows.join('')}</div>`:`<p class="empty">${safe(empty)}</p>`}</section>`}
+const summaryIcons={
+  distance:'<svg viewBox="0 0 24 24"><path d="M6 19a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM18 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z"/><path d="M8.5 14.5c2.5-1 2.5-4 1-5.5S10 5 15 7"/></svg>',
+  time:'<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 7v5l3 2"/></svg>',
+  trips:'<svg viewBox="0 0 24 24"><path d="M5 11 6.6 7a2 2 0 0 1 1.9-1.3h7A2 2 0 0 1 17.4 7l1.6 4"/><path d="M4 11h16v6H4zM7 17v2M17 17v2"/></svg>',
+  places:'<svg viewBox="0 0 24 24"><path d="M19 10c0 4.5-7 10-7 10S5 14.5 5 10a7 7 0 1 1 14 0Z"/><circle cx="12" cy="10" r="2.2"/></svg>',
+  samples:'<svg viewBox="0 0 24 24"><path d="M4 17h3l2-5 3 3 3-8 2 5h3"/></svg>',
+  reminders:'<svg viewBox="0 0 24 24"><path d="M6 16h12l-1.5-2.5V10a4.5 4.5 0 0 0-9 0v3.5L6 16Z"/><path d="M10 19h4"/></svg>'
+};
+function summaryMetric(label,value,icon){return `<div><span class="summary-metric-icon" aria-hidden="true">${summaryIcons[icon]}</span><dt>${safe(label)}</dt><dd>${safe(value)}</dd></div>`}
+function summaryTimeline(value){
+  const events=[];
+  for(const visit of value.visits||[])events.push({at:visit.arrival,type:'visit',title:visit.place||'Unnamed place',time:`${clock(visit.arrival)} – ${clock(visit.departure)}`,detail:[durationText(visit.observed_minutes),visit.activity?`${modeName(visit.activity)}${visit.distance_km?' '+distanceText(visit.distance_km):''}`:'',(visit.moved_within||[]).length?'Moved within: '+visit.moved_within.map(move=>`${modeName(move.mode).toLowerCase()} ${distanceText(move.distance_km)}`).join(', '):'',visit.ongoing?'Ongoing':''].filter(Boolean).join(' · '),icon:placeIcon({name:visit.place})});
+  for(const trip of value.trips||[])events.push({at:trip.start,type:'trip',title:trip.round_trip?`Round trip from ${trip.from||'a stay'}`:`${trip.from||'A stay'} → ${trip.to||'a stay'}`,time:`${clock(trip.start)} – ${clock(trip.end)}`,detail:[`${modeName(trip.mode)} ${distanceText(trip.distance_km)}`,durationText(trip.duration_minutes),trip.coverage_complete?'':'Coverage gap'].filter(Boolean).join(' · '),icon:modeIcon(trip.mode)});
+  for(const gap of value.coverage_gaps||[])events.push({at:gap.start,type:'gap',title:'No location data',time:`${clock(gap.start)} – ${clock(gap.end)}`,detail:durationText(gap.minutes),icon:'<span class="summary-gap-icon" aria-hidden="true">···</span>'});
+  events.sort((a,b)=>String(a.at).localeCompare(String(b.at)));
+  if(!events.length)return'<div class="summary-section-empty">No visits or trips were stored for this day.</div>';
+  return `<ol class="summary-timeline">${events.map(event=>`<li class="${event.type}"><div class="summary-timeline-rail">${event.icon}</div><div class="summary-timeline-card"><span class="summary-event-time">${safe(event.time)}</span><strong>${safe(event.title)}</strong><small>${safe(event.detail)}</small></div></li>`).join('')}</ol>`;
+}
+function summaryPlaceRows(places){
+  if(!places.length)return'<div class="summary-section-empty">No places were stored for this day.</div>';
+  return `<div class="summary-place-list">${places.map(place=>`<div class="summary-place-row">${placeIcon(place)}<div><strong>${safe(place.name||'Unnamed place')}${place.home?'<span class="summary-home-tag">Home</span>':''}</strong><small>${safe([`${place.visits} visit${place.visits===1?'':'s'}`,Object.entries(place.activities||{}).map(([mode,count])=>modeName(mode)+(count>1?` ×${count}`:'')).join(', '),place.address&&place.address!==place.name?place.address:''].filter(Boolean).join(' · '))}</small></div><span class="summary-place-duration">${safe(durationText(place.observed_minutes))}</span></div>`).join('')}</div>`;
+}
+function summaryReminderRows(value){
+  const reminders=[...(value.reminders_triggered||[]).map(item=>({...item,status:'Triggered',at:item.triggered_at,tone:'success'})),...(value.reminders_created||[]).map(item=>({...item,status:'Created',at:item.created_at,tone:'created'})),...(value.reminders_cancelled||[]).map(item=>({...item,status:'Cancelled',at:item.cancelled_at,tone:'muted'})),...(value.active_reminders_at_end||[]).map(item=>({...item,status:'Still active',at:null,tone:'active'}))];
+  if(!reminders.length)return'<div class="summary-section-empty">No reminder activity.</div>';
+  return `<div class="summary-reminder-list">${reminders.map(item=>`<div class="summary-reminder-row"><span class="summary-reminder-dot ${item.tone}" aria-hidden="true"></span><div><strong>${safe(item.text)}</strong><small>${safe([item.status,item.at?clock(item.at):'',item.place_name].filter(Boolean).join(' · '))}</small></div></div>`).join('')}</div>`;
+}
 function summaryRow(title,detail){return `<div class="list-item"><div><strong>${safe(title)}</strong>${detail?`<small>${safe(detail)}</small>`:''}</div></div>`}
 function renderSummaryDetail(record){
   if(state.summaryDate!==record.date)return;
   const value=record.summary,totals=value.totals||{};
-  const facts=[['Trip distance',`${Number(totals.distance_km||0).toFixed(1)} km`],['Sampled distance',`${Number(totals.sampled_distance_km||0).toFixed(1)} km`],
-    ['Moving',durationText((totals.moving_hours||0)*60)],['Trips',totals.trips??0],['Places',totals.places??0],
-    ['Fixes',`${(totals.timeline_fixes??0).toLocaleString()} key of ${(totals.raw_fixes??0).toLocaleString()}`],
-    ['Reminders',`${totals.reminders_triggered??0} triggered · ${totals.reminders_created??0} created`]];
+  const facts=[['Distance',`${Number(totals.distance_km||0).toFixed(1)} km`,'distance'],['Time moving',durationText((totals.moving_hours||0)*60),'time'],['Trips',totals.trips??0,'trips'],['Places',totals.places??0,'places']];
+  const secondaryFacts=[['Sampled distance',`${Number(totals.sampled_distance_km||0).toFixed(1)} km`],['Location fixes',`${(totals.timeline_fixes??0).toLocaleString()} key / ${(totals.raw_fixes??0).toLocaleString()} raw`],['Reminders',`${totals.reminders_triggered??0} triggered / ${totals.reminders_created??0} created`]];
   const activity=Object.entries(value.activity_totals||{}).filter(([mode,item])=>item.count&&modeInfo[mode]).map(([mode,item])=>
     `<span class="chip" style="--mode:${modeInfo[mode].color}">${modeIcon(mode)}<strong>${modeInfo[mode].noun}</strong><span>${distanceText(item.distance_km)} · ${durationText(item.minutes)}</span></span>`).join('');
-  const visits=(value.visits||[]).map(visit=>summaryRow(visit.place||'Unnamed place',[`${clock(visit.arrival)} – ${clock(visit.departure)}`,durationText(visit.observed_minutes),
-    visit.activity?`${modeName(visit.activity)}${visit.distance_km?' '+distanceText(visit.distance_km):''}`:'',(visit.moved_within||[]).length?'moved within: '+visit.moved_within.map(move=>`${modeName(move.mode).toLowerCase()} ${distanceText(move.distance_km)}`).join(', '):'',visit.ongoing?'ongoing':''].filter(Boolean).join(' · ')));
-  const trips=(value.trips||[]).slice().sort((a,b)=>a.start.localeCompare(b.start)).map(trip=>summaryRow(`${trip.round_trip?'Round trip from '+(trip.from||'a stay'):(trip.from||'A stay')+' → '+(trip.to||'a stay')}`,
-    [`${modeName(trip.mode)} ${distanceText(trip.distance_km)}`,`${clock(trip.start)} – ${clock(trip.end)}`,durationText(trip.duration_minutes),trip.coverage_complete?'':'coverage gap'].filter(Boolean).join(' · ')));
-  const places=(value.places||[]).map(place=>summaryRow(place.name||'Unnamed place',[place.home?'Home':'',`${durationText(place.observed_minutes)} observed`,`${place.visits} visit${place.visits===1?'':'s'}`,
-    Object.entries(place.activities||{}).map(([mode,count])=>modeName(mode)+(count>1?` ×${count}`:'')).join(', '),place.address&&place.address!==place.name?place.address:''].filter(Boolean).join(' · ')));
-  const reminders=[...(value.reminders_triggered||[]).map(item=>summaryRow(item.text,`Triggered ${clock(item.triggered_at)} · ${item.place_name||''}`)),
-    ...(value.reminders_created||[]).map(item=>summaryRow(item.text,`Created ${clock(item.created_at)} · ${item.place_name||''}`)),
-    ...(value.reminders_cancelled||[]).map(item=>summaryRow(item.text,`Cancelled ${clock(item.cancelled_at)} · ${item.place_name||''}`)),
-    ...(value.active_reminders_at_end||[]).map(item=>summaryRow(item.text,`Still active at the end of the day · ${item.place_name||''}`))];
   const gaps=(value.coverage_gaps||[]).map(gap=>summaryRow('No location data',`${clock(gap.start)} – ${clock(gap.end)} · ${durationText(gap.minutes)}`));
   // Rough token estimate (about 4 characters each) to show what the brief saves an AI tool.
   const tokens=text=>'≈'+Math.round(text.length/4).toLocaleString()+' tokens',brief=record.brief;
-  const briefBlock=`<section class="summary-block summary-brief"><div class="brief-head"><h3>Brief for AI tools</h3>${brief?`<small>${tokens(JSON.stringify(brief))} · full record ${tokens(JSON.stringify(value))}</small><button type="button" class="outline-button" id="copy-brief">Copy</button>`:''}</div>
+  const briefBlock=`<section class="summary-block summary-brief"><div class="brief-head"><div><h3>Brief for AI tools</h3><p>A compact version for MCP tools and language models.</p></div>${brief?`<small>${tokens(JSON.stringify(brief))} · full record ${tokens(JSON.stringify(value))}</small><button type="button" class="outline-button" id="copy-brief">Copy brief</button>`:''}</div>
     ${brief?`<pre>${safe(JSON.stringify(brief,null,2))}</pre>`:'<p class="empty">No brief is stored with this record yet. Refresh to build it.</p>'}</section>`;
-  $('summary-detail').innerHTML=`<div class="summary-head"><div><h2>${safe(longDate(record.date))}</h2><small>${safe(record.timezone)} · stored ${safe(formatTime(record.updated_at))}${record.created_at!==record.updated_at?' · first written '+safe(formatTime(record.created_at)):''} · schema ${safe(value.schema_version??'?')}</small></div>
-      <div class="summary-actions"><button type="button" class="outline-button" id="summary-history">Open in History</button><button type="button" class="outline-button" id="summary-refresh">Refresh</button></div></div>
-    ${record.stale?'<p class="terms-note">The recorded data for this day changed after this record was stored. Refresh to rebuild it.</p>':''}
-    <p class="summary-overview">${safe(value.overview||'')}</p>
-    <dl class="summary-facts">${facts.map(([label,text])=>`<div><dt>${safe(label)}</dt><dd>${safe(text)}</dd></div>`).join('')}</dl>
-    ${activity?`<div class="activity-chips">${activity}</div>`:''}
-    ${briefBlock}
-    ${summarySection('Visits',visits,'No stays were stored for this day.')}
-    ${summarySection('Trips',trips,'No trips.')}
-    ${summarySection('Places',places,'No places.')}
-    ${summarySection('Reminders',reminders,'No reminder activity.')}
-    ${summarySection('Coverage',gaps,value.coverage_note||'No gaps over 30 minutes.')}
-    <details class="summary-json"><summary>Stored JSON</summary><pre>${safe(JSON.stringify(value,null,2))}</pre></details>`;
+  $('summary-detail').removeAttribute('aria-busy');
+  $('summary-detail').innerHTML=`<div class="summary-hero"><div class="summary-head"><div><div class="summary-status-line"><span class="summary-status ${record.stale?'stale':'current'}">${record.stale?'Needs refresh':'Saved summary'}</span><span>${safe(record.timezone)}</span></div><h2>${safe(longDate(record.date))}</h2><div class="summary-updated">Updated ${safe(formatTime(record.updated_at))}${record.created_at!==record.updated_at?' · First saved '+safe(formatTime(record.created_at)):''}</div></div>
+      <div class="summary-actions"><button type="button" class="primary-button" id="summary-history">Open in History</button><button type="button" class="outline-button" id="summary-refresh">Refresh summary</button></div></div>
+      <p class="summary-overview">${safe(value.overview||'No overview was stored for this day.')}</p></div>
+    ${record.stale?'<div class="summary-stale-note"><span aria-hidden="true">!</span><div><strong>This day has newer location data</strong><p>Refresh the summary to include the latest changes.</p></div></div>':''}
+    <dl class="summary-facts">${facts.map(([label,text,icon])=>summaryMetric(label,text,icon)).join('')}</dl>
+    <dl class="summary-secondary-facts">${secondaryFacts.map(([label,text])=>`<div><dt>${safe(label)}</dt><dd>${safe(text)}</dd></div>`).join('')}</dl>
+    ${activity?`<section class="summary-content-section summary-activity"><div class="summary-section-head"><span>Movement</span><h3>Activity</h3></div><div class="activity-chips">${activity}</div></section>`:''}
+    <section class="summary-content-section"><div class="summary-section-head"><span>In order</span><h3>Day timeline</h3></div>${summaryTimeline(value)}</section>
+    <div class="summary-lower-grid"><section class="summary-content-section"><div class="summary-section-head"><span>Stops</span><h3>Places</h3></div>${summaryPlaceRows(value.places||[])}</section><section class="summary-content-section"><div class="summary-section-head"><span>To-dos</span><h3>Reminders</h3></div>${summaryReminderRows(value)}</section></div>
+    <section class="summary-coverage ${gaps.length?'has-gaps':'complete'}"><span class="summary-coverage-icon" aria-hidden="true">${gaps.length?'!':'✓'}</span><div><strong>${gaps.length?`${gaps.length} coverage gap${gaps.length===1?'':'s'}`:'Coverage looks complete'}</strong><p>${safe(value.coverage_note||'No gaps over 30 minutes.')}</p>${gaps.length?`<div class="summary-coverage-gaps">${gaps.join('')}</div>`:''}</div></section>
+    <details class="summary-technical"><summary><span><strong>AI &amp; record details</strong><small>View the compact brief, token estimate, and stored JSON</small></span><span class="summary-disclosure" aria-hidden="true">⌄</span></summary><div class="summary-technical-body">${briefBlock}<details class="summary-json"><summary>Stored JSON <small>schema ${safe(value.schema_version??'?')}</small></summary><pre>${safe(JSON.stringify(value,null,2))}</pre></details></div></details>`;
   $('summary-history').onclick=()=>{state.focusPlace=null;state.followToday=record.date===localDateKey();$('day-date').value=record.date;showView('explore');refreshExplore().catch(error=>toast(error.message))};
   $('summary-refresh').onclick=()=>openSummary(record.date,true);
   if(brief)$('copy-brief').onclick=()=>copyText(JSON.stringify(brief,null,2),'Brief copied');
@@ -630,7 +668,7 @@ $('place-form').onsubmit=async e=>{e.preventDefault();try{await post('/api/place
 $('reverse').onclick=async()=>{if(!$('place-lat').value||!$('place-lon').value){toast('Enter coordinates first');return}try{const q=new URLSearchParams({lat:$('place-lat').value,lon:$('place-lon').value});const result=await api('/api/reverse?'+q);$('place-address').value=result.address||'';$('place-category').value=result.category||'';$('place-provider-id').value=result.provider_place_id||'';if(!$('place-name').value)$('place-name').value=(result.name||'').slice(0,120);toast(result.approximate?'Nearby cached place found — verify before saving':'Place found')}catch(err){toast(err.message)}};
 $('add-place').onclick=()=>openPlaceDialog();
 $('explore-summaries').onclick=()=>showView('summaries');
-$('summary-open-form').onsubmit=event=>{event.preventDefault();const date=$('summary-date').value;if(date)openSummary(date,!state.summaryCatalog?.some(item=>item.date===date))};
+$('summary-open-form').onsubmit=event=>{event.preventDefault();const date=$('summary-date').value;if(date)openSummary(date,!state.summaryCatalog?.some(item=>item.date===date),true)};
 $('label-form').onsubmit=async event=>{
   event.preventDefault();
   const target=state.labelEdit;if(!target)return;
