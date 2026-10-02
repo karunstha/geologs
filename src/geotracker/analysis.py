@@ -1268,7 +1268,8 @@ def daily_overview(store, date, timezone_name=None, source=None):
                       "mode": trip["mode"], "distance_km": trip["distance_km"],
                       "from": trip.get("from_name") or endpoint_name([trip["from_lon"], trip["from_lat"]]),
                       "to": trip.get("to_name") or endpoint_name([trip["to_lon"], trip["to_lat"]]),
-                      "round_trip": bool(trip.get("loop")), "mode_corrected": bool(trip.get("mode_corrected")),
+                      "round_trip": bool(trip.get("loop")), "via": (trip.get("turnaround") or {}).get("name") if trip.get("loop") else None,
+                      "mode_corrected": bool(trip.get("mode_corrected")),
                       "coverage_complete": trip["coverage_complete"]})
     visits = [{"place": stay.get("display_name") or stay.get("place_name"),
                "arrival": stay["started_at"], "departure": stay["ended_at"],
@@ -1292,7 +1293,7 @@ def daily_overview(store, date, timezone_name=None, source=None):
                 f"{len(places)} observed places; "
                 + (f"activity: {', '.join(activities)}; " if activities else "")
                 + f"{len(reminder_events)} reminders triggered; {day['points']} raw fixes.")
-    value = {"schema_version": 4, "date": date, "timezone": timezone_name, "source": source,
+    value = {"schema_version": 5, "date": date, "timezone": timezone_name, "source": source,
              "overview": overview, "totals": totals, "activity_counts": day["activity_counts"],
              "activity_totals": day["activity_totals"], "visits": visits,
              "places": places, "trips": trips, "reminders_created": reminders_created,
@@ -1300,7 +1301,139 @@ def daily_overview(store, date, timezone_name=None, source=None):
              "active_reminders_at_end": reminders_active_at_end, "first_fix": day["first_fix"],
              "last_fix": day["last_fix"], "coverage_gaps": day["coverage_gaps"], "coverage_note": day["coverage_note"],
              "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
-    return store.save_daily_overview(value, watermark) if canonical else value
+    if canonical:
+        store.save_daily_overview(value, watermark, daily_brief(value))
+    return value
+
+
+BRIEF_MOVES = {"walking": "walked {}", "running": "ran {}", "cycling": "cycled {}",
+               "driving": "drove {}", "transit": "rode {} by transit"}
+
+
+def _brief_duration(minutes):
+    hours, rest = divmod(round(minutes or 0), 60)
+    if not hours:
+        return f"{rest} min"
+    return f"{hours} h {rest} min" if rest else f"{hours} h"
+
+
+def _brief_move(mode, distance_km):
+    return BRIEF_MOVES.get(mode, mode + " {}").format(f"{distance_km or 0:.1f} km")
+
+
+def _brief_count(count, noun):
+    return f"{count} {noun}{'' if count == 1 else 's'}"
+
+
+def daily_brief(overview):
+    """The day in short plain-text lines, for an LLM to read cheaply.
+
+    Derived from the full overview, so the two never disagree. Only what
+    happened is stated: no false flags, empty lists, ids, or coordinates.
+    Times are local HH:MM; a time on another day carries its date.
+    """
+    zone = ZoneInfo(overview["timezone"])
+    day = datetime.strptime(overview["date"], "%Y-%m-%d").date()
+
+    def local(value):
+        return datetime.fromisoformat(value).astimezone(zone)
+
+    def clock(moment):
+        return moment.strftime("%H:%M") if moment.date() == day else moment.strftime("%Y-%m-%d %H:%M")
+
+    def reminder(item, at):
+        place = f"any place named {item['match_name']}" if item.get("match_name") else item.get("place_name")
+        return f"{clock(local(item[at]))} '{item['text']}'" + (f" at {place}" if place else "")
+
+    brief = {"date": f"{day.strftime('%A')}, {day.isoformat()} ({overview['timezone']})"}
+    if overview.get("source"):
+        brief["source"] = overview["source"]
+    totals = overview["totals"]
+    if not totals["raw_fixes"]:
+        brief["summary"] = "No location recorded."
+    else:
+        trips = overview["trips"]
+        summary = f"{_brief_count(len(overview['places']), 'place')}, {_brief_count(len(trips), 'trip')}"
+        summary += f" ({totals['distance_km']:.1f} km)." if trips else "."
+        moves = [f"{_brief_move(mode, values['distance_km'])} ({_brief_duration(values['minutes'])})"
+                 for mode, values in overview["activity_totals"].items() if values["count"]]
+        if moves:
+            joined = ", ".join(moves)
+            summary += " " + joined[0].upper() + joined[1:] + "."
+        brief["summary"] = summary
+    timeline = []
+    for visit in overview["visits"]:
+        arrival, departure = local(visit["arrival"]), local(visit["departure"])
+        before, after = arrival.date() < day, departure.date() > day
+        if before and (after or visit["ongoing"]):
+            span = "all day"
+        elif before:
+            span = f"until {clock(departure)}"
+        elif after or visit["ongoing"]:
+            span = f"from {clock(arrival)}"
+        else:
+            span = f"{clock(arrival)}-{clock(departure)}"
+        text = f"{span} at {visit['place'] or 'an unnamed place'}"
+        if visit.get("activity"):
+            text += ", " + (_brief_move(visit["activity"], visit["distance_km"]) if visit.get("distance_km")
+                            else visit["activity"])
+        if visit.get("moved_within"):
+            text += "; within it " + ", ".join(_brief_move(move["mode"], move["distance_km"]) for move in visit["moved_within"])
+        if visit["ongoing"] and not after:
+            # The latest stay: "still there" as of the last fix, not necessarily now.
+            text += f", still there at {clock(departure)}"
+        timeline.append((arrival, text))
+    for trip in overview["trips"]:
+        start = local(trip["start"])
+        text = f"{clock(start)}-{clock(local(trip['end']))} {_brief_move(trip['mode'], trip['distance_km'])}"
+        if trip["round_trip"]:
+            text += f" round trip from {trip['from'] or 'an unnamed place'}" + (f" via {trip['via']}" if trip.get("via") else "")
+        else:
+            text += (f" from {trip['from']}" if trip["from"] else "") + (f" to {trip['to']}" if trip["to"] else "")
+        if not trip["coverage_complete"]:
+            text += ", partly unrecorded"
+        timeline.append((start, text))
+    for gap in overview["coverage_gaps"]:
+        start = local(gap["start"])
+        timeline.append((start, f"{clock(start)}-{clock(local(gap['end']))} no location data"))
+    if timeline:
+        brief["timeline"] = [text for _moment, text in sorted(timeline, key=lambda item: item[0])]
+    places = []
+    for place in overview["places"]:
+        name = place["name"] or place["address"] or "Unnamed place"
+        category = (place.get("category") or "").split(",")[0].rsplit(".", 1)[-1].replace("_", " ")
+        if category.lower() in name.lower():
+            category = ""
+        details = [item for item in (category, place["address"] if place["address"] != name else "") if item]
+        text = name + (f" ({', '.join(details)})" if details else "") + ": " + _brief_duration(place["observed_minutes"])
+        if place["visits"] > 1:
+            text += f" over {place['visits']} visits"
+        activities = [mode if count == 1 else f"{mode} x{count}" for mode, count in (place.get("activities") or {}).items()]
+        if activities:
+            text += ", " + ", ".join(activities)
+        if place["home"] and name.lower() != "home":
+            text += ", home"
+        places.append(text)
+    if places:
+        brief["places"] = places
+    if overview["reminders_created"]:
+        brief["reminders_set"] = [reminder(item, "created_at") for item in overview["reminders_created"]]
+    if overview["reminders_triggered"]:
+        brief["reminders_triggered"] = [reminder(item, "triggered_at") for item in overview["reminders_triggered"]]
+    return brief
+
+
+def daily_briefs(store, date, end_date=None):
+    """Briefs for consecutive local days, oldest first: up to 31 per call."""
+    try:
+        first = datetime.strptime(date, "%Y-%m-%d").date()
+        last = datetime.strptime(end_date, "%Y-%m-%d").date() if end_date else first
+    except ValueError as exc:
+        raise ValueError("date and end_date must be YYYY-MM-DD") from exc
+    if not 0 <= (last - first).days <= 30:
+        raise ValueError("end_date must be on or up to 30 days after date")
+    return [daily_brief(daily_overview(store, (first + timedelta(days=offset)).isoformat()))
+            for offset in range((last - first).days + 1)]
 
 
 def stored_daily_record(store, date):
@@ -1313,7 +1446,7 @@ def stored_daily_record(store, date):
         local_start = datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=ZoneInfo(timezone_name))
     except ValueError as exc:
         raise ValueError("date must be YYYY-MM-DD") from exc
-    row = store.db.execute("""SELECT summary_date,timezone,watermark,summary,created_at,updated_at FROM daily_summaries
+    row = store.db.execute("""SELECT summary_date,timezone,watermark,summary,brief,created_at,updated_at FROM daily_summaries
         WHERE summary_date=? AND timezone=? AND source=''""", (date, timezone_name)).fetchone()
     if row is None:
         raise ValueError(f"no summary is stored for {date} yet")
@@ -1321,7 +1454,7 @@ def stored_daily_record(store, date):
     end = ((local_start + timedelta(days=1)).astimezone(timezone.utc) - timedelta(microseconds=1)).isoformat()
     return {"date": row["summary_date"], "timezone": row["timezone"], "created_at": row["created_at"],
             "updated_at": row["updated_at"], "stale": row["watermark"] != store.daily_overview_watermark(start, end),
-            "summary": json.loads(row["summary"])}
+            "summary": json.loads(row["summary"]), "brief": json.loads(row["brief"]) if row["brief"] else None}
 
 
 def finalize_previous_day(store, now=None):

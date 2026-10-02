@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from .core import PLACES_PROVIDERS, Store, configured_places_providers, current_location, deliver_webhook, geocode, nearby_places, places_provider, reverse_geocode
-from .analysis import daily_overview, day_summary, finalize_previous_day, insights, place_overview, stored_daily_record, place_patterns, predict_next, resolve_place_patterns, search_visits, stays, transitions, visited_places
+from .analysis import daily_briefs, daily_overview, day_summary, finalize_previous_day, insights, place_overview, stored_daily_record, place_patterns, predict_next, resolve_place_patterns, search_visits, stays, transitions, visited_places
 from .mcp import SUPPORTED_VERSIONS, dispatch
 from .postgres import INTEGRITY_ERRORS
 
@@ -183,6 +183,7 @@ class Handler(BaseHTTPRequestHandler):
             elif url.path == "/api/daily-summary": value = daily_overview(store, q["date"], q.get("timezone"), q.get("source"))
             elif url.path == "/api/daily-summaries": value = store.daily_overviews(q.get("start"), q.get("end"), q.get("limit", 90))
             elif url.path == "/api/daily-summary/stored": value = stored_daily_record(store, q["date"])
+            elif url.path == "/api/daily-brief": value = daily_briefs(store, q["date"], q.get("end_date"))
             elif url.path == "/api/places": value = store.places(enrich=True)
             elif url.path == "/api/place-labels": value = store.place_labels()
             elif url.path == "/api/mode-overrides": value = store.mode_overrides()

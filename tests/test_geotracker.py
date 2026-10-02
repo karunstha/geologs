@@ -12,7 +12,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from geotracker.core import Store, classify_motion, current_location, deliver_webhook, geocode, mode_for, name_matches, nearby_places, places_provider, street_key, places_provider_identity, reverse_cache_radius, reverse_geocode, route_segments_from_points, smooth_route_segment
-from geotracker.analysis import daily_overview, day_summary, insights, place_overview, stored_daily_record, place_patterns, predict_next, resolve_place_patterns, search_visits, stays, transitions, visited_places
+from geotracker.analysis import daily_brief, daily_briefs, daily_overview, day_summary, insights, place_overview, stored_daily_record, place_patterns, predict_next, resolve_place_patterns, search_visits, stays, transitions, visited_places
 
 
 HOME = (41.0, -87.9)
@@ -521,7 +521,7 @@ class StoreTests(unittest.TestCase):
         self.assertEqual([place["name"] for place in day["visited_places"]], ["Campus"])
         self.assertEqual({place["name"] for place in day["places_including_home"]}, {"Home", "Campus"})
         summary = daily_overview(self.store, "2026-09-25", "UTC")
-        self.assertEqual(summary["schema_version"], 4)
+        self.assertEqual(summary["schema_version"], 5)
         self.assertEqual({place["name"] for place in summary["places"]}, {"Home", "Campus"})
         self.assertEqual((summary["totals"]["trips"], summary["trips"][0]["from"], summary["trips"][0]["to"]),
                          (1, "Home", "Campus"))
@@ -1192,6 +1192,9 @@ class StoreTests(unittest.TestCase):
         self.assertTrue(trip["loop"])
         self.assertEqual((trip["turnaround"]["name"], trip["turnaround"]["stop_minutes"]), ("Taco Place", 8))
         self.assertAlmostEqual(trip["turnaround"]["distance_m"], 4000, delta=20)
+        with patch("geotracker.analysis.place_for_coordinate", side_effect=campus_label):
+            brief = daily_brief(daily_overview(self.store, "2026-09-27", "UTC"))
+        self.assertRegex(brief["timeline"][1], r"^13:[23]\d-13:5\d drove \d\.\d km round trip from .+ via Taco Place$")
 
     def test_short_fast_looking_move_within_a_place_is_walking(self):
         day, _found, _overview = self.campus_day([still(CAMPUS, 90), line(CAMPUS, LAB, 1), still(LAB, 80)])
@@ -1474,6 +1477,51 @@ class StoreTests(unittest.TestCase):
         self.assertTrue(stored_daily_record(self.store, "2026-09-27")["stale"])
         daily_overview(self.store, "2026-09-27")
         self.assertFalse(stored_daily_record(self.store, "2026-09-27")["stale"])
+
+    def test_daily_brief_states_only_what_happened_in_plain_text(self):
+        self.store.save_settings({"timezone": "America/Chicago"})
+        self.store.save_place({"name": "Home", "lat": HOME[0], "lon": HOME[1]})
+        lake = self.store.save_place({"name": "Lake Example", "lat": LAKE[0], "lon": LAKE[1], "radius_m": 600})
+        self.store.create_reminder({"text": "Stretch first", "place_id": lake["id"]})
+        self.store.create_reminder({"text": "Buy sunscreen", "match_name": "Walgreens"})
+        self.store.db.execute("UPDATE reminders SET created_at='2026-09-27T12:15:00+00:00'")
+        for fix in lake_run_day():
+            self.store.ingest(fix)
+        # Reminders fire only on live fixes; record the lake arrival as if it had.
+        point = self.store.db.execute("SELECT id,timestamp FROM points ORDER BY ABS(lat-?)+ABS(lon-?) LIMIT 1", LAKE).fetchone()
+        self.store.db.execute("INSERT INTO events(reminder_id,point_id,triggered_at) VALUES (1,?,?)", (point["id"], point["timestamp"]))
+        self.store.db.commit()
+        overview = daily_overview(self.store, "2026-09-27")
+        brief = stored_daily_record(self.store, "2026-09-27")["brief"]
+        self.assertEqual(brief, daily_brief(overview))
+        self.assertEqual(list(brief), ["date", "summary", "timeline", "places", "reminders_set", "reminders_triggered"])
+        self.assertEqual(brief["date"], "Sunday, 2026-09-27 (America/Chicago)")
+        self.assertEqual(brief["summary"], "2 places, 2 trips (19.3 km). Drove 19.3 km (24 min), ran 9.0 km (1 h).")
+        self.assertEqual(brief["timeline"], ["08:00-08:30 at Home",
+                                             "08:30-08:42 drove 9.6 km from Home to Lake Example",
+                                             "08:42-09:42 at Lake Example, ran 9.0 km",
+                                             "09:42-09:54 drove 9.8 km from Lake Example to Home",
+                                             # The latest stay: as of the last fix, not now.
+                                             "from 09:54 at Home, still there at 10:24"])
+        self.assertEqual(brief["places"], ["Home: 1 h over 2 visits", "Lake Example: 1 h, running"])
+        self.assertEqual(brief["reminders_set"], ["07:15 'Stretch first' at Lake Example",
+                                                  "07:15 'Buy sunscreen' at any place named Walgreens"])
+        self.assertRegex(brief["reminders_triggered"][0], r"^0[89]:\d\d 'Stretch first' at Lake Example$")
+        text = json.dumps(brief)
+        for noise in ("false", "true", "null", "[]", "ongoing", '"lat"', "pending"):
+            self.assertNotIn(noise, text)
+        self.assertNotRegex(text, r"\d\d:\d\d:\d\d")
+        self.assertLess(len(text), len(json.dumps(overview)) / 4)
+
+        briefs = daily_briefs(self.store, "2026-09-27", "2026-09-28")
+        self.assertEqual(briefs, [brief, {"date": "Monday, 2026-09-28 (America/Chicago)", "summary": "No location recorded."}])
+        called = dispatch(self.store, {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                       "params": {"name": "get_daily_brief", "arguments": {"date": "2026-09-27"}}})
+        self.assertEqual(called["result"]["structuredContent"]["result"], [brief])
+        with self.assertRaisesRegex(ValueError, "end_date must be on or up to 30 days after date"):
+            daily_briefs(self.store, "2026-09-27", "2026-09-26")
+        with self.assertRaisesRegex(ValueError, "end_date must be on or up to 30 days after date"):
+            daily_briefs(self.store, "2026-09-01", "2026-10-02")
 
     def test_travel_mode_corrections_override_the_speed_guess(self):
         office = shifted(HOME, 2000, 0)

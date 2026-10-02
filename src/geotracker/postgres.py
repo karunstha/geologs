@@ -116,9 +116,10 @@ CREATE TABLE IF NOT EXISTS daily_summaries (
     summary_date TEXT NOT NULL, timezone TEXT NOT NULL, source TEXT NOT NULL DEFAULT '',
     watermark TEXT NOT NULL, points INTEGER NOT NULL, distance_km DOUBLE PRECISION NOT NULL,
     trip_count INTEGER NOT NULL, place_count INTEGER NOT NULL, reminder_count INTEGER NOT NULL,
-    summary TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+    summary TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, brief TEXT,
     UNIQUE(summary_date,timezone,source)
 );
+ALTER TABLE daily_summaries ADD COLUMN IF NOT EXISTS brief TEXT;
 CREATE INDEX IF NOT EXISTS daily_summaries_date ON daily_summaries(summary_date DESC,timezone);
 CREATE TABLE IF NOT EXISTS geocode_cache (
     cache_key TEXT PRIMARY KEY, provider TEXT NOT NULL,

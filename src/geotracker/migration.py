@@ -22,7 +22,7 @@ TABLES = {
     "mode_overrides": "id source target started_at ended_at mode created_at updated_at",
     "app_settings": "key value",
     "analysis_cache": "cache_key watermark value created_at",
-    "daily_summaries": "id summary_date timezone source watermark points distance_km trip_count place_count reminder_count summary created_at updated_at",
+    "daily_summaries": "id summary_date timezone source watermark points distance_km trip_count place_count reminder_count summary brief created_at updated_at",
     "geocode_cache": "cache_key provider value created_at",
     "reverse_regions": "id provider center_lat center_lon radius_m value created_at expires_at",
 }

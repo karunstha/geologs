@@ -476,7 +476,7 @@ class Store:
             points INTEGER NOT NULL, distance_km REAL NOT NULL,
             trip_count INTEGER NOT NULL, place_count INTEGER NOT NULL,
             reminder_count INTEGER NOT NULL, summary TEXT NOT NULL,
-            created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL, brief TEXT,
             UNIQUE(summary_date,timezone,source)
         );
         CREATE INDEX IF NOT EXISTS daily_summaries_date ON daily_summaries(summary_date DESC,timezone);
@@ -564,6 +564,8 @@ class Store:
             for column in ("source", "started_at", "ended_at"):
                 if column not in label_columns:
                     self.db.execute(f"ALTER TABLE place_labels ADD COLUMN {column} TEXT")
+            if "brief" not in {row[1] for row in self.db.execute("PRAGMA table_info(daily_summaries)")}:
+                self.db.execute("ALTER TABLE daily_summaries ADD COLUMN brief TEXT")
             version = self.db.execute("PRAGMA user_version").fetchone()[0]
             rebuild_analysis = version < 12
             if version < 1:
@@ -805,7 +807,7 @@ class Store:
              parse_time(start), parse_time(end), parse_time(end), parse_time(end), parse_time(end)))
         labels = self._rows("SELECT id,name,lat,lon,radius_m,source,started_at,ended_at,updated_at FROM place_labels ORDER BY id")
         modes = self._rows("SELECT id,source,target,started_at,ended_at,mode FROM mode_overrides ORDER BY id")
-        value = ["stay-trips-v7", modes, self.analysis_watermark(start, end, source), event_row["count"], event_row["max_id"], places, reminders, labels]
+        value = ["stay-trips-v8", modes, self.analysis_watermark(start, end, source), event_row["count"], event_row["max_id"], places, reminders, labels]
         return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
     def stored_daily_overview(self, date, timezone_name, source=None, watermark=None):
@@ -817,19 +819,21 @@ class Store:
         row = self.db.execute("SELECT summary FROM daily_summaries WHERE " + where, args).fetchone()
         return json.loads(row["summary"]) if row else None
 
-    def save_daily_overview(self, value, watermark):
+    def save_daily_overview(self, value, watermark, brief=None):
         now = parse_time(None)
         totals = value["totals"]
         self.db.execute("""INSERT INTO daily_summaries
             (summary_date,timezone,source,watermark,points,distance_km,trip_count,place_count,
-             reminder_count,summary,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+             reminder_count,summary,brief,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(summary_date,timezone,source) DO UPDATE SET
             watermark=excluded.watermark,points=excluded.points,distance_km=excluded.distance_km,
             trip_count=excluded.trip_count,place_count=excluded.place_count,
-            reminder_count=excluded.reminder_count,summary=excluded.summary,updated_at=excluded.updated_at""",
+            reminder_count=excluded.reminder_count,summary=excluded.summary,brief=excluded.brief,
+            updated_at=excluded.updated_at""",
             (value["date"], value["timezone"], value.get("source") or "", watermark,
              totals["raw_fixes"], totals["distance_km"], totals["trips"], totals["places"],
-             totals["reminders_triggered"], json.dumps(value, separators=(",", ":")), now, now))
+             totals["reminders_triggered"], json.dumps(value, separators=(",", ":")),
+             json.dumps(brief, separators=(",", ":"), ensure_ascii=False) if brief is not None else None, now, now))
         self.db.commit()
         return value
 
@@ -1301,13 +1305,13 @@ class Store:
             clauses.append("pnt.source=?")
             args.append(source)
         return self._rows("""SELECT e.id,e.reminder_id,e.triggered_at,e.webhook_status,
-            r.text,COALESCE(r.destination_name,p.name) AS place_name FROM events e JOIN reminders r ON r.id=e.reminder_id
+            r.text,COALESCE(r.destination_name,p.name) AS place_name,r.match_name FROM events e JOIN reminders r ON r.id=e.reminder_id
             LEFT JOIN places p ON p.id=r.place_id JOIN points pnt ON pnt.id=e.point_id WHERE """
             + " AND ".join(clauses) + " ORDER BY e.triggered_at", args)
 
     def reminders_created(self, start, end):
         return self._rows("""SELECT r.id,r.text,r.created_at,r.active,r.last_triggered_at,
-            COALESCE(r.destination_name,p.name) AS place_name
+            COALESCE(r.destination_name,p.name) AS place_name,r.match_name
             FROM reminders r LEFT JOIN places p ON p.id=r.place_id
             WHERE r.created_at>=? AND r.created_at<=? ORDER BY r.created_at""",
             (parse_time(start), parse_time(end)))

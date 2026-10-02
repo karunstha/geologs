@@ -3,7 +3,7 @@ import json
 import sqlite3
 
 from .core import current_location, deliver_webhook, geocode, nearby_places, reverse_geocode
-from .analysis import daily_overview, day_summary, place_patterns, predict_next, resolve_place_patterns, search_visits, stays, transitions, visited_places
+from .analysis import daily_briefs, daily_overview, day_summary, place_patterns, predict_next, resolve_place_patterns, search_visits, stays, transitions, visited_places
 from .postgres import INTEGRITY_ERRORS
 
 DB_INPUT_ERRORS = (ValueError, KeyError, TypeError, sqlite3.IntegrityError) + INTEGRITY_ERRORS
@@ -36,6 +36,7 @@ TOOLS = [
     {"name": "get_time_at_place", "description": "Observed visit count and sampled duration at a saved place; unobserved gaps are excluded.", "inputSchema": schema({"place_id": INTEGER, "start": STRING, "end": STRING}, ["place_id"])},
     {"name": "get_day_summary", "description": "Detailed daily fixes, stays (stationary and area), trips between them, activity totals, observed visited places excluding Home, and coverage for a local calendar day.", "inputSchema": schema({"date": STRING, "timezone": STRING, "source": STRING}, ["date"])},
     {"name": "get_daily_overview", "description": "Compact persisted overview for one local day: chronological visits, places including Home and time at each, trips, distances, activity totals (walking, running, cycling, driving), fixes, and reminder activity. Designed for efficient LLM retrieval.", "inputSchema": schema({"date": STRING, "timezone": STRING, "source": STRING}, ["date"])},
+    {"name": "get_daily_brief", "description": "Cheapest way to read what happened on one or more local days (date to end_date, at most 31): plain-text lines for the day's summary, a chronological timeline of stays, trips, and data gaps with local HH:MM times, places with time spent, and reminders set or triggered. Use get_daily_overview when exact timestamps, coordinates, or per-trip fields are needed.", "inputSchema": schema({"date": STRING, "end_date": STRING}, ["date"])},
     {"name": "list_daily_overviews", "description": "List persisted daily overview records and totals without loading every full summary.", "inputSchema": schema({"start": STRING, "end": STRING, "limit": INTEGER})},
     {"name": "get_place_transitions", "description": "Observed transitions between stop clusters, counted by source and grouped across visits.", "inputSchema": schema({"limit": INTEGER})},
     {"name": "predict_next_destination", "description": "Evidence-based next place estimate from at least three observed departures; may return no prediction.", "inputSchema": schema({})},
@@ -96,6 +97,8 @@ def call_tool(store, name, args):
         return day_summary(store, args["date"], args.get("timezone") or store.settings()["timezone"], args.get("source"))
     if name == "get_daily_overview":
         return daily_overview(store, args["date"], args.get("timezone"), args.get("source"))
+    if name == "get_daily_brief":
+        return daily_briefs(store, args["date"], args.get("end_date"))
     if name == "list_daily_overviews":
         return store.daily_overviews(args.get("start"), args.get("end"), args.get("limit", 90))
     if name == "get_place_transitions":

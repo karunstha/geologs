@@ -561,12 +561,17 @@ function renderSummaryDetail(record){
     ...(value.reminders_cancelled||[]).map(item=>summaryRow(item.text,`Cancelled ${clock(item.cancelled_at)} · ${item.place_name||''}`)),
     ...(value.active_reminders_at_end||[]).map(item=>summaryRow(item.text,`Still active at the end of the day · ${item.place_name||''}`))];
   const gaps=(value.coverage_gaps||[]).map(gap=>summaryRow('No location data',`${clock(gap.start)} – ${clock(gap.end)} · ${durationText(gap.minutes)}`));
+  // Rough token estimate (about 4 characters each) to show what the brief saves an AI tool.
+  const tokens=text=>'≈'+Math.round(text.length/4).toLocaleString()+' tokens',brief=record.brief;
+  const briefBlock=`<section class="summary-block summary-brief"><div class="brief-head"><h3>Brief for AI tools</h3>${brief?`<small>${tokens(JSON.stringify(brief))} · full record ${tokens(JSON.stringify(value))}</small><button type="button" class="outline-button" id="copy-brief">Copy</button>`:''}</div>
+    ${brief?`<pre>${safe(JSON.stringify(brief,null,2))}</pre>`:'<p class="empty">No brief is stored with this record yet. Refresh to build it.</p>'}</section>`;
   $('summary-detail').innerHTML=`<div class="summary-head"><div><h2>${safe(longDate(record.date))}</h2><small>${safe(record.timezone)} · stored ${safe(formatTime(record.updated_at))}${record.created_at!==record.updated_at?' · first written '+safe(formatTime(record.created_at)):''} · schema ${safe(value.schema_version??'?')}</small></div>
       <div class="summary-actions"><button type="button" class="outline-button" id="summary-history">Open in History</button><button type="button" class="outline-button" id="summary-refresh">Refresh</button></div></div>
     ${record.stale?'<p class="terms-note">The recorded data for this day changed after this record was stored. Refresh to rebuild it.</p>':''}
     <p class="summary-overview">${safe(value.overview||'')}</p>
     <dl class="summary-facts">${facts.map(([label,text])=>`<div><dt>${safe(label)}</dt><dd>${safe(text)}</dd></div>`).join('')}</dl>
     ${activity?`<div class="activity-chips">${activity}</div>`:''}
+    ${briefBlock}
     ${summarySection('Visits',visits,'No stays were stored for this day.')}
     ${summarySection('Trips',trips,'No trips.')}
     ${summarySection('Places',places,'No places.')}
@@ -575,6 +580,7 @@ function renderSummaryDetail(record){
     <details class="summary-json"><summary>Stored JSON</summary><pre>${safe(JSON.stringify(value,null,2))}</pre></details>`;
   $('summary-history').onclick=()=>{state.focusPlace=null;state.followToday=record.date===localDateKey();$('day-date').value=record.date;showView('explore');refreshExplore().catch(error=>toast(error.message))};
   $('summary-refresh').onclick=()=>openSummary(record.date,true);
+  if(brief)$('copy-brief').onclick=()=>copyText(JSON.stringify(brief,null,2),'Brief copied');
 }
 function renderPlacesProvider(){
   const providers=state.status?.places_providers||[],chosen=state.settings?.places_provider||'';
