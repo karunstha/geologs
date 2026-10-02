@@ -413,7 +413,7 @@ async function loadNearbyPlaces(target){
   box.innerHTML='<p class="empty">Looking for places around this visit…</p>';
   $('nearby-note').textContent='';
   try{
-    const radius=Math.max(250,target.radius_m+50);
+    const radius=Math.max(500,target.radius_m+50);
     const places=await api('/api/nearby-places?'+new URLSearchParams({lat:target.lat,lon:target.lon,radius_m:radius,limit:15}));
     if(request!==loadNearbyPlaces.request)return;
     $('nearby-note').textContent=places.length?`${places.length} within ${radius>=1000?(radius/1000).toFixed(1)+' km':radius+' m'}`:'';
