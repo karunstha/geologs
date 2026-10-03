@@ -743,6 +743,49 @@ class StoreTests(unittest.TestCase):
             self.assertIn(part, requests[0])
         self.assertIn("types=address%2Cstreet", requests[-1])
 
+    def test_mapbox_nearby_places_use_category_search_and_deduplicate(self):
+        origin = (34.7575, -92.452695)
+        def poi(name, east_m, category, place_id=None, feature_type="poi"):
+            lat, lon = shifted(origin, east_m, 0)
+            return {"type": "Feature", "geometry": {"type": "Point", "coordinates": [lon, lat]},
+                    "properties": {"name": name, "feature_type": feature_type, "mapbox_id": place_id or "id-" + name,
+                                   "full_address": name + ", Little Rock, Arkansas",
+                                   "coordinates": {"latitude": lat, "longitude": lon},
+                                   "poi_category_ids": [category] if category else [],
+                                   "poi_category": [category.replace("_", " ")] if category else []}}
+        reverse = {"features": [poi("16901 Chenal Parkway", 84, "", feature_type="address"),
+                                poi("Natural State Eyecare", 40, "health_services")]}
+        costco = poi("Costco", 113, "shopping", "costco")
+        responses = {
+            "wholesale_store": {"features": [costco]},
+            "shopping": {"features": [costco]},  # the same Mapbox ID from another category
+            "grocery": {"features": [poi("Kroger", 371, "grocery")]},
+            "food_and_drink": {"features": [poi("Starbucks", 249, "coffee"),
+                                             poi("Outside the circle", 1200, "food")]},
+            "services": {"features": [poi("Nearby ATM", 10, "atm")]},
+        }
+        requests = []
+        def respond(url):
+            requests.append(url)
+            if "/reverse?" in url:
+                return reverse
+            return next((value for category, value in responses.items()
+                         if f"/category/{category}?" in url), {"features": []})
+        env = {"MAPBOX_ACCESS_TOKEN": "token", "GEOAPIFY_API_KEY": "", "GEOTRACKER_PHOTON_URL": ""}
+        with patch.dict(os.environ, env), patch("geotracker.core.MAPBOX_CATEGORY_REQUEST_INTERVAL_SECONDS", 0), \
+                patch("geotracker.core.json_get", side_effect=respond) as request:
+            places = nearby_places(self.store, *origin, radius_m=1000)
+            cached = nearby_places(self.store, *shifted(origin, 5, 0), radius_m=1000)
+        self.assertEqual([place["name"] for place in places],
+                         ["Natural State Eyecare", "Costco", "Starbucks", "Kroger"])
+        self.assertEqual([place["provider_place_id"] for place in places].count("costco"), 1)
+        self.assertEqual([place["name"] for place in cached], [place["name"] for place in places])
+        self.assertEqual(request.call_count, 14)  # reverse plus 13 visit-relevant categories; second call was cached
+        self.assertTrue(any("/search/searchbox/v1/category/wholesale_store?" in url for url in requests))
+        category_url = next(url for url in requests if "/category/food_and_drink?" in url)
+        for part in ("proximity=-92.452695%2C34.7575", "limit=25", "bbox=", "exclude_fields=photos%2Creviews"):
+            self.assertIn(part, category_url)
+
     def test_mapbox_search_and_cache_are_separate_from_other_providers(self):
         found = {"features": [{"type": "Feature", "geometry": {"type": "Point", "coordinates": [-92.3, 34.8]},
                                "properties": {"name": "Costco Wholesale", "feature_type": "poi", "mapbox_id": "costco",

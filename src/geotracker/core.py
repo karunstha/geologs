@@ -12,8 +12,10 @@ import os
 import re
 import sqlite3
 import threading
+import time
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -1602,6 +1604,15 @@ PLACES_PROVIDER_ORDER = ("photon", "geoapify", "mapbox")
 # Mapbox POI categories that would otherwise name almost every stay.
 MAPBOX_SKIPPED_CATEGORIES = {"atm", "parking", "parking_lot", "parking_garage", "bus_stop", "bus_station",
                              "ev_charging_station", "charging_station", "post_box", "vending_machine"}
+# Reverse lookup only returns POIs associated with the exact coordinate. Nearby
+# browsing uses Search Box category searches instead. Mapbox's category catalog
+# has no parent/child relationship, so cover its broad visit-relevant groups and
+# the separate grocery/wholesale groups that do not reliably appear in Shopping.
+MAPBOX_NEARBY_CATEGORIES = (
+    "food_and_drink", "services", "shopping", "office", "education", "grocery", "outdoors", "lodging",
+    "wholesale_store", "place_of_worship", "sports", "tourist_attraction", "entertainment",
+)
+MAPBOX_CATEGORY_REQUEST_INTERVAL_SECONDS = .12
 
 
 def configured_places_providers():
@@ -1678,6 +1689,61 @@ def mapbox_candidates(data, lat, lon, radius):
             candidates.append({**place, "place_lat": place["lat"], "place_lon": place["lon"],
                                "distance_m": round(distance), "source": "mapbox_searchbox"})
     return sorted(candidates, key=lambda place: place["distance_m"])
+
+
+def _mapbox_bbox(lat, lon, radius):
+    """Bounding box for a radius in metres; None when it would cross the antimeridian."""
+    lat_delta = radius / 111320
+    lon_delta = radius / (111320 * max(.01, math.cos(math.radians(lat))))
+    west, east = lon - lon_delta, lon + lon_delta
+    if west < -180 or east > 180:
+        return None
+    return ",".join(str(value) for value in (west, max(-90, lat - lat_delta), east, min(90, lat + lat_delta)))
+
+
+def _mapbox_nearby_candidates(lat, lon, radius):
+    """POIs around a position from category search, merged with exact reverse hits."""
+    bbox = _mapbox_bbox(lat, lon, radius)
+    request_lock, last_request = threading.Lock(), [0.0]
+
+    def limited_request(path, params):
+        # Space request starts below Mapbox's default ten-per-second limit while
+        # still allowing their network waits to overlap.
+        with request_lock:
+            delay = last_request[0] + MAPBOX_CATEGORY_REQUEST_INTERVAL_SECONDS - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+            last_request[0] = time.monotonic()
+        return mapbox_request(path, params)
+
+    def fetch(category):
+        try:
+            if category is None:
+                data = limited_request("/search/searchbox/v1/reverse", {
+                    "longitude": lon, "latitude": lat, "types": "poi", "limit": 10,
+                })
+            else:
+                params = {"proximity": f"{lon},{lat}", "limit": 25, "exclude_fields": "photos,reviews"}
+                if bbox:
+                    params["bbox"] = bbox
+                data = limited_request(f"/search/searchbox/v1/category/{category}", params)
+            return mapbox_candidates(data, lat, lon, radius), None
+        except (OSError, TypeError, KeyError, ValueError) as exc:
+            return [], exc
+
+    # Four workers avoid a long serial wait across the category requests.
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(fetch, (None, *MAPBOX_NEARBY_CATEGORIES)))
+    if all(error is not None for _group, error in results):
+        raise results[0][1]
+    unique = {}
+    for place in (place for group, _error in results for place in group):
+        key = place.get("provider_place_id") or (
+            place["name"].casefold(), round(place["place_lat"], 6), round(place["place_lon"], 6))
+        previous = unique.get(key)
+        if previous is None or place["distance_m"] < previous["distance_m"]:
+            unique[key] = place
+    return sorted(unique.values(), key=lambda place: place["distance_m"])
 
 
 def mapbox_nearest_result(data, lat, lon, radius):
@@ -1841,12 +1907,15 @@ def nearby_places(store, lat, lon, radius_m=None, limit=15):
         raise ValueError("invalid coordinates")
     radius = nearest_place_radius(radius_m)
     name = _require_provider(store)
-    key = _provider_cache_key(name) + f":candidates:r{radius}"
+    # Version Mapbox's category-backed list separately from its reverse lookup,
+    # invalidating the older cache that contained only reverse results.
+    provider = "mapbox:categories-v1" if name == "mapbox" else _provider_cache_key(name)
+    key = provider + f":candidates:r{radius}"
     with _reverse_lock:
         candidates = store.reverse_region(key, lat, lon)
         if candidates is None:
             candidates = {"photon": _photon_candidates, "geoapify": _geoapify_candidates,
-                          "mapbox": _mapbox_candidates}[name](lat, lon, radius)
+                          "mapbox": _mapbox_nearby_candidates}[name](lat, lon, radius)
             store.save_reverse_region(key, lat, lon, 15, candidates)
     places = []
     for place in candidates:
