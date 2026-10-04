@@ -595,6 +595,9 @@ function summaryRow(title,detail){return `<div class="list-item"><div><strong>${
 function renderSummaryDetail(record){
   if(state.summaryDate!==record.date)return;
   const value=record.summary,totals=value.totals||{};
+  const homeReturn=value.home_return?.summary;
+  const overviewText=value.overview||'No overview was stored for this day.';
+  const displayOverview=homeReturn&&overviewText.endsWith(` ${homeReturn}`)?overviewText.slice(0,-homeReturn.length-1):overviewText;
   const facts=[['Distance',`${Number(totals.distance_km||0).toFixed(1)} km`,'distance'],['Time moving',durationText((totals.moving_hours||0)*60),'time'],['Trips',totals.trips??0,'trips'],['Places',totals.places??0,'places']];
   const secondaryFacts=[['Sampled distance',`${Number(totals.sampled_distance_km||0).toFixed(1)} km`],['Location fixes',`${(totals.timeline_fixes??0).toLocaleString()} key / ${(totals.raw_fixes??0).toLocaleString()} raw`],['Reminders',`${totals.reminders_triggered??0} triggered / ${totals.reminders_created??0} created`]];
   const activity=Object.entries(value.activity_totals||{}).filter(([mode,item])=>item.count&&modeInfo[mode]).map(([mode,item])=>
@@ -607,7 +610,7 @@ function renderSummaryDetail(record){
   $('summary-detail').removeAttribute('aria-busy');
   $('summary-detail').innerHTML=`<div class="summary-hero"><div class="summary-head"><div><div class="summary-status-line"><span class="summary-status ${record.stale?'stale':'current'}">${record.stale?'Needs refresh':'Saved summary'}</span><span>${safe(record.timezone)}</span></div><h2>${safe(longDate(record.date))}</h2><div class="summary-updated">Updated ${safe(formatTime(record.updated_at))}${record.created_at!==record.updated_at?' · First saved '+safe(formatTime(record.created_at)):''}</div></div>
       <div class="summary-actions"><button type="button" class="primary-button" id="summary-history">Open in History</button><button type="button" class="outline-button" id="summary-refresh">Refresh summary</button></div></div>
-      <p class="summary-overview">${safe(value.overview||'No overview was stored for this day.')}</p></div>
+      <p class="summary-overview">${safe(displayOverview)}</p>${homeReturn?`<div class="summary-home-return"><span aria-hidden="true">⌂</span><div><small>Cross-midnight home return</small><strong>${safe(homeReturn)}</strong></div></div>`:''}</div>
     ${record.stale?'<div class="summary-stale-note"><span aria-hidden="true">!</span><div><strong>This day has newer location data</strong><p>Refresh the summary to include the latest changes.</p></div></div>':''}
     <dl class="summary-facts">${facts.map(([label,text,icon])=>summaryMetric(label,text,icon)).join('')}</dl>
     <dl class="summary-secondary-facts">${secondaryFacts.map(([label,text])=>`<div><dt>${safe(label)}</dt><dd>${safe(text)}</dd></div>`).join('')}</dl>

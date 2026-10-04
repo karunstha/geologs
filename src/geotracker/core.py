@@ -790,7 +790,7 @@ class Store:
         if commit:
             self.db.commit()
 
-    def daily_overview_watermark(self, start, end, source=None):
+    def daily_overview_watermark(self, start, end, source=None, home_context_start=None, home_context_end=None):
         clauses = ["e.triggered_at>=?", "e.triggered_at<=?"]
         args = [parse_time(start), parse_time(end)]
         if source:
@@ -809,7 +809,14 @@ class Store:
              parse_time(start), parse_time(end), parse_time(end), parse_time(end), parse_time(end)))
         labels = self._rows("SELECT id,name,lat,lon,radius_m,source,started_at,ended_at,updated_at FROM place_labels ORDER BY id")
         modes = self._rows("SELECT id,source,target,started_at,ended_at,mode FROM mode_overrides ORDER BY id")
-        value = ["stay-trips-v8", modes, self.analysis_watermark(start, end, source), event_row["count"], event_row["max_id"], places, reminders, labels]
+        # A daily record can also report an early-morning return Home. Include
+        # that small cross-midnight context so a prior day's stored record goes
+        # stale when the return is recorded after midnight.
+        context_start = home_context_start or start
+        context_end = home_context_end or end
+        value = ["stay-trips-v9", modes, self.analysis_watermark(start, end, source),
+                 self.analysis_watermark(context_start, context_end, source),
+                 event_row["count"], event_row["max_id"], places, reminders, labels]
         return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
     def stored_daily_overview(self, date, timezone_name, source=None, watermark=None):

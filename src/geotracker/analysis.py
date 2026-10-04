@@ -44,6 +44,10 @@ ADDRESS_MERGE_M = 200
 # full 15 minute stay would miss a quick coffee run.
 NAME_REMINDER_DWELL_SECONDS = 180
 NAME_REMINDER_RADIUS_M = 150
+# Return-home events shortly after midnight belong to the prior evening as
+# well as the morning on which they happened. This is deliberately a factual
+# window, not an inference about whether someone stayed somewhere overnight.
+HOME_RETURN_GRACE_HOURS = 6
 
 
 def sync_timeline(store, sources=None, rebuild=False, since_ids=None):
@@ -1215,6 +1219,46 @@ def day_summary(store, date, timezone_name="UTC", source=None):
     return result
 
 
+def _home_return_context(day_start, day_end):
+    """The neighboring samples that can establish an early-morning Home return."""
+    return (day_start - timedelta(days=1),
+            day_end + timedelta(hours=HOME_RETURN_GRACE_HOURS) - timedelta(microseconds=1))
+
+
+def _home_return(store, day_start, day_end, source=None):
+    """An observed Home return just after midnight, for either adjoining day."""
+    homes = {place["id"]: place["name"] for place in store.places() if _is_home_place(place)}
+    if not homes:
+        return None
+    context_start, context_end = _home_return_context(day_start, day_end)
+    rows = sorted(stays(store, context_start.isoformat(), context_end.isoformat(), source=source, limit=None),
+                  key=lambda stay: (stay["started_at"], stay["id"]))
+    previous_by_source, returns = {}, []
+    for stay in rows:
+        previous = previous_by_source.get(stay["source"])
+        home_name = homes.get(stay.get("place_id"))
+        is_home = home_name is not None
+        if is_home and previous is not None and previous.get("place_id") not in homes:
+            returned_at = datetime.fromisoformat(stay["started_at"])
+            previous_started = datetime.fromisoformat(previous["started_at"])
+            next_morning = day_end <= returned_at < day_end + timedelta(hours=HOME_RETURN_GRACE_HOURS)
+            after_midnight = day_start <= returned_at < day_start + timedelta(hours=HOME_RETURN_GRACE_HOURS)
+            if next_morning and previous_started < day_end:
+                returns.append({"returned_at": returned_at.isoformat(), "home_name": home_name, "timing": "next_day"})
+            elif after_midnight and previous_started < day_start:
+                returns.append({"returned_at": returned_at.isoformat(), "home_name": home_name, "timing": "after_midnight"})
+        previous_by_source[stay["source"]] = stay
+    return min(returns, key=lambda item: item["returned_at"], default=None)
+
+
+def _home_return_text(home_return, zone):
+    returned = datetime.fromisoformat(home_return["returned_at"]).astimezone(zone).strftime("%H:%M")
+    target = "home" if str(home_return["home_name"]).casefold() in ("home", "my home") else home_return["home_name"]
+    action = f"Returned {target}" if target == "home" else f"Returned to {target}"
+    suffix = "the next day" if home_return["timing"] == "next_day" else "after midnight"
+    return f"{action} at {returned} {suffix}."
+
+
 def daily_overview(store, date, timezone_name=None, source=None):
     """Materialize a compact, structured record intended for API and LLM use.
 
@@ -1236,7 +1280,8 @@ def daily_overview(store, date, timezone_name=None, source=None):
     day_end = (local_start + timedelta(days=1)).astimezone(timezone.utc)
     start = day_start.isoformat()
     end = (day_end - timedelta(microseconds=1)).isoformat()
-    watermark = store.daily_overview_watermark(start, end, source)
+    home_context_start, home_context_end = _home_return_context(day_start, day_end)
+    watermark = store.daily_overview_watermark(start, end, source, home_context_start.isoformat(), home_context_end.isoformat())
     cached = store.stored_daily_overview(date, timezone_name, source, watermark) if canonical else None
     if cached is not None:
         return cached
@@ -1279,6 +1324,9 @@ def daily_overview(store, date, timezone_name=None, source=None):
                "moved_within": [{"mode": move["mode"], "distance_km": move["distance_km"]} for move in stay["internal_moves"]],
                "ongoing": bool(stay["ongoing"])}
               for stay in day["stays"]]
+    home_return = _home_return(store, day_start, day_end, source)
+    if home_return:
+        home_return["summary"] = _home_return_text(home_return, zone)
     trip_distance_km = round(sum(trip["distance_km"] for trip in trips), 2)
     totals = {"raw_fixes": day["points"], "timeline_fixes": day["timeline_points"],
               "distance_km": trip_distance_km, "sampled_distance_km": day["stats"]["distance_km"],
@@ -1293,13 +1341,16 @@ def daily_overview(store, date, timezone_name=None, source=None):
                 f"{len(places)} observed places; "
                 + (f"activity: {', '.join(activities)}; " if activities else "")
                 + f"{len(reminder_events)} reminders triggered; {day['points']} raw fixes.")
-    value = {"schema_version": 5, "date": date, "timezone": timezone_name, "source": source,
+    if home_return:
+        overview += " " + home_return["summary"]
+    value = {"schema_version": 6, "date": date, "timezone": timezone_name, "source": source,
              "overview": overview, "totals": totals, "activity_counts": day["activity_counts"],
              "activity_totals": day["activity_totals"], "visits": visits,
              "places": places, "trips": trips, "reminders_created": reminders_created,
              "reminders_triggered": reminder_events, "reminders_cancelled": reminders_cancelled,
              "active_reminders_at_end": reminders_active_at_end, "first_fix": day["first_fix"],
              "last_fix": day["last_fix"], "coverage_gaps": day["coverage_gaps"], "coverage_note": day["coverage_note"],
+             "home_return": home_return,
              "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
     if canonical:
         store.save_daily_overview(value, watermark, daily_brief(value))
@@ -1420,6 +1471,8 @@ def daily_brief(overview):
         brief["reminders_set"] = [reminder(item, "created_at") for item in overview["reminders_created"]]
     if overview["reminders_triggered"]:
         brief["reminders_triggered"] = [reminder(item, "triggered_at") for item in overview["reminders_triggered"]]
+    if overview.get("home_return"):
+        brief["home_return"] = overview["home_return"]["summary"]
     return brief
 
 
@@ -1451,9 +1504,12 @@ def stored_daily_record(store, date):
     if row is None:
         raise ValueError(f"no summary is stored for {date} yet")
     start = local_start.astimezone(timezone.utc).isoformat()
-    end = ((local_start + timedelta(days=1)).astimezone(timezone.utc) - timedelta(microseconds=1)).isoformat()
+    day_end = (local_start + timedelta(days=1)).astimezone(timezone.utc)
+    end = (day_end - timedelta(microseconds=1)).isoformat()
+    home_context_start, home_context_end = _home_return_context(local_start.astimezone(timezone.utc), day_end)
     return {"date": row["summary_date"], "timezone": row["timezone"], "created_at": row["created_at"],
-            "updated_at": row["updated_at"], "stale": row["watermark"] != store.daily_overview_watermark(start, end),
+            "updated_at": row["updated_at"], "stale": row["watermark"] != store.daily_overview_watermark(
+                start, end, None, home_context_start.isoformat(), home_context_end.isoformat()),
             "summary": json.loads(row["summary"]), "brief": json.loads(row["brief"]) if row["brief"] else None}
 
 

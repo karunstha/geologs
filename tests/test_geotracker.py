@@ -521,7 +521,7 @@ class StoreTests(unittest.TestCase):
         self.assertEqual([place["name"] for place in day["visited_places"]], ["Campus"])
         self.assertEqual({place["name"] for place in day["places_including_home"]}, {"Home", "Campus"})
         summary = daily_overview(self.store, "2026-09-25", "UTC")
-        self.assertEqual(summary["schema_version"], 5)
+        self.assertEqual(summary["schema_version"], 6)
         self.assertEqual({place["name"] for place in summary["places"]}, {"Home", "Campus"})
         self.assertEqual((summary["totals"]["trips"], summary["trips"][0]["from"], summary["trips"][0]["to"]),
                          (1, "Home", "Campus"))
@@ -1519,6 +1519,38 @@ class StoreTests(unittest.TestCase):
         self.store.ingest({"source": "phone", "timestamp": "2026-09-27T18:00:00Z", "lat": HOME[0], "lon": HOME[1]})
         self.assertTrue(stored_daily_record(self.store, "2026-09-27")["stale"])
         daily_overview(self.store, "2026-09-27")
+        self.assertFalse(stored_daily_record(self.store, "2026-09-27")["stale"])
+
+    def test_early_home_return_is_linked_to_both_daily_summaries(self):
+        late = shifted(HOME, 3000, 0)
+        self.store.save_place({"name": "Home", "lat": HOME[0], "lon": HOME[1], "radius_m": 150})
+        self.store.save_place({"name": "Late Cafe", "lat": late[0], "lon": late[1], "radius_m": 150})
+        start = datetime(2026, 9, 27, 21, 30, tzinfo=timezone.utc)
+        self.store.ingest(minute_fixes([still(HOME, 30), line(HOME, late, 10), still(late, 190),
+                                        line(late, HOME, 10), still(HOME, 45)], start=start))
+        evening = daily_overview(self.store, "2026-09-27", "UTC")
+        morning = daily_overview(self.store, "2026-09-28", "UTC")
+        self.assertEqual((evening["home_return"]["timing"], morning["home_return"]["timing"]),
+                         ("next_day", "after_midnight"))
+        self.assertEqual(evening["home_return"]["returned_at"], morning["home_return"]["returned_at"])
+        self.assertTrue(evening["home_return"]["summary"].endswith("the next day."))
+        self.assertTrue(morning["home_return"]["summary"].endswith("after midnight."))
+        self.assertIn(evening["home_return"]["summary"], evening["overview"])
+        self.assertEqual(daily_brief(evening)["home_return"], evening["home_return"]["summary"])
+        self.assertEqual(daily_brief(morning)["home_return"], morning["home_return"]["summary"])
+
+    def test_prior_day_summary_becomes_stale_when_an_early_home_return_arrives(self):
+        late = shifted(HOME, 3000, 0)
+        self.store.save_place({"name": "Home", "lat": HOME[0], "lon": HOME[1], "radius_m": 150})
+        self.store.save_place({"name": "Late Cafe", "lat": late[0], "lon": late[1], "radius_m": 150})
+        self.store.ingest(minute_fixes([still(HOME, 30), line(HOME, late, 10), still(late, 130)],
+                                       start=datetime(2026, 9, 27, 21, tzinfo=timezone.utc)))
+        self.assertIsNone(daily_overview(self.store, "2026-09-27", "UTC")["home_return"])
+        self.store.ingest(minute_fixes([line(late, HOME, 10), still(HOME, 30)],
+                                       start=datetime(2026, 9, 28, 0, 10, tzinfo=timezone.utc)))
+        self.assertTrue(stored_daily_record(self.store, "2026-09-27")["stale"])
+        refreshed = daily_overview(self.store, "2026-09-27", "UTC")
+        self.assertEqual(refreshed["home_return"]["timing"], "next_day")
         self.assertFalse(stored_daily_record(self.store, "2026-09-27")["stale"])
 
     def test_daily_brief_states_only_what_happened_in_plain_text(self):
