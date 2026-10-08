@@ -1,4 +1,4 @@
-# Geotracker
+# GeoLogs
 
 A self-hosted personal location archive with a browser, arrival reminders, and MCP tools. It reads positions from sources you already have. Docker Compose runs PostgreSQL with PostGIS; SQLite remains available for a small local archive.
 
@@ -12,10 +12,10 @@ A self-hosted personal location archive with a browser, arrival reminders, and M
 
 ## What this adds to the reference projects
 
--   [location-history-mcp-server](https://github.com/lucas-1000/location-history-mcp-server) has place recognition and history tools, but its documented path uses a companion iOS app, PostGIS, and optional Google Places. Geotracker accepts existing sources and supports PostGIS and SQLite.
--   [tars-location-mcp](https://github.com/michelgrolet/tars-location-mcp) is strong on historical imports, coverage, and travel memory. Its documented live path uses OwnTracks; Geotracker adds direct Home Assistant polling, arrival reminders, and a browser.
--   [location\_profiler](https://github.com/2015xli/location_profiler) models stay-point transitions and predicts destinations. Geotracker focuses on a live source-to-reminder loop and raw point/trip exploration.
--   [mcp-geo](https://github.com/handsomegentlemen/mcp-geo) exposes the request's coarse geolocation. Geotracker stores a personal history with precise source-fed points and geofences.
+-   [location-history-mcp-server](https://github.com/lucas-1000/location-history-mcp-server) has place recognition and history tools, but its documented path uses a companion iOS app, PostGIS, and optional Google Places. GeoLogs accepts existing sources and supports PostGIS and SQLite.
+-   [tars-location-mcp](https://github.com/michelgrolet/tars-location-mcp) is strong on historical imports, coverage, and travel memory. Its documented live path uses OwnTracks; GeoLogs adds direct Home Assistant polling, arrival reminders, and a browser.
+-   [location\_profiler](https://github.com/2015xli/location_profiler) models stay-point transitions and predicts destinations. GeoLogs focuses on a live source-to-reminder loop and raw point/trip exploration.
+-   [mcp-geo](https://github.com/handsomegentlemen/mcp-geo) exposes the request's coarse geolocation. GeoLogs stores a personal history with precise source-fed points and geofences.
 
 These comparisons refer to the projects' public descriptions as of September 2026.
 
@@ -29,7 +29,7 @@ Copy `.env.example` to `.env` and replace both secrets with random values. Then:
 docker compose up --build -d
 ```
 
-Open `http://127.0.0.1:8765` and enter `GEOTRACKER_TOKEN` in the browser sign-in panel. Set `GEOTRACKER_PUBLISHED_PORT` in `.env` if port 8765 is occupied, then use that port for the browser, MCP clients, and the Home Assistant poller. Set `GEOTRACKER_TIMEZONE` to an IANA timezone such as `America/Chicago`; it can later be changed from Settings. Run `docker compose up -d --force-recreate app` after changing Compose environment values. The browser keeps an HttpOnly, same-site session cookie for 30 days, so a new tab does not need the token again. Compose mounts only `.env` read-only for the app to check the current token on each request; changing the token invalidates the old browser session. PostgreSQL/PostGIS files live in `./data/postgres`, which is ignored by Git and must be included in your backups. The official PostGIS image is pinned to `linux/amd64`; ARM hosts run that service through Docker emulation.
+Open `http://127.0.0.1:8765` and enter `GEOLOGS_TOKEN` in the browser sign-in panel. Set `GEOLOGS_PUBLISHED_PORT` in `.env` if port 8765 is occupied, then use that port for the browser, MCP clients, and the Home Assistant poller. Set `GEOLOGS_TIMEZONE` to an IANA timezone such as `America/Chicago`; it can later be changed from Settings. Run `docker compose up -d --force-recreate app` after changing Compose environment values. The browser keeps an HttpOnly, same-site session cookie for 30 days, so a new tab does not need the token again. Compose mounts only `.env` read-only for the app to check the current token on each request; changing the token invalidates the old browser session. PostgreSQL/PostGIS files live in `./data/postgres`, which is ignored by Git and must be included in your backups. The official PostGIS image is pinned to `linux/amd64`; ARM hosts run that service through Docker emulation.
 
 If you already ran an earlier Compose version with a named `postgres_data` volume, copy it **before starting this version**:
 
@@ -39,11 +39,28 @@ If you already ran an earlier Compose version with a named `postgres_data` volum
 
 The script stops the old containers, copies the volume into `./data/postgres`, then starts the new Compose stack. It refuses to overwrite a populated target and keeps the original named volume as a recovery copy. Run it from the checkout on the host that owns the old Docker volume.
 
+### Upgrading from Geotracker
+
+GeoLogs was called Geotracker. To upgrade a Compose install from before the rename, pull the new code and run this once from the checkout while the old database container is still running:
+
+```bash
+./scripts/rename-from-geotracker
+```
+
+It renames the `GEOTRACKER_*` keys in `.env` to `GEOLOGS_*` and keeps their values. It renames the PostgreSQL role and database from `geotracker` to `geologs` in place, which keeps the data and the password, then rebuilds and restarts the stack (the database container is now `geologs-db`). It changes nothing if both names already exist in PostgreSQL or the old role's password is MD5-hashed, and it is safe to rerun. Afterwards:
+
+-   Change cron entries from `./geotracker poll-ha` to `./geologs poll-ha`.
+-   Sign in to the browser once more; the session cookie has a new name.
+-   Database clients on port 15432 connect as user `geologs` to database `geologs`.
+-   Hermes keeps working as configured. Its MCP server name, the token variable in `~/.hermes/.env`, and the webhook subscription (whose name is part of the `GEOLOGS_WEBHOOK_URL` value) belong to Hermes; rename them there only if you want to.
+
+Outside Docker, the CLI still accepts `GEOTRACKER_*` settings and prints a reminder to rename them, and it keeps using `~/.local/share/geotracker/geotracker.db` until a `geologs.db` exists.
+
 To copy an existing SQLite archive, stop the app container while retaining the database container, then run the migration against an **empty** PostGIS database:
 
 ```bash
 docker compose stop app
-docker compose run --rm -v "$PWD/geotracker.db:/import/geotracker.db:ro" app geotracker migrate-sqlite /import/geotracker.db
+docker compose run --rm -v "$PWD/geologs.db:/import/geologs.db:ro" app geologs migrate-sqlite /import/geologs.db
 docker compose up -d app
 ```
 
@@ -51,19 +68,19 @@ The copy preserves IDs and checks row counts in one transaction. Keep the SQLite
 
 ## Run locally without Docker
 
-Requires Python 3.11+. SQLite uses only the Python standard library. For PostgreSQL, install `pip install -e '.[postgres]'` and set `GEOTRACKER_DATABASE_URL` to a PostgreSQL connection URL. When that variable is set, PostGIS is used; otherwise the SQLite path below is used.
+Requires Python 3.11+. SQLite uses only the Python standard library. For PostgreSQL, install `pip install -e '.[postgres]'` and set `GEOLOGS_DATABASE_URL` to a PostgreSQL connection URL. When that variable is set, PostGIS is used; otherwise the SQLite path below is used.
 
 ```bash
-export GEOTRACKER_DB="$PWD/geotracker.db"
-export GEOTRACKER_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
-./geotracker serve
+export GEOLOGS_DB="$PWD/geologs.db"
+export GEOLOGS_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+./geologs serve
 ```
 
-Open `http://127.0.0.1:8765` and enter the same `GEOTRACKER_TOKEN` in the sign-in panel. The CLI also reads a `.env` file from its working directory for variables that are not already set in the process environment. Restart the server after changing `.env`; an already-running process keeps its original token. The server listens only on loopback by default. If you bind a different host, a token is required; put a TLS reverse proxy in front of it for access beyond your machine.
+Open `http://127.0.0.1:8765` and enter the same `GEOLOGS_TOKEN` in the sign-in panel. The CLI also reads a `.env` file from its working directory for variables that are not already set in the process environment. Restart the server after changing `.env`; an already-running process keeps its original token. The server listens only on loopback by default. If you bind a different host, a token is required; put a TLS reverse proxy in front of it for access beyond your machine.
 
-An optional `pip install -e .` provides the same `geotracker` command globally or in a virtual environment.
+An optional `pip install -e .` provides the same `geologs` command globally or in a virtual environment.
 
-Your SQLite file stays wherever `GEOTRACKER_DB` points; the default is `~/.local/share/geotracker/geotracker.db`. PostgreSQL data stays in its configured database.
+Your SQLite file stays wherever `GEOLOGS_DB` points; the default is `~/.local/share/geologs/geologs.db`. PostgreSQL data stays in its configured database.
 
 ## Connect Home Assistant with cron
 
@@ -73,16 +90,16 @@ Create a long-lived Home Assistant token from your profile's Security tab and id
 HA_URL=http://homeassistant.local:8123
 HA_TOKEN=your-home-assistant-token
 HA_ENTITY=device_tracker.my_phone
-GEOTRACKER_URL=http://127.0.0.1:8765
+GEOLOGS_URL=http://127.0.0.1:8765
 ```
 
-Use the port from `GEOTRACKER_PUBLISHED_PORT` in `GEOTRACKER_URL`. `GEOTRACKER_TOKEN` is already in the same file. Check that the selected entity has current coordinates, then test one poll from the project directory:
+Use the port from `GEOLOGS_PUBLISHED_PORT` in `GEOLOGS_URL`. `GEOLOGS_TOKEN` is already in the same file. Check that the selected entity has current coordinates, then test one poll from the project directory:
 
 ```bash
-./geotracker poll-ha
+./geologs poll-ha
 ```
 
-For ongoing collection, run it every minute from cron or a systemd timer. A cron entry must change to this project directory so the CLI reads its `.env`; use absolute paths for both. Keep `.env` private because it contains both tokens. In a Docker setup, the host poller posts to the published app port; it does not need direct database access. A local non-Docker poller can also use `GEOTRACKER_DATABASE_URL` or `GEOTRACKER_DB` directly.
+For ongoing collection, run it every minute from cron or a systemd timer. A cron entry must change to this project directory so the CLI reads its `.env`; use absolute paths for both. Keep `.env` private because it contains both tokens. In a Docker setup, the host poller posts to the published app port; it does not need direct database access. A local non-Docker poller can also use `GEOLOGS_DATABASE_URL` or `GEOLOGS_DB` directly.
 
 Home Assistant may update a tracker at a slower interval than cron. Each successful poll increments the raw sample count. The compact timeline keeps the first and latest sample at a stationary period and retains the intervening samples while moving. The `recorded` field in the poll result counts newly stored samples; `inserted` counts new source events, and `duplicates` counts repeated source events. Repeated polls do not trigger another arrival reminder. Each sample has its own speed estimate from the preceding recorded sample; unchanged coordinates are idle instead of inheriting an earlier moving speed. Speed derived from two positions is only an estimate; sparse GPS samples and location drift can misclassify activity. Only fixes within 30 minutes of the server clock can trigger reminders; historical CSV imports never trigger them.
 
@@ -92,7 +109,7 @@ Send one point or an array of up to 1,000 points to `POST /api/points`:
 
 ```bash
 curl -X POST http://127.0.0.1:8765/api/points \
-  -H "Authorization: Bearer $GEOTRACKER_TOKEN" \
+  -H "Authorization: Bearer $GEOLOGS_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"source":"my-script","external_id":"sample-123","timestamp":"2026-09-26T14:00:00Z","lat":41.88,"lon":-87.63,"accuracy_m":15,"speed_mps":0}'
 ```
@@ -102,16 +119,16 @@ Required fields: `lat`, `lon`. Use a timezone-aware ISO 8601 `timestamp` and sta
 CSV files can contain `timestamp,lat,lon` plus optional `accuracy_m,speed_mps,external_id`:
 
 ```bash
-./geotracker import-csv locations.csv --source old-phone
+./geologs import-csv locations.csv --source old-phone
 ```
 
 Classic Google Takeout `Records.json` or `Location History.json` files with a top-level `locations` array can be imported without loading the whole file into memory:
 
 ```bash
-./geotracker import-takeout Records.json
+./geologs import-takeout Records.json
 ```
 
-The importer supports `latitudeE7`, `longitudeE7`, `timestamp` or `timestampMs`, and optional `accuracy`. It is safe to rerun overlapping exports. Modern semantic segment and `timelineObjects` exports need a separate parser and are not accepted by this command. Historical imports never trigger reminders or geocoding. After repairing imported data, use `docker compose exec app geotracker rebuild-stays` for the Docker database, or `./geotracker rebuild-stays` for a local SQLite archive.
+The importer supports `latitudeE7`, `longitudeE7`, `timestamp` or `timestampMs`, and optional `accuracy`. It is safe to rerun overlapping exports. Modern semantic segment and `timelineObjects` exports need a separate parser and are not accepted by this command. Historical imports never trigger reminders or geocoding. After repairing imported data, use `docker compose exec app geologs rebuild-stays` for the Docker database, or `./geologs rebuild-stays` for a local SQLite archive.
 
 ## Observed stays and place patterns
 
@@ -126,7 +143,7 @@ The History page opens on the configured local day. `point_observations` is the 
 
 The map applies local interpolation that passes through every included GPS fix and never sends coordinates to a routing provider. Sources are routed independently, so interleaved devices no longer break one another's paths. Fixes with accuracy worse than 150 m are omitted; gaps over 15 minutes and jumps implying more than 200 km/h remain disconnected. Stored speed does not decide whether a fix is drawn. The map does not know the road graph, so sparse coordinates can produce a line across a lake or away from a road; the line is a recorded GPS estimate rather than turn-by-turn road matching. The Places page lists saved places first and observed places in a second tab, ranked by total observed time and visit count. Stop clusters that resolve to the same provider place ID are combined; equal normalized place names within 2.5 km are also combined so a large park or lake is listed once without merging distant chain locations. A place with no name nearby is known by its street address, and indoor GPS can drift 100 m or more between visits, picking a different house number each time; such address-only places on the same street within 200 m are combined under the address where you spent the most time. Named places never merge this way. Place categories select local icons for common types such as shops, salons, water, universities, bars, parks, food, and healthcare. A saved place named `Home` or `My Home` is omitted from visited-place lists and dashboard counts, while it remains available in saved places, stays, and persisted daily summaries.
 
-The Settings page provides an IANA timezone dropdown and controls speed handling for newly received samples. The default speed behavior uses source-reported speed when present and calculates from consecutive coordinates when it is missing. “Always calculate” ignores reported speed. A source-speed adjustment in km/h is applied only when reported speed is enabled; negative values correct a source that consistently reads high. The built-in Home Assistant poller currently sends coordinates and accuracy without speed, so values marked `est.` are calculated by Geotracker and are unaffected by the source-speed adjustment.
+The Settings page provides an IANA timezone dropdown and controls speed handling for newly received samples. The default speed behavior uses source-reported speed when present and calculates from consecutive coordinates when it is missing. “Always calculate” ignores reported speed. A source-speed adjustment in km/h is applied only when reported speed is enabled; negative values correct a source that consistently reads high. The built-in Home Assistant poller currently sends coordinates and accuracy without speed, so values marked `est.` are calculated by GeoLogs and are unaffected by the source-speed adjustment.
 
 Raw storage and arrival reminders happen immediately. Stay analysis processes only each source's new tail and does not expose a stay until nearby samples span at least 15 minutes. The first request for a day's summary calculates its stay-anchored trips and routes, then saves the complete result with a raw-data watermark. Repeated requests, including requests after a server restart, read that result from the database. A new raw sample changes the watermark; saved-place edits, algorithm upgrades, and explicit analysis rebuilds clear or version the cache. Place patterns are derived from confirmed stays when requested. Waiting for 100 samples would add about 100 minutes of lag to a one-minute Home Assistant poll without adding a time-based confidence signal, so analysis is incremental rather than gated by an arbitrary point count.
 
@@ -140,19 +157,19 @@ Consecutive stays create transition counts. A next-destination estimate needs at
 
 Create a reminder at a saved place, search for another place near the latest fix, or enter destination coordinates and a 20–5,000 m radius. An unsaved reminder destination remains attached to that reminder and does not appear under Saved Places. A reminder can also name a kind of place instead of one location: **Any place named “Starbucks”** fires the first time you have been still for about three minutes within 150 m of a place whose name matches, anywhere. Every named place in that radius is checked, not just the nearest, and each query word must start a word of the name or be a close spelling of one (“starbuks” matches “Starbucks Coffee”). The places around a stop are looked up once per stop, so this costs one cached nearby-place lookup per stop of three minutes or more, and only while a name reminder is active. The number of provider requests behind that lookup depends on the selected provider. A new point inside after an outside or stale previous fix creates an event and completes the reminder. Active reminders can be cancelled; triggered and cancelled reminders remain as passive history and cannot be re-enabled. Low accuracy readings larger than the geofence radius or 150 m are ignored for triggering.
 
-The browser's arrival inbox persists events. Browser notifications work while that tab is open and permission is granted. For alerts when the browser is closed, set `GEOTRACKER_WEBHOOK_URL` to an HTTPS endpoint (or loopback HTTP). Each event is POSTed as JSON; `GEOTRACKER_WEBHOOK_TOKEN` adds a bearer header. This can feed a Home Assistant automation, `ntfy`, or your own notifier. Failed webhook attempts remain marked in the event log; automatic retries are not implemented yet.
+The browser's arrival inbox persists events. Browser notifications work while that tab is open and permission is granted. For alerts when the browser is closed, set `GEOLOGS_WEBHOOK_URL` to an HTTPS endpoint (or loopback HTTP). Each event is POSTed as JSON; `GEOLOGS_WEBHOOK_TOKEN` adds a bearer header. This can feed a Home Assistant automation, `ntfy`, or your own notifier. Failed webhook attempts remain marked in the event log; automatic retries are not implemented yet.
 
 ## Geocoding
 
--   Set `GEOAPIFY_API_KEY` to enable place/address search and coordinate labeling. [Geoapify's free plan](https://www.geoapify.com/pricing/) currently lists 3,000 credits/day; creating an API key requires an account. Address searches favor the latest recorded fix. A place is named after the nearest named place to its position: the sample-weighted average of its stays, each of which is already the average of its fixes. Geotracker asks the [Places API](https://apidocs.geoapify.com/docs/places/) for named places of visitable types (shops, food, education, parks, water, healthcare, and similar; not roads, parking, transit stops, or ATMs) inside a circle around that position, ordered by distance, and uses the first. The circle is 150 m, which reaches a big-box store from its parking lot, or the smallest of 300, 600, or 1,000 m that covers an area stay's extent. When nothing named is inside it, Reverse Geocoding supplies the street address. A lookup makes two requests of up to 20 places each, which costs two credits: Geoapify cannot combine accommodation, airport, beach, national park, sport, and tourism categories with the others in one request (adding any of them made it return none of the rest), so those are asked for separately and the nearest named place of both is used. Saved places always take precedence, including for a round trip's stop, and raw GPS fixes are never automatically geocoded. Nearest-place naming can pick a small shop next to a large venue when the venue's reference point is farther away; save the place to fix its name.
--   Set `MAPBOX_ACCESS_TOKEN` to use [Mapbox's Search Box API](https://docs.mapbox.com/api/search/search-box/). Automatic place names come from its reverse lookup restricted to points of interest (`types=poi`, up to 10 results). That endpoint takes no radius, so Geotracker measures each result's distance and uses the nearest named one inside the same search circle, skipping ATMs, parking, and transit stops. When none is inside, a second lookup with `types=address,street` supplies the address. The nearby-place picker uses the separate category-search endpoint across 13 visit-relevant category groups, merges it with exact reverse hits, removes duplicate Mapbox IDs, and enforces the requested circle locally. This can make up to 14 Mapbox requests on an uncached nearby lookup; results are region-cached. Place-name search uses the forward endpoint with `proximity`. The [free tier](https://www.mapbox.com/pricing) currently covers 50,000 Search Box requests a month. **Mapbox allows Search Box results for temporary use only; Geotracker caches and stores place names (lookup cache, saved places, daily summaries), which goes beyond those terms.** Settings shows this notice when Mapbox is selected.
--   Set `GEOTRACKER_PHOTON_URL` to use your own [Photon](https://github.com/komoot/photon/blob/master/docs/api-v1.md) instance for forward/reverse geocoding, with the same search radius and the nearest named result that is not a road or boundary.
+-   Set `GEOAPIFY_API_KEY` to enable place/address search and coordinate labeling. [Geoapify's free plan](https://www.geoapify.com/pricing/) currently lists 3,000 credits/day; creating an API key requires an account. Address searches favor the latest recorded fix. A place is named after the nearest named place to its position: the sample-weighted average of its stays, each of which is already the average of its fixes. GeoLogs asks the [Places API](https://apidocs.geoapify.com/docs/places/) for named places of visitable types (shops, food, education, parks, water, healthcare, and similar; not roads, parking, transit stops, or ATMs) inside a circle around that position, ordered by distance, and uses the first. The circle is 150 m, which reaches a big-box store from its parking lot, or the smallest of 300, 600, or 1,000 m that covers an area stay's extent. When nothing named is inside it, Reverse Geocoding supplies the street address. A lookup makes two requests of up to 20 places each, which costs two credits: Geoapify cannot combine accommodation, airport, beach, national park, sport, and tourism categories with the others in one request (adding any of them made it return none of the rest), so those are asked for separately and the nearest named place of both is used. Saved places always take precedence, including for a round trip's stop, and raw GPS fixes are never automatically geocoded. Nearest-place naming can pick a small shop next to a large venue when the venue's reference point is farther away; save the place to fix its name.
+-   Set `MAPBOX_ACCESS_TOKEN` to use [Mapbox's Search Box API](https://docs.mapbox.com/api/search/search-box/). Automatic place names come from its reverse lookup restricted to points of interest (`types=poi`, up to 10 results). That endpoint takes no radius, so GeoLogs measures each result's distance and uses the nearest named one inside the same search circle, skipping ATMs, parking, and transit stops. When none is inside, a second lookup with `types=address,street` supplies the address. The nearby-place picker uses the separate category-search endpoint across 13 visit-relevant category groups, merges it with exact reverse hits, removes duplicate Mapbox IDs, and enforces the requested circle locally. This can make up to 14 Mapbox requests on an uncached nearby lookup; results are region-cached. Place-name search uses the forward endpoint with `proximity`. The [free tier](https://www.mapbox.com/pricing) currently covers 50,000 Search Box requests a month. **Mapbox allows Search Box results for temporary use only; GeoLogs caches and stores place names (lookup cache, saved places, daily summaries), which goes beyond those terms.** Settings shows this notice when Mapbox is selected.
+-   Set `GEOLOGS_PHOTON_URL` to use your own [Photon](https://github.com/komoot/photon/blob/master/docs/api-v1.md) instance for forward/reverse geocoding, with the same search radius and the nearest named result that is not a road or boundary.
 
 When more than one provider is configured, choose one under **Settings → Place names & search**. Automatic uses the first configured of Photon, Geoapify, and Mapbox, which keeps a self-hosted Photon in charge as before. A provider without its key cannot be selected; if a selected provider's key is later removed, Automatic's choice is used. Each provider has its own lookup cache, and day summaries are keyed by provider, so switching looks names up again as days are viewed.
 
 Saved places, raw paths, trip estimates, reminders, and MCP history work without any provider key. The browser loads Leaflet from its CDN and OpenStreetMap map tiles, so map browsing sends viewport/tile requests to those services. It does not send your stored GPS history to the tile service.
 
-Nearest-place lookups and reverse geocoding share an indexed region cache, kept separately for each search radius. A named place, precise building, or amenity is reused within 15 m, and a street result within 30 m. The spatial index narrows candidates; an exact distance check confirms each hit. These small circles are heuristics, not verified parcel boundaries, so reused results are marked `approximate`. City and other broad results are cached at the requested point only because their actual boundaries are unknown. Cache entries expire after 180 days by default (`GEOTRACKER_REVERSE_CACHE_DAYS`). The returned coordinates remain the coordinates you requested, even when the label came from a nearby cache entry. This avoids repeated provider calls without assigning one place to a broad area.
+Nearest-place lookups and reverse geocoding share an indexed region cache, kept separately for each search radius. A named place, precise building, or amenity is reused within 15 m, and a street result within 30 m. The spatial index narrows candidates; an exact distance check confirms each hit. These small circles are heuristics, not verified parcel boundaries, so reused results are marked `approximate`. City and other broad results are cached at the requested point only because their actual boundaries are unknown. Cache entries expire after 180 days by default (`GEOLOGS_REVERSE_CACHE_DAYS`). The returned coordinates remain the coordinates you requested, even when the label came from a nearby cache entry. This avoids repeated provider calls without assigning one place to a broad area.
 
 PostGIS stores point and reverse-cache geography under GiST indexes and uses `ST_DWithin` for nearby searches. A city bounding box alone is not a reliable address boundary. The [PostGIS migration notes](docs/postgis-migration.md) describe what is implemented and what still needs scale testing.
 
@@ -166,60 +183,60 @@ pgvector embeddings are deliberately not used for this. Place names are short pr
 
 ## MCP
 
-The running server exposes MCP at `http://127.0.0.1:8765/mcp` using stateless Streamable HTTP. Start it with `docker compose up --build -d` or `./geotracker serve`, then point an MCP client at that URL. For clients that accept a URL and headers in JSON, the connection looks like:
+The running server exposes MCP at `http://127.0.0.1:8765/mcp` using stateless Streamable HTTP. Start it with `docker compose up --build -d` or `./geologs serve`, then point an MCP client at that URL. For clients that accept a URL and headers in JSON, the connection looks like:
 
 ```json
 {
   "mcpServers": {
-    "geotracker": {
+    "geologs": {
       "url": "http://127.0.0.1:8765/mcp",
-      "headers": {"Authorization": "Bearer YOUR_GEOTRACKER_TOKEN"}
+      "headers": {"Authorization": "Bearer YOUR_GEOLOGS_TOKEN"}
     }
   }
 }
 ```
 
-Use the token from `GEOTRACKER_TOKEN` when one is configured. The endpoint accepts JSON-RPC messages at `POST /mcp`; clients must send `Content-Type: application/json` and `Accept: application/json, text/event-stream`. It responds with JSON for requests and `202 Accepted` for notifications. This server does not issue session IDs or provide a standalone event stream, so `GET /mcp` returns `405 Method Not Allowed`. Available tools cover current/raw/compact history, nearby/time lookup, recorded trips, stats, coverage, observed stays and places, visit search by place name or category, saved place visits and observed time, detailed day data, persisted daily overviews and their plain-text briefs, transitions, next-destination estimates, one-shot reminders and their history, ingestion, geocoding, and reverse geocoding. No raw SQL execution is exposed.
+Use the token from `GEOLOGS_TOKEN` when one is configured. The endpoint accepts JSON-RPC messages at `POST /mcp`; clients must send `Content-Type: application/json` and `Accept: application/json, text/event-stream`. It responds with JSON for requests and `202 Accepted` for notifications. This server does not issue session IDs or provide a standalone event stream, so `GET /mcp` returns `405 Method Not Allowed`. Available tools cover current/raw/compact history, nearby/time lookup, recorded trips, stats, coverage, observed stays and places, visit search by place name or category, saved place visits and observed time, detailed day data, persisted daily overviews and their plain-text briefs, transitions, next-destination estimates, one-shot reminders and their history, ingestion, geocoding, and reverse geocoding. No raw SQL execution is exposed.
 
 ### Hermes Agent
 
-Put the Geotracker token in `~/.hermes/.env`:
+Put the GeoLogs token in `~/.hermes/.env`:
 
 ```dotenv
-GEOTRACKER_MCP_TOKEN=the-value-of-GEOTRACKER_TOKEN
+GEOLOGS_MCP_TOKEN=the-value-of-GEOLOGS_TOKEN
 ```
 
 Add the Streamable HTTP server to `~/.hermes/config.yaml`. Use the published port from this project's `.env`:
 
 ```yaml
 mcp_servers:
-  geotracker:
+  geologs:
     url: "http://127.0.0.1:8765/mcp"
     headers:
-      Authorization: "Bearer ${GEOTRACKER_MCP_TOKEN}"
+      Authorization: "Bearer ${GEOLOGS_MCP_TOKEN}"
 ```
 
-Run `hermes mcp test geotracker`, then start a new chat or use `/reload-mcp`. Hermes registers tools with names such as `mcp_geotracker_create_reminder`. Ask naturally: “Using Geotracker, remind me to pick up salt the next time I arrive at Walmart.” Hermes can use a saved place ID or pass a place name and coordinates directly without saving the destination. Geotracker evaluates the arrival from incoming Home Assistant samples; Hermes does not need to remain in the chat.
+Run `hermes mcp test geologs`, then start a new chat or use `/reload-mcp`. Hermes registers tools with names such as `mcp_geologs_create_reminder`. Ask naturally: “Using GeoLogs, remind me to pick up salt the next time I arrive at Walmart.” Hermes can use a saved place ID or pass a place name and coordinates directly without saving the destination. GeoLogs evaluates the arrival from incoming Home Assistant samples; Hermes does not need to remain in the chat.
 
 The MCP connection lets Hermes manage reminders, but Streamable HTTP does not push a triggered event into an idle Hermes session. To deliver the event through a configured Hermes channel, enable the Hermes webhook gateway and create a direct-delivery route:
 
 ```bash
 hermes gateway setup
-hermes webhook subscribe geotracker-reminders \
+hermes webhook subscribe geologs-reminders \
   --deliver telegram \
   --deliver-only \
   --prompt "Location reminder: {text} — arrived at {place}" \
-  --description "Deliver Geotracker arrival reminders"
+  --description "Deliver GeoLogs arrival reminders"
 ```
 
-Replace `telegram` with the Hermes delivery platform you use. Copy the URL and HMAC secret printed by Hermes into the Geotracker `.env`. When Geotracker runs in Docker and Hermes runs on the host, use the host alias in the URL:
+Replace `telegram` with the Hermes delivery platform you use. Copy the URL and HMAC secret printed by Hermes into the GeoLogs `.env`. When GeoLogs runs in Docker and Hermes runs on the host, use the host alias in the URL:
 
 ```dotenv
-GEOTRACKER_WEBHOOK_URL=http://host.docker.internal:8644/webhooks/geotracker-reminders
-GEOTRACKER_WEBHOOK_SECRET=the-secret-printed-by-hermes
+GEOLOGS_WEBHOOK_URL=http://host.docker.internal:8644/webhooks/geologs-reminders
+GEOLOGS_WEBHOOK_SECRET=the-secret-printed-by-hermes
 ```
 
-Run `docker compose up -d --force-recreate app` after changing these values. Geotracker signs webhook requests with Hermes's replay-protected V2 HMAC headers. `GEOTRACKER_WEBHOOK_TOKEN` remains available for non-Hermes endpoints that use bearer authentication.
+Run `docker compose up -d --force-recreate app` after changing these values. GeoLogs signs webhook requests with Hermes's replay-protected V2 HMAC headers. `GEOLOGS_WEBHOOK_TOKEN` remains available for non-Hermes endpoints that use bearer authentication.
 
 ## API overview
 
@@ -235,5 +252,5 @@ Good next additions are: PostGIS scale and concurrency testing; semantic Google 
 
 ```bash
 PYTHONPATH=src python3 -m unittest discover -s tests -v
-node --check src/geotracker/web/app.js
+node --check src/geologs/web/app.js
 ```

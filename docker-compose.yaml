@@ -3,17 +3,17 @@ services:
     build:
         context: .
         dockerfile: db.Dockerfile
-    container_name: geotracker-db
-    image: geotracker-db
+    container_name: geologs-db
+    image: geologs-db
     platform: linux/amd64
     environment:
-      POSTGRES_DB: geotracker
-      POSTGRES_USER: geotracker
+      POSTGRES_DB: geologs
+      POSTGRES_USER: geologs
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U geotracker -d geotracker"]
+      test: ["CMD-SHELL", "pg_isready -U geologs -d geologs"]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -27,19 +27,19 @@ services:
       db:
         condition: service_healthy
     environment:
-      GEOTRACKER_DATABASE_URL: postgresql://geotracker@db:5432/geotracker
+      GEOLOGS_DATABASE_URL: postgresql://geologs@db:5432/geologs
       PGPASSWORD: ${POSTGRES_PASSWORD}
-      GEOTRACKER_TOKEN: ${GEOTRACKER_TOKEN:?Set GEOTRACKER_TOKEN in .env}
-      GEOTRACKER_TOKEN_FILE: /config/.env
-      GEOTRACKER_TIMEZONE: ${GEOTRACKER_TIMEZONE:-UTC}
+      GEOLOGS_TOKEN: ${GEOLOGS_TOKEN:?Set GEOLOGS_TOKEN in .env}
+      GEOLOGS_TOKEN_FILE: /config/.env
+      GEOLOGS_TIMEZONE: ${GEOLOGS_TIMEZONE:-UTC}
       GEOAPIFY_API_KEY: ${GEOAPIFY_API_KEY:-}
       MAPBOX_ACCESS_TOKEN: ${MAPBOX_ACCESS_TOKEN:-}
-      GEOTRACKER_PHOTON_URL: ${GEOTRACKER_PHOTON_URL:-}
-      GEOTRACKER_WEBHOOK_URL: ${GEOTRACKER_WEBHOOK_URL:-}
-      GEOTRACKER_WEBHOOK_TOKEN: ${GEOTRACKER_WEBHOOK_TOKEN:-}
-      GEOTRACKER_WEBHOOK_SECRET: ${GEOTRACKER_WEBHOOK_SECRET:-}
+      GEOLOGS_PHOTON_URL: ${GEOLOGS_PHOTON_URL:-}
+      GEOLOGS_WEBHOOK_URL: ${GEOLOGS_WEBHOOK_URL:-}
+      GEOLOGS_WEBHOOK_TOKEN: ${GEOLOGS_WEBHOOK_TOKEN:-}
+      GEOLOGS_WEBHOOK_SECRET: ${GEOLOGS_WEBHOOK_SECRET:-}
     ports:
-      - "0.0.0.0:${GEOTRACKER_PUBLISHED_PORT:-8765}:8765"
+      - "0.0.0.0:${GEOLOGS_PUBLISHED_PORT:-8765}:8765"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:

@@ -21,25 +21,25 @@ DB_INPUT_ERRORS = (ValueError, KeyError, TypeError, sqlite3.IntegrityError) + IN
 
 def active_token():
     """Read the mounted local token file so edits take effect without a rebuild."""
-    path = os.environ.get("GEOTRACKER_TOKEN_FILE")
+    path = os.environ.get("GEOLOGS_TOKEN_FILE")
     if not path:
-        return os.environ.get("GEOTRACKER_TOKEN", "")
+        return os.environ.get("GEOLOGS_TOKEN", "")
     for line in Path(path).read_text(encoding="utf-8").splitlines():
         if "=" not in line or line.lstrip().startswith("#"):
             continue
         key, value = line.split("=", 1)
-        if key.strip() == "GEOTRACKER_TOKEN":
+        if key.strip() == "GEOLOGS_TOKEN":
             value = value.strip()
             if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
                 value = value[1:-1]
             if not value:
-                raise RuntimeError("GEOTRACKER_TOKEN_FILE has an empty token")
+                raise RuntimeError("GEOLOGS_TOKEN_FILE has an empty token")
             return value
-    raise RuntimeError("GEOTRACKER_TOKEN_FILE has no GEOTRACKER_TOKEN")
+    raise RuntimeError("GEOLOGS_TOKEN_FILE has no GEOLOGS_TOKEN")
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "Geotracker/0.1"
+    server_version = "GeoLogs/0.1"
     protocol_version = "HTTP/1.1"
 
     def log_message(self, format_, *args):
@@ -101,16 +101,16 @@ class Handler(BaseHTTPRequestHandler):
             cookies.load(self.headers.get("Cookie", ""))
         except Exception:
             return False
-        session = cookies.get("geotracker_session")
+        session = cookies.get("geologs_session")
         return bool(session and secrets.compare_digest(session.value, self.session_value(token)))
 
     @staticmethod
     def session_value(token):
-        return hmac.digest(token.encode(), b"geotracker-browser-session-v1", "sha256").hex()
+        return hmac.digest(token.encode(), b"geologs-browser-session-v1", "sha256").hex()
 
     def session_cookie(self, value, max_age):
         secure = "; Secure" if self.headers.get("X-Forwarded-Proto") == "https" else ""
-        return f"geotracker_session={value}; HttpOnly; SameSite=Strict; Path=/; Max-Age={max_age}{secure}"
+        return f"geologs_session={value}; HttpOnly; SameSite=Strict; Path=/; Max-Age={max_age}{secure}"
 
     def safe_origin(self):
         origin = self.headers.get("Origin")
@@ -136,7 +136,7 @@ class Handler(BaseHTTPRequestHandler):
         url = urlparse(self.path)
         if url.path in ("/", "/app.js", "/style.css"):
             filename = {"/": "index.html", "/app.js": "app.js", "/style.css": "style.css"}[url.path]
-            body = files("geotracker").joinpath("web", filename).read_bytes()
+            body = files("geologs").joinpath("web", filename).read_bytes()
             content_type = "text/html" if filename.endswith("html") else "text/javascript" if filename.endswith("js") else "text/css"
             self.send_response(200)
             self.send_header("Content-Type", content_type + "; charset=utf-8")
@@ -310,7 +310,7 @@ def _daily_summary_worker(stop):
             store = Store()
             finalize_previous_day(store)
         except Exception as exc:
-            print("Geotracker daily summary: " + str(exc), flush=True)
+            print("GeoLogs daily summary: " + str(exc), flush=True)
         finally:
             if store is not None:
                 store.close()
@@ -319,12 +319,12 @@ def _daily_summary_worker(stop):
 
 def serve(host="127.0.0.1", port=8765):
     if host not in ("127.0.0.1", "localhost", "::1") and not active_token():
-        raise ValueError("GEOTRACKER_TOKEN is required when binding beyond loopback")
+        raise ValueError("GEOLOGS_TOKEN is required when binding beyond loopback")
     server = ThreadingHTTPServer((host, int(port)), Handler)
     summary_stop = threading.Event()
     summary_thread = threading.Thread(target=_daily_summary_worker, args=(summary_stop,), daemon=True)
     summary_thread.start()
-    print(f"Geotracker browser: http://{host}:{port}", flush=True)
+    print(f"GeoLogs browser: http://{host}:{port}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

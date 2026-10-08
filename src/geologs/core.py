@@ -49,7 +49,12 @@ DRIVING_MIN_DISTANCE_M = 500
 
 
 def database_path() -> str:
-    return os.environ.get("GEOTRACKER_DB", str(Path.home() / ".local/share/geotracker/geotracker.db"))
+    if os.environ.get("GEOLOGS_DB"):
+        return os.environ["GEOLOGS_DB"]
+    path = Path.home() / ".local/share/geologs/geologs.db"
+    # An archive created before the rename (as Geotracker) stays where it is.
+    legacy = Path.home() / ".local/share/geotracker/geotracker.db"
+    return str(legacy if legacy.exists() and not path.exists() else path)
 
 
 def parse_time(value):
@@ -428,7 +433,7 @@ REMINDER_COLUMNS = ("id,text,place_id,active,repeat,cooldown_minutes,created_at,
 
 class Store:
     def __init__(self, path=None):
-        url = os.environ.get("GEOTRACKER_DATABASE_URL") if path is None else None
+        url = os.environ.get("GEOLOGS_DATABASE_URL") if path is None else None
         self.postgres = bool(url)
         self.path = str(url or path or database_path())
         if self.postgres:
@@ -655,7 +660,7 @@ class Store:
         # missing version.
         rebuild_versions = (5, 8, 12, 14)
         if self.postgres and self._missing_migrations(rebuild_versions):
-            self.db.execute("SELECT pg_advisory_xact_lock(hashtext('geotracker:stays:rebuild'))")
+            self.db.execute("SELECT pg_advisory_xact_lock(hashtext('geologs:stays:rebuild'))")
             missing = self._missing_migrations(rebuild_versions)
             if missing:
                 from .analysis import process_stays
@@ -668,7 +673,7 @@ class Store:
             self.db.execute("PRAGMA user_version=12")
         elif not self.db.execute("SELECT 1 FROM stay_observation_state LIMIT 1").fetchone() and self.db.execute("SELECT 1 FROM point_observations LIMIT 1").fetchone():
             if self.postgres:
-                self.db.execute("SELECT pg_advisory_xact_lock(hashtext('geotracker:stays:bootstrap'))")
+                self.db.execute("SELECT pg_advisory_xact_lock(hashtext('geologs:stays:bootstrap'))")
             if not self.db.execute("SELECT 1 FROM stay_observation_state LIMIT 1").fetchone():
                 from .analysis import process_stays
                 process_stays(self)
@@ -720,8 +725,8 @@ class Store:
 
     def settings(self):
         values = dict(DEFAULT_SETTINGS)
-        if os.environ.get("GEOTRACKER_TIMEZONE"):
-            values["timezone"] = os.environ["GEOTRACKER_TIMEZONE"]
+        if os.environ.get("GEOLOGS_TIMEZONE"):
+            values["timezone"] = os.environ["GEOLOGS_TIMEZONE"]
         for row in self._rows("SELECT key,value FROM app_settings"):
             if row["key"] in values:
                 try:
@@ -1471,7 +1476,7 @@ class Store:
     def save_reverse_region(self, provider, lat, lon, radius_m, value):
         radius = max(0.0, min(float(radius_m), 30.0))
         now = datetime.now(timezone.utc)
-        days = max(1, min(int(os.environ.get("GEOTRACKER_REVERSE_CACHE_DAYS", "180")), 3650))
+        days = max(1, min(int(os.environ.get("GEOLOGS_REVERSE_CACHE_DAYS", "180")), 3650))
         lat_delta = radius / 111320
         lon_delta = min(180, radius / max(1, 111320 * abs(math.cos(math.radians(lat)))))
         cursor = self.db.execute("""INSERT INTO reverse_regions
@@ -1494,7 +1499,7 @@ def reverse_cache_radius(result_type):
 
 
 def json_get(url):
-    req = urllib.request.Request(url, headers={"User-Agent": "Geotracker/0.1 (personal self-hosted location archive)"})
+    req = urllib.request.Request(url, headers={"User-Agent": "GeoLogs/0.1 (personal self-hosted location archive)"})
     with urllib.request.urlopen(req, timeout=12) as response:
         return json.load(response)
 
@@ -1603,7 +1608,7 @@ def geoapify_nearest_result(data, lat, lon):
 PLACES_PROVIDERS = {
     "geoapify": {"label": "Geoapify", "env": "GEOAPIFY_API_KEY"},
     "mapbox": {"label": "Mapbox", "env": "MAPBOX_ACCESS_TOKEN"},
-    "photon": {"label": "Photon (self-hosted)", "env": "GEOTRACKER_PHOTON_URL"},
+    "photon": {"label": "Photon (self-hosted)", "env": "GEOLOGS_PHOTON_URL"},
 }
 # Without a choice in Settings, the first configured provider is used; a
 # self-hosted Photon keeps the precedence it always had.
@@ -1638,13 +1643,13 @@ def places_provider(store):
 def places_provider_identity(store):
     """Changes whenever place names could change: the provider, and Photon's server."""
     name = places_provider(store)
-    return f"photon:{os.environ.get('GEOTRACKER_PHOTON_URL', '').rstrip('/')}" if name == "photon" else str(name)
+    return f"photon:{os.environ.get('GEOLOGS_PHOTON_URL', '').rstrip('/')}" if name == "photon" else str(name)
 
 
 def _require_provider(store):
     name = places_provider(store)
     if name is None:
-        raise ValueError("Set GEOAPIFY_API_KEY, MAPBOX_ACCESS_TOKEN, or GEOTRACKER_PHOTON_URL for place names and "
+        raise ValueError("Set GEOAPIFY_API_KEY, MAPBOX_ACCESS_TOKEN, or GEOLOGS_PHOTON_URL for place names and "
                          "search; saved places and recorded paths work without one")
     return name
 
@@ -1666,7 +1671,7 @@ def _mapbox_position(feature):
 
 
 def mapbox_place(feature):
-    """A Search Box feature in the shape the rest of Geotracker uses."""
+    """A Search Box feature in the shape the rest of GeoLogs uses."""
     props = feature.get("properties") or {}
     lat, lon = _mapbox_position(feature)
     name = str(props.get("name") or "").strip()
@@ -1772,7 +1777,7 @@ def _geoapify_search(query, bias):
 
 
 def _photon_search(query, bias):
-    photon = os.environ.get("GEOTRACKER_PHOTON_URL", "").rstrip("/")
+    photon = os.environ.get("GEOLOGS_PHOTON_URL", "").rstrip("/")
     params = {"q": query, "limit": 5}
     if bias:
         params.update({"lat": bias[0], "lon": bias[1]})
@@ -1804,7 +1809,7 @@ def geocode(store, query, lat=None, lon=None):
     name = _require_provider(store)
     # Cache by nearby search area; a result from another city must not win later.
     key = "search:" + query.casefold() + (f":{bias[0]:.2f}:{bias[1]:.2f}" if bias else ":unbiased")
-    provider = {"photon": "photon:" + os.environ.get("GEOTRACKER_PHOTON_URL", "").rstrip("/"),
+    provider = {"photon": "photon:" + os.environ.get("GEOLOGS_PHOTON_URL", "").rstrip("/"),
                 "geoapify": "geoapify", "mapbox": "mapbox:searchbox-v1"}[name]
     cached = store.cached(key, provider)
     if cached is not None:
@@ -1815,7 +1820,7 @@ def geocode(store, query, lat=None, lon=None):
 
 
 def _photon_features(lat, lon, radius, limit=10):
-    photon = os.environ.get("GEOTRACKER_PHOTON_URL", "").rstrip("/")
+    photon = os.environ.get("GEOLOGS_PHOTON_URL", "").rstrip("/")
     data = json_get(photon + "/reverse?" + urllib.parse.urlencode(
         {"lat": lat, "lon": lon, "radius": radius / 1000, "limit": limit}))
     features = data.get("features") or []
@@ -1899,7 +1904,7 @@ def _provider_cache_key(name):
     # Versions the reverse cache and keeps providers apart. Geoapify v2 drops
     # lookups made with the single mixed-category request, which cached
     # street addresses where named places existed.
-    return {"photon": "photon:nearest-v1:" + os.environ.get("GEOTRACKER_PHOTON_URL", "").rstrip("/"),
+    return {"photon": "photon:nearest-v1:" + os.environ.get("GEOLOGS_PHOTON_URL", "").rstrip("/"),
             "geoapify": "geoapify:nearest-v2", "mapbox": "mapbox:nearest-v1"}[name]
 
 
@@ -2094,7 +2099,7 @@ def address_for_coordinate(store, lat, lon):
 
 
 def deliver_webhook(store, events):
-    url = os.environ.get("GEOTRACKER_WEBHOOK_URL")
+    url = os.environ.get("GEOLOGS_WEBHOOK_URL")
     if not url or not events:
         return
     parsed_url = urllib.parse.urlparse(url)
@@ -2103,11 +2108,11 @@ def deliver_webhook(store, events):
         raise ValueError("webhook URL must use HTTPS or loopback HTTP")
     for event in events:
         headers = {"Content-Type": "application/json"}
-        token = os.environ.get("GEOTRACKER_WEBHOOK_TOKEN")
+        token = os.environ.get("GEOLOGS_WEBHOOK_TOKEN")
         if token:
             headers["Authorization"] = "Bearer " + token
         body = json.dumps(event, separators=(",", ":")).encode()
-        secret = os.environ.get("GEOTRACKER_WEBHOOK_SECRET")
+        secret = os.environ.get("GEOLOGS_WEBHOOK_SECRET")
         if secret:
             timestamp = str(int(datetime.now(timezone.utc).timestamp()))
             headers["X-Webhook-Timestamp"] = timestamp

@@ -11,8 +11,8 @@ from email.message import Message
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from geotracker.core import Store, classify_motion, current_location, deliver_webhook, geocode, mode_for, name_matches, nearby_places, places_provider, street_key, places_provider_identity, reverse_cache_radius, reverse_geocode, route_segments_from_points, smooth_route_segment
-from geotracker.analysis import daily_brief, daily_briefs, daily_overview, day_summary, insights, place_overview, stored_daily_record, place_patterns, predict_next, resolve_place_patterns, search_visits, stays, transitions, visited_places
+from geologs.core import Store, classify_motion, database_path, current_location, deliver_webhook, geocode, mode_for, name_matches, nearby_places, places_provider, street_key, places_provider_identity, reverse_cache_radius, reverse_geocode, route_segments_from_points, smooth_route_segment
+from geologs.analysis import daily_brief, daily_briefs, daily_overview, day_summary, insights, place_overview, stored_daily_record, place_patterns, predict_next, resolve_place_patterns, search_visits, stays, transitions, visited_places
 
 
 HOME = (41.0, -87.9)
@@ -60,10 +60,10 @@ def lake_run_day(hold=1):
     run = laps(LAKE, 500, 60, 9)
     return minute_fixes([still(HOME, 31), line(HOME, shore, 12), run, line(run[-1], HOME, 12), still(HOME, 30)],
                         source="home_assistant:phone", hold=hold)
-from geotracker.imports import import_takeout
-from geotracker.mcp import dispatch
-from geotracker.cli import load_env_file, poll_home_assistant
-from geotracker.http import Handler, active_token
+from geologs.imports import import_takeout
+from geologs.mcp import dispatch
+from geologs.cli import load_env_file, main, poll_home_assistant
+from geologs.http import Handler, active_token
 
 
 class StoreTests(unittest.TestCase):
@@ -119,7 +119,7 @@ class StoreTests(unittest.TestCase):
     def test_unsaved_coordinate_reminder_stays_out_of_saved_places_and_triggers(self):
         found = {"name": "Lake Example", "address": "Lake Example, Chicago",
                  "category": "natural.water", "provider_place_id": "lake-1"}
-        with patch("geotracker.core.place_for_coordinate", return_value=found):
+        with patch("geologs.core.place_for_coordinate", return_value=found):
             reminder = self.store.create_reminder({"text": "Start my run", "place_name": "Lake Example",
                                                     "lat": 41, "lon": -87.9, "radius_m": 120})
         self.assertEqual(self.store.places(), [])
@@ -188,11 +188,11 @@ class StoreTests(unittest.TestCase):
         ])
         first = day_summary(self.store, "2026-09-25", "UTC", "phone")
         self.assertEqual(self.store.db.execute("SELECT COUNT(*) AS n FROM analysis_cache").fetchone()["n"], 1)
-        with patch("geotracker.analysis.stays", side_effect=AssertionError("summary was recalculated")):
+        with patch("geologs.analysis.stays", side_effect=AssertionError("summary was recalculated")):
             self.assertEqual(day_summary(self.store, "2026-09-25", "UTC", "phone"), first)
 
         self.store.ingest({"source": "phone", "timestamp": "2026-09-25T10:02:00Z", "lat": 41.002, "lon": -87.9})
-        with patch("geotracker.analysis.stays", wraps=stays) as calculate_stays:
+        with patch("geologs.analysis.stays", wraps=stays) as calculate_stays:
             updated = day_summary(self.store, "2026-09-25", "UTC", "phone")
         self.assertTrue(calculate_stays.called)
         self.assertEqual(updated["points"], 3)
@@ -207,7 +207,7 @@ class StoreTests(unittest.TestCase):
             {"source": "phone", "timestamp": "2026-09-25T10:16:00Z", "lat": 41, "lon": -87.9, "accuracy_m": 5},
         ])
         found = {"name": "University of Arkansas at Little Rock", "address": "2801 South University Avenue"}
-        with patch("geotracker.analysis.place_for_coordinate", return_value=found) as reverse:
+        with patch("geologs.analysis.place_for_coordinate", return_value=found) as reverse:
             day = day_summary(self.store, "2026-09-25", "UTC")
         self.assertEqual(day["visited_places"][0]["name"], "University of Arkansas at Little Rock")
         self.assertEqual(day["visited_places"][0]["address"], "2801 South University Avenue")
@@ -368,9 +368,9 @@ class StoreTests(unittest.TestCase):
         times = [datetime(2026, 9, 25, 10, 0, 0, 100000, tzinfo=timezone.utc),
                  datetime(2026, 9, 25, 10, 0, 0, 200000, tzinfo=timezone.utc)]
         env = {"HA_URL": "http://home-assistant.test:8123", "HA_TOKEN": "test", "HA_ENTITY": "device_tracker.phone",
-               "GEOTRACKER_URL": "", "GEOTRACKER_DATABASE_URL": "", "GEOTRACKER_DB": str(Path(self.tmp.name) / "poll.db")}
-        with patch.dict(os.environ, env), patch("geotracker.cli.urllib.request.urlopen") as urlopen, \
-                patch("geotracker.cli.datetime") as clock:
+               "GEOLOGS_URL": "", "GEOLOGS_DATABASE_URL": "", "GEOLOGS_DB": str(Path(self.tmp.name) / "poll.db")}
+        with patch.dict(os.environ, env), patch("geologs.cli.urllib.request.urlopen") as urlopen, \
+                patch("geologs.cli.datetime") as clock:
             urlopen.side_effect = lambda *_args, **_kwargs: io.BytesIO(json.dumps(state).encode())
             clock.now.side_effect = times
             first, second = poll_home_assistant(), poll_home_assistant()
@@ -535,7 +535,7 @@ class StoreTests(unittest.TestCase):
         csv = "timestamp,lat,lon,accuracy_m,speed_mps\n2026-09-26T10:00:00Z,41,-87.9,,\n"
         self.assertEqual(self.store.import_csv(csv)["inserted"], 1)
         init = dispatch(self.store, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25"}})
-        self.assertEqual(init["result"]["serverInfo"]["name"], "geotracker")
+        self.assertEqual(init["result"]["serverInfo"]["name"], "geologs")
         tools = dispatch(self.store, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         tool_names = [t["name"] for t in tools["result"]["tools"]]
         self.assertIn("get_current_location", tool_names)
@@ -581,26 +581,52 @@ class StoreTests(unittest.TestCase):
 
     def test_local_env_file_loads_token_without_overriding_process_env(self):
         path = Path(self.tmp.name) / ".env"
-        path.write_text("GEOTRACKER_TOKEN=file-token\n# comment\nGEOAPIFY_API_KEY='quoted-key'\n")
-        with patch.dict(os.environ, {"GEOTRACKER_ENV_FILE": str(path)}, clear=True):
+        path.write_text("GEOLOGS_TOKEN=file-token\n# comment\nGEOAPIFY_API_KEY='quoted-key'\n")
+        with patch.dict(os.environ, {"GEOLOGS_ENV_FILE": str(path)}, clear=True):
             load_env_file()
-            self.assertEqual(os.environ["GEOTRACKER_TOKEN"], "file-token")
+            self.assertEqual(os.environ["GEOLOGS_TOKEN"], "file-token")
             self.assertEqual(os.environ["GEOAPIFY_API_KEY"], "quoted-key")
-            os.environ["GEOTRACKER_TOKEN"] = "process-token"
+            os.environ["GEOLOGS_TOKEN"] = "process-token"
             load_env_file()
-            self.assertEqual(os.environ["GEOTRACKER_TOKEN"], "process-token")
+            self.assertEqual(os.environ["GEOLOGS_TOKEN"], "process-token")
+
+    def test_settings_named_for_geotracker_still_work_with_a_reminder(self):
+        # A cron poll with an un-renamed .env must still post to the server, not a local database.
+        path = Path(self.tmp.name) / ".env"
+        path.write_text("GEOTRACKER_URL=http://127.0.0.1:8766\nGEOTRACKER_TOKEN=old-token\nGEOLOGS_TIMEZONE=UTC\n")
+        errors = io.StringIO()
+        with patch.dict(os.environ, {"GEOTRACKER_ENV_FILE": str(path), "GEOLOGS_PORT": "9000"}, clear=True), \
+                patch("sys.argv", ["geologs", "poll-ha"]), patch("sys.stderr", errors):
+            self.assertEqual(main(), 1)  # No Home Assistant settings; it stops before polling.
+            self.assertEqual((os.environ["GEOLOGS_URL"], os.environ["GEOLOGS_TOKEN"]), ("http://127.0.0.1:8766", "old-token"))
+            self.assertEqual(os.environ["GEOLOGS_PORT"], "9000")
+        self.assertIn("rename GEOTRACKER_ENV_FILE, GEOTRACKER_TOKEN, GEOTRACKER_URL to GEOLOGS_*", errors.getvalue())
+
+    def test_default_database_stays_where_an_archive_from_before_the_rename_is(self):
+        home = Path(self.tmp.name)
+        legacy, current = home / ".local/share/geotracker/geotracker.db", home / ".local/share/geologs/geologs.db"
+        with patch.dict(os.environ, {}, clear=True), patch("geologs.core.Path.home", return_value=home):
+            self.assertEqual(database_path(), str(current))
+            legacy.parent.mkdir(parents=True)
+            legacy.touch()
+            self.assertEqual(database_path(), str(legacy))
+            current.parent.mkdir(parents=True)
+            current.touch()
+            self.assertEqual(database_path(), str(current))
+            os.environ["GEOLOGS_DB"] = str(home / "chosen.db")
+            self.assertEqual(database_path(), str(home / "chosen.db"))
 
     def test_mounted_token_file_tracks_changes(self):
         path = Path(self.tmp.name) / ".env"
-        path.write_text("GEOTRACKER_TOKEN=first\n")
-        with patch.dict(os.environ, {"GEOTRACKER_TOKEN_FILE": str(path), "GEOTRACKER_TOKEN": "old-env"}):
+        path.write_text("GEOLOGS_TOKEN=first\n")
+        with patch.dict(os.environ, {"GEOLOGS_TOKEN_FILE": str(path), "GEOLOGS_TOKEN": "old-env"}):
             self.assertEqual(active_token(), "first")
-            path.write_text("GEOTRACKER_TOKEN=second\n")
+            path.write_text("GEOLOGS_TOKEN=second\n")
             self.assertEqual(active_token(), "second")
 
     def test_optional_self_hosted_providers_and_cache(self):
         feature = {"type": "Feature", "geometry": {"type": "Point", "coordinates": [-87.9, 41]}, "properties": {"name": "Market", "city": "Chicago", "type": "house"}}
-        with patch.dict(os.environ, {"GEOTRACKER_PHOTON_URL": "http://127.0.0.1:2322"}), patch("geotracker.core.json_get", return_value={"features": [feature]}) as request:
+        with patch.dict(os.environ, {"GEOLOGS_PHOTON_URL": "http://127.0.0.1:2322"}), patch("geologs.core.json_get", return_value={"features": [feature]}) as request:
             self.assertEqual(geocode(self.store, "market")[0]["lat"], 41)
             self.assertEqual(geocode(self.store, "market")[0]["name"], "Market, Chicago")
             self.assertEqual(request.call_count, 1)
@@ -617,7 +643,7 @@ class StoreTests(unittest.TestCase):
     def test_geocode_bias_uses_latest_fix_and_cache_is_area_specific(self):
         self.store.ingest({"source": "phone", "timestamp": "2026-09-25T10:00:00Z", "lat": 41, "lon": -87.9})
         response = {"results": [{"name": "Neighborhood Market", "formatted": "Neighborhood Market, 1200 Main Street", "lat": 41.01, "lon": -87.9}]}
-        with patch.dict(os.environ, {"GEOAPIFY_API_KEY": "test", "GEOTRACKER_PHOTON_URL": ""}), patch("geotracker.core.provider_request", return_value=response) as request:
+        with patch.dict(os.environ, {"GEOAPIFY_API_KEY": "test", "GEOLOGS_PHOTON_URL": ""}), patch("geologs.core.provider_request", return_value=response) as request:
             self.assertEqual(geocode(self.store, "market")[0]["name"], "Neighborhood Market")
             self.assertEqual(geocode(self.store, "market")[0]["address"], "Neighborhood Market, 1200 Main Street")
             self.assertEqual(request.call_args.args[1]["bias"], "proximity:-87.9,41.0")
@@ -628,7 +654,7 @@ class StoreTests(unittest.TestCase):
 
     def test_saved_places_reverse_geocode_once_per_cached_region(self):
         response = {"results": [{"formatted": "Market Street", "result_type": "building"}]}
-        with patch.dict(os.environ, {"GEOAPIFY_API_KEY": "test", "GEOTRACKER_PHOTON_URL": ""}), patch("geotracker.core.provider_request", return_value=response) as request:
+        with patch.dict(os.environ, {"GEOAPIFY_API_KEY": "test", "GEOLOGS_PHOTON_URL": ""}), patch("geologs.core.provider_request", return_value=response) as request:
             first = self.store.save_place({"name": "Shop", "lat": 41, "lon": -87.9})
             second = self.store.save_place({"name": "Office", "lat": 41.00003, "lon": -87.9})
             self.assertEqual(first["address"], "Market Street")
@@ -646,8 +672,8 @@ class StoreTests(unittest.TestCase):
         travel = {"features": [{"properties": {"name": "Hampton Inn Maumelle", "categories": ["accommodation.hotel"],
                                                "place_id": "hotel", "distance": 3170}}]}
         responses = lambda path, params: travel if "accommodation" in params["categories"] else everyday
-        env = {"GEOAPIFY_API_KEY": "test", "GEOTRACKER_PHOTON_URL": ""}
-        with patch.dict(os.environ, env), patch("geotracker.core.provider_request", side_effect=responses) as request:
+        env = {"GEOAPIFY_API_KEY": "test", "GEOLOGS_PHOTON_URL": ""}
+        with patch.dict(os.environ, env), patch("geologs.core.provider_request", side_effect=responses) as request:
             result = reverse_geocode(self.store, 34.852116, -92.412809)
             cached = reverse_geocode(self.store, 34.85214, -92.412809)
             wider = reverse_geocode(self.store, 34.852116, -92.412809, radius_m=515)
@@ -670,15 +696,15 @@ class StoreTests(unittest.TestCase):
         everyday = {"features": [{"properties": {"name": "Riverside Park", "categories": ["leisure.park"], "distance": 60}}]}
         travel = {"features": [{"properties": {"name": "Planet Fitness", "categories": ["sport.fitness"], "distance": 20}}]}
         responses = lambda path, params: travel if "sport" in params["categories"] else everyday
-        with patch.dict(os.environ, {"GEOAPIFY_API_KEY": "test", "GEOTRACKER_PHOTON_URL": ""}), \
-                patch("geotracker.core.provider_request", side_effect=responses):
+        with patch.dict(os.environ, {"GEOAPIFY_API_KEY": "test", "GEOLOGS_PHOTON_URL": ""}), \
+                patch("geologs.core.provider_request", side_effect=responses):
             self.assertEqual(reverse_geocode(self.store, 41, -87.9)["name"], "Planet Fitness")
 
     def test_no_named_place_nearby_falls_back_to_the_address(self):
         reverse = {"results": [{"formatted": "5511 West Markham Street, Little Rock, AR", "result_type": "building"}]}
         responses = lambda path, params: {"features": []} if path == "/v2/places" else reverse
-        env = {"GEOAPIFY_API_KEY": "test", "GEOTRACKER_PHOTON_URL": ""}
-        with patch.dict(os.environ, env), patch("geotracker.core.provider_request", side_effect=responses) as request:
+        env = {"GEOAPIFY_API_KEY": "test", "GEOLOGS_PHOTON_URL": ""}
+        with patch.dict(os.environ, env), patch("geologs.core.provider_request", side_effect=responses) as request:
             result = reverse_geocode(self.store, 34.749, -92.332)
         self.assertEqual(result["name"], "5511 West Markham Street, Little Rock, AR")
         self.assertEqual(result["place_name"], "")
@@ -688,14 +714,14 @@ class StoreTests(unittest.TestCase):
     def test_photon_searches_its_radius_and_skips_streets(self):
         street = {"geometry": {"coordinates": [-87.9, 41]}, "properties": {"name": "Main Street", "osm_key": "highway"}}
         cafe = {"geometry": {"coordinates": [-87.9, 41.0003]}, "properties": {"name": "Corner Cafe", "osm_key": "amenity", "osm_value": "cafe"}}
-        with patch.dict(os.environ, {"GEOTRACKER_PHOTON_URL": "http://127.0.0.1:2322"}), \
-                patch("geotracker.core.json_get", return_value={"features": [street, cafe]}) as request:
+        with patch.dict(os.environ, {"GEOLOGS_PHOTON_URL": "http://127.0.0.1:2322"}), \
+                patch("geologs.core.json_get", return_value={"features": [street, cafe]}) as request:
             result = reverse_geocode(self.store, 41, -87.9, radius_m=250)
         self.assertEqual(result["name"], "Corner Cafe")
         self.assertIn("radius=0.3", request.call_args.args[0])
 
     def test_places_provider_follows_settings_when_configured(self):
-        only_geoapify = {"GEOAPIFY_API_KEY": "key", "MAPBOX_ACCESS_TOKEN": "", "GEOTRACKER_PHOTON_URL": ""}
+        only_geoapify = {"GEOAPIFY_API_KEY": "key", "MAPBOX_ACCESS_TOKEN": "", "GEOLOGS_PHOTON_URL": ""}
         both = {**only_geoapify, "MAPBOX_ACCESS_TOKEN": "token"}
         with patch.dict(os.environ, only_geoapify):
             self.assertEqual(places_provider(self.store), "geoapify")
@@ -730,8 +756,8 @@ class StoreTests(unittest.TestCase):
         def respond(url):
             requests.append(url)
             return pois if "types=poi" in url else address
-        env = {"MAPBOX_ACCESS_TOKEN": "token", "GEOAPIFY_API_KEY": "", "GEOTRACKER_PHOTON_URL": ""}
-        with patch.dict(os.environ, env), patch("geotracker.core.json_get", side_effect=respond):
+        env = {"MAPBOX_ACCESS_TOKEN": "token", "GEOAPIFY_API_KEY": "", "GEOLOGS_PHOTON_URL": ""}
+        with patch.dict(os.environ, env), patch("geologs.core.json_get", side_effect=respond):
             park = reverse_geocode(self.store, *origin)
             far = reverse_geocode(self.store, *shifted(origin, 0, 2000))
         self.assertEqual((park["name"], park["category"], park["distance_m"], park["source"]),
@@ -771,9 +797,9 @@ class StoreTests(unittest.TestCase):
                 return reverse
             return next((value for category, value in responses.items()
                          if f"/category/{category}?" in url), {"features": []})
-        env = {"MAPBOX_ACCESS_TOKEN": "token", "GEOAPIFY_API_KEY": "", "GEOTRACKER_PHOTON_URL": ""}
-        with patch.dict(os.environ, env), patch("geotracker.core.MAPBOX_CATEGORY_REQUEST_INTERVAL_SECONDS", 0), \
-                patch("geotracker.core.json_get", side_effect=respond) as request:
+        env = {"MAPBOX_ACCESS_TOKEN": "token", "GEOAPIFY_API_KEY": "", "GEOLOGS_PHOTON_URL": ""}
+        with patch.dict(os.environ, env), patch("geologs.core.MAPBOX_CATEGORY_REQUEST_INTERVAL_SECONDS", 0), \
+                patch("geologs.core.json_get", side_effect=respond) as request:
             places = nearby_places(self.store, *origin, radius_m=1000)
             cached = nearby_places(self.store, *shifted(origin, 5, 0), radius_m=1000)
         self.assertEqual([place["name"] for place in places],
@@ -792,8 +818,8 @@ class StoreTests(unittest.TestCase):
                                               "full_address": "Costco Wholesale, 1 Warehouse Way",
                                               "coordinates": {"latitude": 34.8, "longitude": -92.3},
                                               "poi_category_ids": ["warehouse_store"], "poi_category": ["warehouse store"]}}]}
-        env = {"MAPBOX_ACCESS_TOKEN": "token", "GEOAPIFY_API_KEY": "key", "GEOTRACKER_PHOTON_URL": ""}
-        with patch.dict(os.environ, env), patch("geotracker.core.json_get", return_value=found) as request:
+        env = {"MAPBOX_ACCESS_TOKEN": "token", "GEOAPIFY_API_KEY": "key", "GEOLOGS_PHOTON_URL": ""}
+        with patch.dict(os.environ, env), patch("geologs.core.json_get", return_value=found) as request:
             self.store.save_settings({"places_provider": "mapbox"})
             results = geocode(self.store, "costco", 34.85, -92.41)
             geocode(self.store, "costco", 34.85, -92.41)
@@ -802,7 +828,7 @@ class StoreTests(unittest.TestCase):
         self.assertIn("proximity=-92.41%2C34.85", request.call_args.args[0])
         self.assertEqual((results[0]["name"], results[0]["lat"], results[0]["provider_place_id"]), ("Costco Wholesale", 34.8, "costco"))
         # Switching back to Geoapify asks Geoapify instead of reusing Mapbox's cached answer.
-        with patch.dict(os.environ, env), patch("geotracker.core.provider_request", return_value={"results": []}) as geoapify:
+        with patch.dict(os.environ, env), patch("geologs.core.provider_request", return_value={"results": []}) as geoapify:
             self.store.save_settings({"places_provider": "geoapify"})
             self.assertEqual(geocode(self.store, "costco", 34.85, -92.41), [])
         self.assertEqual(geoapify.call_count, 1)
@@ -812,7 +838,7 @@ class StoreTests(unittest.TestCase):
                                   "formatted": "War Memorial Park, 5511 West Markham Street, Little Rock, AR",
                                   "address_line1": "War Memorial Park", "result_type": "amenity",
                                   "category": "leisure.park", "distance": 8}]}
-        with patch.dict(os.environ, {"GEOAPIFY_API_KEY": "test", "GEOTRACKER_PHOTON_URL": ""}), patch("geotracker.core.provider_request", return_value=response) as request:
+        with patch.dict(os.environ, {"GEOAPIFY_API_KEY": "test", "GEOLOGS_PHOTON_URL": ""}), patch("geologs.core.provider_request", return_value=response) as request:
             result = reverse_geocode(self.store, 34.749, -92.332)
             nearby = reverse_geocode(self.store, 34.74903, -92.332)
         self.assertEqual(result["name"], "War Memorial Park")
@@ -825,7 +851,7 @@ class StoreTests(unittest.TestCase):
 
     def test_geoapify_reverse_uses_address_when_place_is_unnamed(self):
         response = {"results": [{"formatted": "1200 Main Street, Little Rock, AR", "result_type": "building"}]}
-        with patch.dict(os.environ, {"GEOAPIFY_API_KEY": "test", "GEOTRACKER_PHOTON_URL": ""}), patch("geotracker.core.provider_request", return_value=response):
+        with patch.dict(os.environ, {"GEOAPIFY_API_KEY": "test", "GEOLOGS_PHOTON_URL": ""}), patch("geologs.core.provider_request", return_value=response):
             result = reverse_geocode(self.store, 34.74, -92.27)
         self.assertEqual(result["name"], "1200 Main Street, Little Rock, AR")
         self.assertEqual(result["place_name"], "")
@@ -833,9 +859,9 @@ class StoreTests(unittest.TestCase):
 
     def test_webhook_uses_hermes_compatible_hmac_v2_signature(self):
         event = {"id": 99, "text": "Pick up salt", "place": "Walmart"}
-        env = {"GEOTRACKER_WEBHOOK_URL": "http://host.docker.internal:8644/webhooks/geotracker-reminders",
-               "GEOTRACKER_WEBHOOK_SECRET": "shared-secret", "GEOTRACKER_WEBHOOK_TOKEN": ""}
-        with patch.dict(os.environ, env), patch("geotracker.core.urllib.request.urlopen", return_value=io.BytesIO()) as urlopen:
+        env = {"GEOLOGS_WEBHOOK_URL": "http://host.docker.internal:8644/webhooks/geologs-reminders",
+               "GEOLOGS_WEBHOOK_SECRET": "shared-secret", "GEOLOGS_WEBHOOK_TOKEN": ""}
+        with patch.dict(os.environ, env), patch("geologs.core.urllib.request.urlopen", return_value=io.BytesIO()) as urlopen:
             deliver_webhook(self.store, [event])
         request = urlopen.call_args.args[0]
         headers = {key.lower(): value for key, value in request.header_items()}
@@ -899,7 +925,7 @@ class StoreTests(unittest.TestCase):
         resolved = {"name": "Lake Example", "address": "Lake Example, Chicago",
                     "category": "natural.water", "categories": ["natural.water"],
                     "provider_place_id": "geoapify-lake-1"}
-        with patch("geotracker.analysis.place_for_coordinate", return_value=resolved):
+        with patch("geologs.analysis.place_for_coordinate", return_value=resolved):
             places = visited_places(self.store)
             day = day_summary(self.store, "2026-09-25", "UTC", "phone")
             pattern = insights(self.store)["frequent_places"]
@@ -930,7 +956,7 @@ class StoreTests(unittest.TestCase):
             {"name": "  lake   example ", "address": "South shore", "category": "natural.water",
              "categories": ["natural.water"], "provider_place_id": "south"},
         ]
-        with patch("geotracker.analysis.place_for_coordinate", side_effect=labels):
+        with patch("geologs.analysis.place_for_coordinate", side_effect=labels):
             merged, mapping = resolve_place_patterns(self.store, (clusters, {10: 0, 11: 1}))
         self.assertEqual(len(merged), 1)
         self.assertEqual(merged[0]["visits"], 2)
@@ -1048,7 +1074,7 @@ class StoreTests(unittest.TestCase):
 
         found = {"name": "Lake Example", "address": "Lake Example, Chicago", "category": "natural.water",
                  "categories": ["natural.water"], "provider_place_id": "lake-1"}
-        with patch("geotracker.analysis.place_for_coordinate", return_value=found):
+        with patch("geologs.analysis.place_for_coordinate", return_value=found):
             day = day_summary(self.store, "2026-09-27", "UTC")
             overview = daily_overview(self.store, "2026-09-27", "UTC")
         self.assertEqual([trip["mode"] for trip in day["trips"]], ["driving", "driving"])
@@ -1112,7 +1138,7 @@ class StoreTests(unittest.TestCase):
         home = {"name": "Home Street", "address": "", "category": "", "categories": [], "provider_place_id": "home"}
         def resolve(_store, lat, lon, _radius=None):
             return label if lon > HOME[1] + .01 else home
-        with patch("geotracker.analysis.place_for_coordinate", side_effect=resolve):
+        with patch("geologs.analysis.place_for_coordinate", side_effect=resolve):
             found = search_visits(self.store, "costco", timezone_name="UTC")
             day = day_summary(self.store, "2026-09-27", "UTC")
         self.assertEqual(found["total_visits"], 1)
@@ -1141,7 +1167,7 @@ class StoreTests(unittest.TestCase):
         self.store.ingest(fixes)
         if extra:
             self.store.ingest(extra)
-        with patch("geotracker.analysis.place_for_coordinate", side_effect=campus_label):
+        with patch("geologs.analysis.place_for_coordinate", side_effect=campus_label):
             return (day_summary(self.store, "2026-09-27", "UTC"), search_visits(self.store, "university", timezone_name="UTC"),
                     daily_overview(self.store, "2026-09-27", "UTC"))
 
@@ -1193,7 +1219,7 @@ class StoreTests(unittest.TestCase):
         before = minute_fixes([still(HOME, 30), line(HOME, CAMPUS, 12), still(CAMPUS, 60)])
         after = minute_fixes([still(CAMPUS, 60), line(CAMPUS, HOME, 12), still(HOME, 30)], start=datetime(2026, 9, 27, 17, tzinfo=timezone.utc))
         self.store.ingest(before + after)
-        with patch("geotracker.analysis.place_for_coordinate", side_effect=campus_label):
+        with patch("geologs.analysis.place_for_coordinate", side_effect=campus_label):
             day = day_summary(self.store, "2026-09-27", "UTC")
         self.assertEqual([(gap["start"], gap["end"]) for gap in day["coverage_gaps"]],
                          [("2026-09-27T14:41:00+00:00", "2026-09-27T17:00:00+00:00")])
@@ -1220,7 +1246,7 @@ class StoreTests(unittest.TestCase):
         self.assertLess(metres_from(clusters[0], shifted(CAMPUS, 45, 0)), 1)
         self.assertEqual(clusters[0]["extent_m"], 45)
         self.assertNotIn("_members", clusters[0])
-        with patch("geotracker.analysis.place_for_coordinate", return_value={"name": "University"}) as lookup:
+        with patch("geologs.analysis.place_for_coordinate", return_value={"name": "University"}) as lookup:
             resolve_place_patterns(self.store, (clusters, mapping))
         lat, lon, radius = lookup.call_args.args[1:]
         self.assertEqual(round(lat, 6), round(clusters[0]["lat"], 6))
@@ -1229,13 +1255,13 @@ class StoreTests(unittest.TestCase):
     def test_round_trip_names_where_it_stopped(self):
         store = shifted(HOME, 4000, 0)
         self.store.ingest(minute_fixes([still(HOME, 30), line(HOME, store, 8), still(store, 8), line(store, HOME, 8), still(HOME, 30)]))
-        with patch("geotracker.analysis.place_for_coordinate", side_effect=campus_label):
+        with patch("geologs.analysis.place_for_coordinate", side_effect=campus_label):
             day = day_summary(self.store, "2026-09-27", "UTC")
         trip = day["trips"][0]
         self.assertTrue(trip["loop"])
         self.assertEqual((trip["turnaround"]["name"], trip["turnaround"]["stop_minutes"]), ("Taco Place", 8))
         self.assertAlmostEqual(trip["turnaround"]["distance_m"], 4000, delta=20)
-        with patch("geotracker.analysis.place_for_coordinate", side_effect=campus_label):
+        with patch("geologs.analysis.place_for_coordinate", side_effect=campus_label):
             brief = daily_brief(daily_overview(self.store, "2026-09-27", "UTC"))
         self.assertRegex(brief["timeline"][1], r"^13:[23]\d-13:5\d drove \d\.\d km round trip from .+ via Taco Place$")
 
@@ -1312,7 +1338,7 @@ class StoreTests(unittest.TestCase):
         start = datetime.now(timezone.utc) - timedelta(minutes=20)
         fixes = minute_fixes([line(HOME, cafe, 10), still(cafe, 8)], start=start)
         events = []
-        with patch("geotracker.analysis.nearby_places", return_value=nearby) as lookup:
+        with patch("geologs.analysis.nearby_places", return_value=nearby) as lookup:
             for fix in fixes[:12]:  # two minutes still: not yet
                 events += self.store.ingest(fix)["events"]
             self.assertEqual(events, [])
@@ -1327,11 +1353,11 @@ class StoreTests(unittest.TestCase):
 
     def test_name_only_reminder_ignores_other_places_and_old_data(self):
         self.store.create_reminder({"text": "Get coffee beans", "match_name": "Starbucks"})
-        with patch("geotracker.analysis.nearby_places", return_value=[{"name": "Dunkin'", "distance_m": 5}]):
+        with patch("geologs.analysis.nearby_places", return_value=[{"name": "Dunkin'", "distance_m": 5}]):
             start = datetime.now(timezone.utc) - timedelta(minutes=10)
             events = self.store.ingest(minute_fixes([still(HOME, 6)], start=start))["events"]
         self.assertEqual(events, [])
-        with patch("geotracker.analysis.nearby_places", return_value=[{"name": "Starbucks", "distance_m": 5}]) as lookup:
+        with patch("geologs.analysis.nearby_places", return_value=[{"name": "Starbucks", "distance_m": 5}]) as lookup:
             old = self.store.ingest(minute_fixes([still(HOME, 6)], source="old", start=datetime(2026, 1, 1, tzinfo=timezone.utc)))
         self.assertEqual((old["events"], lookup.call_count), ([], 0))
         self.assertEqual(len(self.store.reminders()), 1)
@@ -1354,8 +1380,8 @@ class StoreTests(unittest.TestCase):
         travel = {"features": [{"properties": {"name": "Hampton Inn", "categories": ["accommodation.hotel"], "distance": 90,
                                                "lat": 41.0008, "lon": -87.9}}]}
         responses = lambda path, params: travel if "accommodation" in params["categories"] else everyday
-        with patch.dict(os.environ, {"GEOAPIFY_API_KEY": "test", "GEOTRACKER_PHOTON_URL": "", "MAPBOX_ACCESS_TOKEN": ""}), \
-                patch("geotracker.core.provider_request", side_effect=responses) as request:
+        with patch.dict(os.environ, {"GEOAPIFY_API_KEY": "test", "GEOLOGS_PHOTON_URL": "", "MAPBOX_ACCESS_TOKEN": ""}), \
+                patch("geologs.core.provider_request", side_effect=responses) as request:
             places = nearby_places(self.store, 41, -87.9, 250)
             again = nearby_places(self.store, 41.00005, -87.9, 250)
         self.assertEqual([place["name"] for place in places], ["Chipotle", "Hampton Inn"])
@@ -1371,7 +1397,7 @@ class StoreTests(unittest.TestCase):
                  "categories": ["catering.restaurant"], "provider_place_id": "chipotle"}
         home = {"name": "Home Street", "address": "", "category": "", "categories": [], "provider_place_id": "home"}
         resolve = lambda _store, lat, lon, _radius=None: wrong if lon > HOME[1] + .01 else home
-        with patch("geotracker.analysis.place_for_coordinate", side_effect=resolve):
+        with patch("geologs.analysis.place_for_coordinate", side_effect=resolve):
             before = day_summary(self.store, "2026-09-27", "UTC")
             self.assertEqual(before["stays"][1]["display_name"], "Chipotle Mexican Grill")
             visit = before["stays"][1]
@@ -1394,7 +1420,7 @@ class StoreTests(unittest.TestCase):
         again = self.store.save_place_label({"name": "Starbucks Reserve", "lat": visit["lat"] + .0001, "lon": visit["lon"]})
         self.assertEqual((again["id"], len(self.store.place_labels())), (label["id"], 1))
         self.store.delete_place_label(label["id"])
-        with patch("geotracker.analysis.place_for_coordinate", side_effect=resolve):
+        with patch("geologs.analysis.place_for_coordinate", side_effect=resolve):
             self.assertEqual(day_summary(self.store, "2026-09-27", "UTC")["stays"][1]["display_name"], "Chipotle Mexican Grill")
 
     def test_visit_only_correction_leaves_other_visits_to_the_same_spot_alone(self):
@@ -1409,7 +1435,7 @@ class StoreTests(unittest.TestCase):
                                                   "started_at": first["started_at"], "ended_at": first["ended_at"]})
         self.assertEqual((only_first["source"], only_first["started_at"]), ("phone", first["started_at"]))
         self.assertEqual(names(), {"2026-09-26": "Starbucks", "2026-09-27": None})
-        with patch("geotracker.analysis.place_for_coordinate", return_value=wrong):
+        with patch("geologs.analysis.place_for_coordinate", return_value=wrong):
             self.assertEqual(day_summary(self.store, "2026-09-27", "UTC")["stays"][0]["display_name"], "Chipotle Mexican Grill")
             self.assertEqual([visit["date"] for visit in search_visits(self.store, "starbucks", timezone_name="UTC")["visits"]], ["2026-09-26"])
         # An every-visit correction names both days; the visit-only one still wins for its own visit.
@@ -1422,7 +1448,7 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(len(self.store.place_labels()), 2)
         self.assertNotEqual(everywhere["id"], only_first["id"])
         # Every-visit corrections only name the spot itself when there is no visit to match.
-        from geotracker.core import place_for_coordinate
+        from geologs.core import place_for_coordinate
         self.assertEqual(place_for_coordinate(self.store, first["lat"], first["lon"])["name"], "Coffee Corner")
         with self.assertRaisesRegex(ValueError, "together"):
             self.store.save_place_label({"name": "X", "lat": 41, "lon": -87.9, "started_at": first["started_at"]})
@@ -1436,7 +1462,7 @@ class StoreTests(unittest.TestCase):
         self.store.save_place_label({"name": "Starbucks", "lat": visit["lat"], "lon": visit["lon"], "source": "phone",
                                      "started_at": visit["started_at"], "ended_at": visit["ended_at"]})
         self.store.ingest(fixes[30:])  # still there, past the corrected window
-        with patch("geotracker.core.place_for_coordinate", return_value={"name": "Chipotle", "address": "", "category": "",
+        with patch("geologs.core.place_for_coordinate", return_value={"name": "Chipotle", "address": "", "category": "",
                                                                        "provider_place_id": ""}):
             self.assertEqual(current_location(self.store)["place_name"], "Starbucks")
 
@@ -1482,7 +1508,7 @@ class StoreTests(unittest.TestCase):
             return {"name": address, "named": named, "address": address, "category": "", "categories": [], "provider_place_id": ""}
         for day, spot, hours in ((20, house, 8), (21, drifted, 5), (22, house, 8), (23, far_down, 2), (24, cross_street, 2), (25, cafe, 1)):
             self.store.ingest(minute_fixes([still(spot, hours * 60)], start=datetime(2026, 9, day, 1, tzinfo=timezone.utc)))
-        with patch("geotracker.analysis.place_for_coordinate", side_effect=resolve):
+        with patch("geologs.analysis.place_for_coordinate", side_effect=resolve):
             places = {place["name"].split(",")[0]: place["visits"] for place in visited_places(self.store)}
         # The drifted stay joins the place where most time was spent; the rest stay apart.
         self.assertEqual(places, {"9004 Longacre Drive": 3, "9600 Longacre Drive": 1, "1200 Pine Street": 1, "Corner Cafe": 1})
@@ -1501,7 +1527,7 @@ class StoreTests(unittest.TestCase):
             return {"name": text, "named": False, "address": text, "category": "", "categories": [], "provider_place_id": ""}
         for day, spot in ((20, house), (21, drifted), (22, house), (23, neighbour), (24, elsewhere)):
             self.store.ingest(minute_fixes([still(spot, 120)], start=datetime(2026, 9, day, 1, tzinfo=timezone.utc)))
-        with patch("geotracker.analysis.place_for_coordinate", side_effect=resolve):
+        with patch("geologs.analysis.place_for_coordinate", side_effect=resolve):
             overview = place_overview(self.store)
         self.assertEqual(overview["saved"][str(home["id"])]["visits"], 3)
         self.assertEqual(overview["saved"][str(friend["id"])]["visits"], 1)
@@ -1630,7 +1656,7 @@ class StoreTests(unittest.TestCase):
         middle = [line(CAMPUS, lot_a, 1), still(lot_a, 90), line(lot_a, lot_b, 4), still(lot_b, 80)]
         fixes = minute_fixes([still(HOME, 30), line(HOME, CAMPUS, 12), *middle, line(lot_b, HOME, 12), still(HOME, 30)])
         self.store.ingest(fixes)
-        with patch("geotracker.analysis.place_for_coordinate", return_value={"name": "Street"}):
+        with patch("geologs.analysis.place_for_coordinate", return_value={"name": "Street"}):
             move = [trip for trip in anchored_trips_for_day(self.store) if 1 < trip["distance_km"] < 2][0]
             self.store.save_mode_override({"source": move["source"], "mode": "cycling", "started_at": move["start"], "ended_at": move["end"]})
             day = day_summary(self.store, "2026-09-27", "UTC")
@@ -1677,7 +1703,7 @@ class StoreTests(unittest.TestCase):
                          "categories": ["commercial.supermarket"], "provider_place_id": "sams"}}
         def label(_store, lat, lon, _radius=None):
             return next(value for place, value in labels.items() if abs(place[0] - lat) + abs(place[1] - lon) < 1e-3)
-        with patch("geotracker.analysis.place_for_coordinate", side_effect=label):
+        with patch("geologs.analysis.place_for_coordinate", side_effect=label):
             result = search_visits(self.store, "costco", timezone_name="America/Chicago")
             self.assertEqual([visit["date"] for visit in result["visits"]], ["2026-09-27", "2026-09-25"])
             self.assertEqual(result["visits"][0]["arrival"], "2026-09-27T13:00-05:00")
@@ -1714,7 +1740,7 @@ LAB = shifted(CAMPUS, 400, 0)
 
 
 def campus_label(_store, lat, lon, _radius=None):
-    from geotracker.core import metres
+    from geologs.core import metres
     if metres(lat, lon, *CAMPUS) < 1500:
         return {"name": "University", "address": "Campus", "category": "education.university",
                 "categories": ["education.university"], "provider_place_id": "university"}
@@ -1724,17 +1750,17 @@ def campus_label(_store, lat, lon, _radius=None):
 
 
 def anchored_trips_for_day(store):
-    from geotracker.analysis import anchored_trips
+    from geologs.analysis import anchored_trips
     return anchored_trips(store, "2026-09-27T00:00:00+00:00", "2026-09-27T23:59:59+00:00")
 
 
 def metres_from(row, place):
-    from geotracker.core import metres
+    from geologs.core import metres
     return metres(row["lat"], row["lon"], place[0], place[1])
 
 
 def process_stays_rebuild(store):
-    from geotracker.analysis import process_stays
+    from geologs.analysis import process_stays
     process_stays(store, rebuild=True)
     store.db.commit()
 

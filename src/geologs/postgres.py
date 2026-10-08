@@ -162,7 +162,7 @@ _initialized_urls = set()
 class PostgresConnection:
     def __init__(self, url):
         if psycopg is None:
-            raise RuntimeError("PostgreSQL requires psycopg; install with pip install 'geotracker[postgres]'")
+            raise RuntimeError("PostgreSQL requires psycopg; install with pip install 'geologs[postgres]'")
         self.connection = psycopg.connect(url, row_factory=dict_row)
         with _schema_lock:
             if url not in _initialized_urls:

@@ -2,7 +2,7 @@
 
 The four reference projects informed the product choices below. “Built” describes working code in this repository. “Planned” is not part of the runtime yet.
 
-| Source | Valuable feature | Geotracker status | Decision |
+| Source | Valuable feature | GeoLogs status | Decision |
 |---|---|---|---|
 | [location-history-mcp-server](https://github.com/lucas-1000/location-history-mcp-server) | Stay detection, visits, frequent places, manual labels | Built | Stationary stays need accurate samples spanning at least 15 minutes within 50 m; area stays cover 15 minutes or more moving around one place, such as a lake loop, with a walking, running, or cycling activity. Repeat stops become place suggestions; saved places provide names and geofences. |
 | Same | Spatial indexing with PostGIS | Built, testing underway | Docker Compose runs PostGIS. The alternate store has GiST indexes for points, places, and reverse cache centers; nearby and cache lookups use `ST_DWithin`. SQLite remains supported. |
@@ -25,4 +25,4 @@ The four reference projects informed the product choices below. “Built” desc
 
 ## Product additions beyond the references
 
-Geotracker connects Home Assistant directly, has a source-independent ingest API, stores arrival reminders and webhook events, and offers a browser for compact GPS paths, speed, trips, observed stays, ranked visited places, and transitions. Saved and observed places are enriched on demand through a conservative reverse cache.
+GeoLogs connects Home Assistant directly, has a source-independent ingest API, stores arrival reminders and webhook events, and offers a browser for compact GPS paths, speed, trips, observed stays, ranked visited places, and transitions. Saved and observed places are enriched on demand through a conservative reverse cache.

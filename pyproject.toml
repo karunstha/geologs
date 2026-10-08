@@ -1,5 +1,5 @@
 [project]
-name = "geotracker"
+name = "geologs"
 version = "0.1.0"
 description = "Source-independent personal location memory, reminders, and MCP tools"
 requires-python = ">=3.11"
@@ -9,7 +9,7 @@ dependencies = ["tzdata>=2025.1"]
 postgres = ["psycopg[binary]>=3.2,<4"]
 
 [project.scripts]
-geotracker = "geotracker.cli:main"
+geologs = "geologs.cli:main"
 
 [build-system]
 requires = ["setuptools>=68"]
@@ -19,4 +19,4 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
-geotracker = ["web/*"]
+geologs = ["web/*"]

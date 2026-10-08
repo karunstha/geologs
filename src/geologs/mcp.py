@@ -154,7 +154,7 @@ def dispatch(store, request):
         if method == "initialize":
             offered = params.get("protocolVersion", "2025-11-25")
             version = offered if offered in SUPPORTED_VERSIONS else SUPPORTED_VERSIONS[0]
-            result = {"protocolVersion": version, "capabilities": {"tools": {}}, "serverInfo": {"name": "geotracker", "version": "0.1.0"}}
+            result = {"protocolVersion": version, "capabilities": {"tools": {}}, "serverInfo": {"name": "geologs", "version": "0.1.0"}}
         elif method == "ping":
             result = {}
         elif method == "tools/list":

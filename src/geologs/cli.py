@@ -11,9 +11,28 @@ from .core import Store, deliver_webhook
 from .http import serve
 
 
+LEGACY_PREFIX = "GEOTRACKER_"
+
+
+def adopt_legacy_names():
+    """Honour settings still named for the old project name, Geotracker.
+
+    Without this, a cron poll with an un-renamed .env would miss GEOLOGS_URL
+    and quietly write to a local database instead of the server.
+    """
+    adopted = []
+    for key in sorted(os.environ):
+        if key.startswith(LEGACY_PREFIX):
+            current = "GEOLOGS_" + key[len(LEGACY_PREFIX):]
+            if current not in os.environ:
+                os.environ[current] = os.environ[key]
+                adopted.append(key)
+    return adopted
+
+
 def load_env_file():
     """Use local .env values when the process environment has no override."""
-    path = Path(os.environ.get("GEOTRACKER_ENV_FILE", ".env"))
+    path = Path(os.environ.get("GEOLOGS_ENV_FILE", ".env"))
     if not path.is_file():
         return
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -48,10 +67,10 @@ def poll_home_assistant():
              "timestamp": polled_at,
              "lat": attrs["latitude"], "lon": attrs["longitude"],
              "accuracy_m": attrs.get("gps_accuracy")}
-    endpoint = os.environ.get("GEOTRACKER_URL")
+    endpoint = os.environ.get("GEOLOGS_URL")
     if endpoint:
         headers = {"Content-Type": "application/json"}
-        api_token = os.environ.get("GEOTRACKER_TOKEN")
+        api_token = os.environ.get("GEOLOGS_TOKEN")
         if api_token:
             headers["Authorization"] = "Bearer " + api_token
         request = urllib.request.Request(endpoint.rstrip("/") + "/api/points", json.dumps(point).encode(), headers=headers, method="POST")
@@ -67,12 +86,17 @@ def poll_home_assistant():
 
 
 def main():
+    legacy = adopt_legacy_names()
     load_env_file()
-    parser = argparse.ArgumentParser(prog="geotracker")
+    legacy += adopt_legacy_names()
+    if legacy:
+        print("geologs: rename " + ", ".join(legacy) + " to GEOLOGS_*; the old names still work for now",
+              file=sys.stderr)
+    parser = argparse.ArgumentParser(prog="geologs")
     sub = parser.add_subparsers(dest="command", required=True)
     web = sub.add_parser("serve", help="run local browser, REST API and MCP HTTP")
-    web.add_argument("--host", default=os.environ.get("GEOTRACKER_HOST", "127.0.0.1"))
-    web.add_argument("--port", type=int, default=int(os.environ.get("GEOTRACKER_PORT", "8765")))
+    web.add_argument("--host", default=os.environ.get("GEOLOGS_HOST", "127.0.0.1"))
+    web.add_argument("--port", type=int, default=int(os.environ.get("GEOLOGS_PORT", "8765")))
     sub.add_parser("poll-ha", help="poll a Home Assistant device tracker once (run from cron)")
     sub.add_parser("rebuild-stays", help="rebuild observed stays after historical import or algorithm changes")
     imp = sub.add_parser("import-csv", help="import CSV with timestamp,lat,lon and optional accuracy_m,speed_mps")
@@ -113,12 +137,12 @@ def main():
                 store.close()
         elif args.command == "migrate-sqlite":
             from .migration import migrate_sqlite
-            url = os.environ.get("GEOTRACKER_DATABASE_URL")
+            url = os.environ.get("GEOLOGS_DATABASE_URL")
             if not url:
-                raise ValueError("GEOTRACKER_DATABASE_URL is required for migration")
+                raise ValueError("GEOLOGS_DATABASE_URL is required for migration")
             print(json.dumps(migrate_sqlite(args.file, url)))
     except (ValueError, OSError) as exc:
-        print("geotracker: " + str(exc), file=sys.stderr)
+        print("geologs: " + str(exc), file=sys.stderr)
         return 1
     return 0
 
