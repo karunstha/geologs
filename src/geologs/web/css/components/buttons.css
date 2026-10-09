@@ -105,7 +105,46 @@
   background: var(--surface);
   box-shadow: var(--shadow-sm);
 }
-.list-item button:hover,
-.result-item button:hover {
+/* Compact buttons inside result rows (search results, nearby places). */
+.result-item > button {
+  height: 30px;
+  padding: 0 11px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.result-item > button:hover {
   background: var(--surface-3);
+}
+/* Icon actions at the end of a list row. */
+.row-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+.row-actions .icon-button {
+  width: 32px;
+  height: 32px;
+}
+.row-actions .icon-button svg {
+  width: 17px;
+  height: 17px;
+}
+.icon-button.danger:hover {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+.button[data-state="granted"] {
+  border-color: color-mix(in srgb, var(--success) 35%, var(--border));
+  background: var(--success-soft);
+  color: var(--success);
+  opacity: 1;
+}
+.button[data-state="denied"] {
+  color: var(--text-2);
 }

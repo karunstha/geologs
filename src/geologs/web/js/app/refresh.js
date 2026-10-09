@@ -4,7 +4,8 @@ import { $, toast } from "../core/dom.js";
 import { localDateKey } from "../core/format.js";
 import { state } from "../core/state.js";
 import { drawMap } from "../map/map.js";
-import { refreshCoverage, refreshExplore, refreshInsights, renderCurrent } from "../views/history.js";
+import { refreshExplore, renderCurrent } from "../views/history.js";
+import { refreshInsights } from "../views/patterns.js";
 import { renderPlaces } from "../views/places.js";
 import { renderReminders } from "../views/reminders.js";
 import { renderSettings } from "../views/settings.js";
@@ -48,7 +49,7 @@ export async function refreshAll() {
         : "Searches are worldwide until a location is recorded."
       : "Place search needs a geocoding provider.";
     await refreshMeta();
-    await Promise.all([refreshExplore(), refreshInsights(), refreshCoverage()]);
+    await Promise.all([refreshExplore(), refreshInsights()]);
   } catch (e) {
     toast(e.message);
   }

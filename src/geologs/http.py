@@ -15,7 +15,7 @@ from importlib.resources import files
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from .ingest import FORMATS as INGEST_FORMATS
+from .ingest import FORMATS as INGEST_FORMATS, claimed_source
 
 from .core import PLACES_PROVIDERS, Store, configured_places_providers, current_location, deliver_webhook, geocode, nearby_places, places_provider, reverse_geocode
 from .analysis import daily_briefs, daily_overview, day_summary, finalize_previous_day, insights, place_overview, stored_daily_record, place_patterns, predict_next, resolve_place_patterns, search_visits, stays, transitions, visited_places
@@ -195,13 +195,13 @@ class Handler(BaseHTTPRequestHandler):
             self.error_json(503, "Database unavailable: " + str(exc).splitlines()[0][:300])
             return None
 
-    def note_ingest(self, kind, status, message=None, source=None, accepted=0):
+    def note_ingest(self, kind, status, message=None, device=None, accepted=0):
         try:
             store = Store()
         except Exception:
             return
         try:
-            store.record_ingest(kind, status, message, source, accepted)
+            store.record_ingest(kind, status, message, device, accepted)
         except Exception:
             pass
         finally:
@@ -210,10 +210,11 @@ class Handler(BaseHTTPRequestHandler):
     def receive_locations(self, kind, query):
         """POST/GET /api/ingest/<format>: points from a tracking app, answered the way it expects."""
         adapter = INGEST_FORMATS.get(kind)
+        claimed = claimed_source(kind, query, self.headers) if adapter else None
         if not self.ingest_authorized(query):
             self.close_connection = True
             if adapter:
-                self.note_ingest(kind, 401, "Wrong or missing token")
+                self.note_ingest(kind, 401, "Wrong or missing token", claimed)
             self.send_json(401, {"error": "token required"}, {"WWW-Authenticate": 'Basic realm="GeoLogs"'})
             return
         if not self.safe_origin():
@@ -240,12 +241,12 @@ class Handler(BaseHTTPRequestHandler):
             points, skipped, reply = adapter(payload, query, self.headers)
         except (ValueError, UnicodeDecodeError, AttributeError) as exc:
             message = str(exc) if isinstance(exc, ValueError) else "invalid request body"
-            self.note_ingest(kind, 400, message)
+            self.note_ingest(kind, 400, message, claimed)
             self.error_json(400, message); return
         store = self.open_store()
         if store is None:
             return
-        source = points[-1]["source"] if points else None
+        source = points[-1]["source"] if points else claimed
         try:
             inserted = duplicates = 0
             for start in range(0, len(points), 1000):

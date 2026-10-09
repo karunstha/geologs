@@ -9,7 +9,7 @@ export const modeInfo = {
     icon: '<svg viewBox="0 0 24 24"><path d="M5 11l1.6-4.2A2 2 0 0 1 8.5 5.5h7a2 2 0 0 1 1.9 1.3L19 11"/><path d="M3.5 11h17v5.5h-17z"/><path d="M6 16.5v2M18 16.5v2"/><circle cx="7.5" cy="13.7" r=".6"/><circle cx="16.5" cy="13.7" r=".6"/></svg>',
   },
   cycling: {
-    label: "Ride",
+    label: "Bike",
     noun: "Cycling",
     color: "#8352bd",
     icon: '<svg viewBox="0 0 24 24"><circle cx="6" cy="16" r="3.5"/><circle cx="18" cy="16" r="3.5"/><path d="M6 16l3.5-7h6L18 16M9.5 9l3 7H6M14 5.5h2.5l-1 3.5"/></svg>',

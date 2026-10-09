@@ -1301,7 +1301,7 @@ class StoreTests(unittest.TestCase):
                            (reminder["id"], point_id, "2026-09-27T10:00:00+00:00"))
         for zone, source in (("UTC", ""), ("America/Chicago", ""), ("UTC", "phone")):
             archive.db.execute("""INSERT INTO daily_summaries(summary_date,timezone,source,watermark,points,distance_km,
-                trip_count,place_count,reminder_count,summary,created_at,updated_at) VALUES (?,?,?,?,0,0,0,0,0,'{}',?,?)""",
+                trip_count,place_count,reminder_count,summary,created_at,updated_at) VALUES (?,?,?,?,5,0,0,0,0,'{}',?,?)""",
                 ("2026-09-27", zone, source, "w", "2026-09-28T00:00:00+00:00", "2026-09-28T00:00:00+00:00"))
         # Recreate the pre-v13 reminders table, where place_id could not be empty.
         archive.db.commit()
@@ -1598,6 +1598,16 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(overview["saved"][str(home["id"])]["visits"], 3)
         self.assertEqual(overview["saved"][str(friend["id"])]["visits"], 1)
         self.assertEqual(sorted(place["name"].split(",")[0] for place in overview["visited"]), ["1300 Pine Street", "Sam's"])
+
+    def test_a_day_with_nothing_recorded_is_summarized_but_not_stored(self):
+        self.store.save_settings({"timezone": "UTC"})
+        self.store.ingest(minute_fixes([still(HOME, 30)], start=datetime(2026, 9, 27, 13, tzinfo=timezone.utc)))
+        empty = daily_overview(self.store, "2026-09-28")
+        self.assertEqual((empty["totals"]["raw_fixes"], daily_brief(empty)["summary"]), (0, "No location recorded."))
+        with self.assertRaisesRegex(ValueError, "no summary is stored for 2026-09-28"):
+            stored_daily_record(self.store, "2026-09-28")
+        daily_overview(self.store, "2026-09-27")
+        self.assertEqual([row["date"] for row in self.store.daily_overviews()], ["2026-09-27"])
 
     def test_stored_daily_record_shows_what_is_stored_and_when_it_is_out_of_date(self):
         self.store.save_settings({"timezone": "UTC"})
@@ -1968,21 +1978,24 @@ class IngestTests(LiveServerCase):
         self.assertEqual(self.send("GET", "/api/ingest/osmand?id=x&lat=41&lon=-87.9&token=main-token")[0], 200)
         self.assertEqual(self.send("GET", "/api/ingest/osmand?id=x&lat=41&lon=-87.9")[0], 401)
 
-    def test_settings_can_see_which_trackers_get_through_and_why_not(self):
+    def test_settings_can_see_which_devices_get_through_and_why_not(self):
         main = {"Authorization": "Bearer main-token"}
-        self.assertEqual(self.send("GET", "/api/sources", headers=main)[1]["apps"], [])
+        self.assertEqual(self.send("GET", "/api/sources", headers=main)[1]["devices"], [])
         self.send("POST", "/api/ingest/owntracks", {"_type": "location", "lat": 41, "lon": -87.9, "tst": 1790514000},
                   {"Authorization": "Bearer phone-token", "X-Limit-U": "karun", "X-Limit-D": "pixel"})
+        # A second phone with the wrong token is still told apart by the name it sends.
+        self.send("POST", "/api/ingest/owntracks", {"_type": "location", "lat": 41, "lon": -87.9, "tst": 1790514060},
+                  {"Authorization": "Bearer wrong", "X-Limit-U": "karun", "X-Limit-D": "ipad"})
         self.send("POST", "/api/ingest/overland?token=wrong", {"locations": []})
         self.send("POST", "/api/ingest/generic?token=phone-token", [{"lat": 41.001, "lon": -87.9, "device": "tasker"}, {"lat": "x"}])
         status, value, _ = self.send("GET", "/api/sources", headers=main)
         self.assertEqual((status, value["ingest_token"]), (200, True))
-        apps = {app["kind"]: app for app in value["apps"]}
-        self.assertEqual((apps["owntracks"]["last_status"], apps["owntracks"]["last_success_source"], apps["owntracks"]["received"]),
-                         (200, "owntracks:karun/pixel", 1))
-        self.assertEqual((apps["overland"]["last_status"], apps["overland"]["last_message"], apps["overland"]["last_success_at"]),
-                         (401, "Wrong or missing token", None))
-        self.assertEqual(apps["generic"]["last_message"], "1 malformed fix skipped")
+        devices = {(item["kind"], item["device"]): item for item in value["devices"]}
+        pixel, ipad = devices[("owntracks", "owntracks:karun/pixel")], devices[("owntracks", "owntracks:karun/ipad")]
+        self.assertEqual((pixel["last_status"], pixel["received"], pixel["last_message"]), (200, 1, None))
+        self.assertEqual((ipad["last_status"], ipad["last_message"], ipad["last_success_at"]), (401, "Wrong or missing token", None))
+        self.assertEqual((devices[("overland", "")]["last_status"]), 401)
+        self.assertEqual(devices[("generic", "generic:tasker")]["last_message"], "1 malformed fix skipped")
         sources = {item["source"]: item for item in value["sources"]}
         self.assertEqual(set(sources), {"owntracks:karun/pixel", "generic:tasker"})
         self.assertEqual((sources["owntracks:karun/pixel"]["fixes"], sources["owntracks:karun/pixel"]["last_fix"]),

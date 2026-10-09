@@ -1,13 +1,4 @@
 /* Reminders: composer, waiting list, and history. */
-.list-item button.danger-button,
-.reminder-active .list-item > button {
-  color: var(--danger);
-  border-color: color-mix(in srgb, var(--danger) 30%, var(--border));
-}
-.list-item button.danger-button:hover,
-.reminder-active .list-item > button:hover {
-  background: var(--danger-soft);
-}
 .reminders-layout {
   display: grid;
   grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);

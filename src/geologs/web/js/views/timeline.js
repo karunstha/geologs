@@ -18,7 +18,7 @@ export function stayActivityText(stay) {
 export const TRIP_MODES = ["walking", "running", "cycling", "driving", "transit"],
   AREA_MODES = ["walking", "running", "cycling"];
 
-export function modeStrip(subject, options, current, corrected, detected) {
+export function modeStrip(subject, options, current, corrected, detected, caption) {
   // subject: what the correction is for (source, target, start, end).
   const buttons = options
     .map(
@@ -27,9 +27,9 @@ export function modeStrip(subject, options, current, corrected, detected) {
     )
     .join("");
   const note = corrected
-    ? `<span class="mode-note">Detected: ${safe(modeName(detected))}</span><button type="button" class="button ghost small" data-set-mode="auto">Automatic</button>`
+    ? `<span class="mode-note">Set by you${detected ? ` · detected ${safe(modeName(detected).toLowerCase())}` : ""}</span><button type="button" class="button ghost small" data-set-mode="auto">Use detected</button>`
     : '<span class="mode-note">Detected from speed</span>';
-  return `<li class="tl-mode-picker" data-mode-subject='${safe(JSON.stringify(subject))}'><div class="mode-options">${buttons}</div><div class="mode-meta">${note}</div></li>`;
+  return `<li class="tl-mode-picker" data-mode-subject='${safe(JSON.stringify(subject))}'><div class="mode-head"><span class="mode-caption">${safe(caption)}</span></div><div class="mode-options" role="group" aria-label="${safe(caption)}">${buttons}</div><div class="mode-meta">${note}</div></li>`;
 }
 
 export function renderModePicker() {
@@ -49,6 +49,7 @@ export function renderModePicker() {
       trip.mode,
       trip.mode_corrected,
       trip.detected_mode,
+      "How did you travel?",
     );
   } else {
     const stay = item.stay;
@@ -59,6 +60,7 @@ export function renderModePicker() {
         stay.activity,
         stay.activity_corrected,
         stay.detected_activity,
+        "How did you get around?",
       );
     for (const move of stay.internal_moves || [])
       html += modeStrip(
@@ -67,9 +69,7 @@ export function renderModePicker() {
         move.mode,
         move.mode_corrected,
         null,
-      ).replace(
-        '<div class="mode-options">',
-        `<div class="mode-caption">Moved within · ${safe(distanceText(move.distance_km))} · ${safe(clock(move.start))}</div><div class="mode-options">`,
+        `Moved ${distanceText(move.distance_km)} within, at ${clock(move.start)}`,
       );
   }
   if (!html) return;
@@ -82,7 +82,7 @@ export function renderModePicker() {
           await post("/api/mode-overrides", { ...subject, mode: button.dataset.setMode });
           toast(
             button.dataset.setMode === "auto"
-              ? "Automatic mode restored"
+              ? "Using the detected mode"
               : `Set to ${modeInfo[button.dataset.setMode].noun.toLowerCase()}`,
           );
           await refreshExplore(false);

@@ -2,10 +2,12 @@
 import { refreshMeta } from "../app/refresh.js";
 import { api, openAuth, post, setConnection } from "../core/api.js";
 import { $, copyText, safe, toast } from "../core/dom.js";
-import { ago, formatTime, localDateKey, longDate, zoneOptions } from "../core/format.js";
+import { ago, formatTime, localDateKey, longDate, plural, zoneOptions } from "../core/format.js";
 import { state } from "../core/state.js";
+import { actionIcon, onEach } from "../ui/actions.js";
 import { sourceName, statusPill } from "../ui/icons.js";
-import { refreshExplore, refreshInsights } from "./history.js";
+import { refreshExplore } from "./history.js";
+import { refreshInsights } from "./patterns.js";
 import { showView } from "./shell.js";
 import { openSummary, summaryLine } from "./summaries.js";
 
@@ -53,48 +55,71 @@ export function populateTimezones(selected) {
 }
 
 export function renderDailySummaries() {
-  $("daily-summaries").innerHTML =
+  const box = $("daily-summaries");
+  box.innerHTML =
     state.dailySummaries
+      .filter((item) => item.points)
       .slice(0, 5)
       .map(
         (item) =>
-          `<div class="list-item"><div><strong>${safe(longDate(item.date))}</strong><small>${item.points ? safe(summaryLine(item)) : "No location data"}</small></div><button type="button" data-open-summary="${safe(item.date)}">View</button></div>`,
+          `<button type="button" class="list-item row-link" data-open-summary="${safe(item.date)}"><span><strong>${safe(longDate(item.date))}</strong><small>${safe(summaryLine(item))}</small></span><span class="row-chevron" aria-hidden="true">${actionIcon("open")}</span></button>`,
       )
-      .join("") || '<div class="empty">A summary is saved after the first completed day.</div>';
-  $("daily-summaries")
-    .querySelectorAll("[data-open-summary]")
-    .forEach(
-      (button) =>
-        (button.onclick = () => {
-          showView("summaries");
-          openSummary(button.dataset.openSummary, false, true);
-        }),
-    );
+      .join("") ||
+    '<div class="empty-block"><strong>No saved days yet</strong><span>The first summary is saved after midnight following your first recorded day.</span></div>';
+  onEach(box, "open-summary", (date) => {
+    showView("summaries");
+    openSummary(date, true);
+  });
 }
 
+const PROVIDER_NOTES = {
+  geoapify: "Free plan with 3,000 lookups a day.",
+  mapbox: "Generous free tier. Its terms allow names for temporary use only.",
+  photon: "Your own OpenStreetMap server: private and unlimited.",
+};
+
 export function renderPlacesProvider() {
-  const providers = state.status?.places_providers || [],
-    chosen = state.settings?.places_provider || "";
-  const select = $("places-provider");
-  select.innerHTML =
-    '<option value="">Automatic · first configured</option>' +
-    providers
-      .map(
-        (provider) =>
-          `<option value="${safe(provider.id)}"${provider.configured || provider.id === chosen ? "" : " disabled"}>${safe(provider.label)}${provider.configured ? "" : " · set " + safe(provider.env)}</option>`,
-      )
-      .join("");
-  select.value = chosen;
+  const providers = state.status?.places_providers || [];
+  const chosen = state.settings?.places_provider || "";
   const active = providers.find((provider) => provider.id === state.status?.geocoder);
-  $("places-provider-help").textContent = active
-    ? `Currently using ${active.label}.`
-    : "No provider is configured; set an API key in .env and restart the server.";
+  const options = [
+    {
+      id: "",
+      label: "Automatic",
+      note: active
+        ? `Uses the first one that's set up: ${active.label} right now.`
+        : "Uses the first provider that's set up.",
+      configured: true,
+    },
+    ...providers.map((provider) => ({ ...provider, note: PROVIDER_NOTES[provider.id] || "" })),
+  ];
+  $("places-provider-options").innerHTML = options
+    .map((option) => {
+      const available = option.configured || option.id === chosen;
+      const pill = option.id
+        ? option.configured
+          ? statusPill("success", "Set up")
+          : `<span class="status-pill neutral" title="Add ${safe(option.env)} to .env and restart">Needs ${safe(option.env)}</span>`
+        : "";
+      return `<label class="choice-card${available ? "" : " unavailable"}"><input type="radio" name="places-provider" value="${safe(option.id)}"${option.id === chosen ? " checked" : ""}${available ? "" : " disabled"}><span class="choice-body"><strong>${safe(option.label)}</strong><small>${safe(option.note)}</small></span>${pill}</label>`;
+    })
+    .join("");
+  $("places-provider-help").textContent = providers.some((provider) => provider.configured)
+    ? "Turns coordinates into place names for stays, places, and search."
+    : "No provider is set up yet. Add an API key to .env and restart the server; until then places are named by address or not at all.";
+  document
+    .querySelectorAll('input[name="places-provider"]')
+    .forEach((input) => (input.onchange = updateProviderNotice));
   updateProviderNotice();
+}
+
+function chosenProvider() {
+  return document.querySelector('input[name="places-provider"]:checked')?.value ?? "";
 }
 
 export function updateProviderNotice() {
   // Automatic resolves to whatever the server chose, so check that too.
-  const value = $("places-provider").value || state.status?.geocoder;
+  const value = chosenProvider() || state.status?.geocoder;
   $("mapbox-terms").hidden = value !== "mapbox";
 }
 
@@ -152,37 +177,64 @@ export const TRACKERS = [
   },
 ];
 
-export function trackerStatus(app) {
-  if (!app) return { tone: "neutral", label: "Not connected", detail: "No requests from this app yet." };
-  if (app.last_status >= 400 && (!app.last_success_at || app.last_attempt_at > app.last_success_at))
-    return {
-      tone: "error",
-      label: "Failing",
-      detail: `Last request ${ago(app.last_attempt_at)} was rejected: ${app.last_message || "error " + app.last_status}.`,
-    };
-  const quiet = Date.now() - Date.parse(app.last_success_at) > 6 * 3600e3,
-    source = sourceName(app.last_success_source);
-  return {
-    tone: quiet ? "warning" : "success",
-    label: quiet ? "Quiet" : "Receiving",
-    detail: [
-      `Last data ${ago(app.last_success_at)}`,
-      app.last_success_source ? `from ${source.device || source.kind}` : "",
-      `${Number(app.received || 0).toLocaleString()} fix${Number(app.received) === 1 ? "" : "es"} received`,
-      app.last_message || "",
-    ]
-      .filter(Boolean)
-      .join(" · "),
-  };
+function failing(device) {
+  return (
+    device.last_status >= 400 && (!device.last_success_at || device.last_attempt_at > device.last_success_at)
+  );
+}
+
+function deviceLabel(device) {
+  if (!device.device) return "Unidentified device";
+  const name = sourceName(device.device);
+  return name.device || name.kind;
+}
+
+// One status for an app across its devices: a single rejected phone is worth calling out.
+export function trackerStatus(devices) {
+  if (!devices.length) return { tone: "neutral", label: "Not connected" };
+  const rejected = devices.filter(failing);
+  const recent = devices.filter(
+    (device) =>
+      !failing(device) &&
+      device.last_success_at &&
+      Date.now() - Date.parse(device.last_success_at) < 6 * 3600e3,
+  );
+  if (rejected.length && recent.length)
+    return { tone: "error", label: `${plural(rejected.length, "device")} failing` };
+  if (rejected.length) return { tone: "error", label: "Failing" };
+  if (recent.length) return { tone: "success", label: "Receiving" };
+  return { tone: "warning", label: "Quiet" };
+}
+
+function deviceRows(devices) {
+  if (!devices.length)
+    return '<p class="tracker-status">Nothing has reached GeoLogs from this app yet. Once it sends a location, it shows up here.</p>';
+  return `<ul class="device-list">${devices
+    .map((device) => {
+      const rejected = failing(device);
+      const quiet = !rejected && Date.now() - Date.parse(device.last_success_at) > 6 * 3600e3;
+      const tone = rejected ? "error" : quiet ? "warning" : "success";
+      const detail = rejected
+        ? `Rejected ${ago(device.last_attempt_at)}: ${device.last_message || "error " + device.last_status}`
+        : [
+            `Last data ${ago(device.last_success_at)}`,
+            plural(device.received || 0, "fix", "fixes") + " received",
+            device.last_message || "",
+          ]
+            .filter(Boolean)
+            .join(" · ");
+      return `<li><span class="health-dot ${tone}" aria-hidden="true"></span><span><strong>${safe(deviceLabel(device))}</strong><small title="${safe(formatTime(device.last_attempt_at))}">${safe(detail)}</small></span></li>`;
+    })
+    .join("")}</ul>`;
 }
 
 export function renderSources() {
   const data = state.sources;
   if (!data) return;
-  const sources = data.sources || [],
-    newest = sources[0];
+  const sources = data.sources || [];
+  const newest = sources[0];
   $("sources-summary").textContent = sources.length
-    ? `${sources.length} source${sources.length === 1 ? "" : "s"} · last location received ${ago(newest.last_received)}`
+    ? `${plural(sources.length, "source")} · last location received ${ago(newest.last_received)}`
     : "No locations received yet. Connect an app below.";
   $("source-list").innerHTML =
     sources
@@ -193,32 +245,36 @@ export function renderSources() {
         const name = sourceName(item.source);
         const lag = (Date.parse(item.last_received) - Date.parse(item.last_fix)) / 60000;
         const details = [
-          `Received ${ago(item.last_received)}`,
+          `received ${ago(item.last_received)}`,
           lag > 15 ? `newest fix from ${formatTime(item.last_fix)}` : "",
           `${Number(item.fixes_24h).toLocaleString()} in the last 24 h`,
-          `${Number(item.fixes).toLocaleString()} total since ${new Date(item.first_fix).toLocaleDateString(undefined, { month: "short", year: "numeric", ...zoneOptions() })}`,
+          `${Number(item.fixes).toLocaleString()} since ${new Date(item.first_fix).toLocaleDateString(undefined, { month: "short", year: "numeric", ...zoneOptions() })}`,
         ].filter(Boolean);
         return `<div class="list-item"><div class="place-main"><span class="health-dot ${tone}" aria-hidden="true"></span><div><strong>${safe(name.kind)}${name.device ? ` <span class="muted">· ${safe(name.device)}</span>` : ""}</strong><small>${safe(details.join(" · "))}</small></div></div>${statusPill(tone, tone === "success" ? "Live" : tone === "warning" ? "Quiet" : "Idle")}</div>`;
       })
-      .join("") || '<div class="empty">Locations will appear here as soon as a device sends one.</div>';
-  const apps = new Map((data.apps || []).map((app) => [app.kind, app]));
+      .join("") ||
+    '<div class="empty-block"><strong>No sources yet</strong><span>Locations appear here as soon as a device sends one.</span></div>';
+  const byKind = new Map();
+  for (const device of data.devices || []) {
+    if (!byKind.has(device.kind)) byKind.set(device.kind, []);
+    byKind.get(device.kind).push(device);
+  }
   $("ingest-token-note").hidden = !!data.ingest_token;
-  $("ingest-token-note").textContent =
-    "Set GEOLOGS_INGEST_TOKEN in .env to give phones a send-only token. Until then, apps need your main access token, which can also read your history.";
-  $("access-ingest-badge").outerHTML =
-    `<span id="access-ingest-badge">${statusPill(data.ingest_token ? "success" : "warning", data.ingest_token ? "Configured" : "Not set")}</span>`;
+  $("access-ingest-badge").innerHTML = statusPill(
+    data.ingest_token ? "success" : "warning",
+    data.ingest_token ? "Set up" : "Not set",
+  );
   const open = new Set(
     [...document.querySelectorAll("#tracker-endpoints details[open]")].map((item) => item.dataset.kind),
   );
   $("tracker-endpoints").innerHTML = TRACKERS.map((tracker) => {
-    const status = trackerStatus(apps.get(tracker.kind)),
-      url = location.origin + tracker.path;
+    const devices = byKind.get(tracker.kind) || [];
+    const status = trackerStatus(devices);
+    const url = location.origin + tracker.path;
     return `<details class="tracker" data-kind="${tracker.kind}"${open.has(tracker.kind) ? " open" : ""}><summary><span class="tracker-title"><strong>${safe(tracker.name)}</strong><small>${safe(tracker.platform)}</small></span>${statusPill(status.tone, status.label)}<svg class="chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary>
-      <div class="tracker-body"><p class="tracker-status ${status.tone}">${safe(status.detail)}</p><div class="copy-field"><input class="input mono" readonly value="${safe(url)}" aria-label="${safe(tracker.name)} address"><button type="button" class="button secondary small" data-copy-endpoint="${safe(url)}">Copy</button></div><ol class="steps">${tracker.steps.map((step) => `<li>${safe(step)}</li>`).join("")}</ol></div></details>`;
+      <div class="tracker-body">${deviceRows(devices)}<div class="tracker-setup"><h4>Set up</h4><div class="copy-field"><input class="input mono" readonly value="${safe(url)}" aria-label="${safe(tracker.name)} address"><button type="button" class="button secondary small" data-copy-endpoint="${safe(url)}">Copy</button></div><ol class="steps">${tracker.steps.map((step) => `<li>${safe(step)}</li>`).join("")}</ol></div></div></details>`;
   }).join("");
-  $("tracker-endpoints")
-    .querySelectorAll("[data-copy-endpoint]")
-    .forEach((button) => (button.onclick = () => copyText(button.dataset.copyEndpoint, "Address copied")));
+  onEach($("tracker-endpoints"), "copy-endpoint", (url) => copyText(url, "Address copied"));
 }
 
 export async function refreshSources() {
@@ -291,14 +347,13 @@ export function initSettings() {
     if ($("settings-view").classList.contains("active") && !document.hidden) refreshSources().catch(() => {});
   }, 30000);
   $("speed-strategy").onchange = updateSpeedSettingsVisibility;
-  $("places-provider").onchange = updateProviderNotice;
   $("places-form").onsubmit = async (event) => {
     event.preventDefault();
     try {
-      state.settings = await post("/api/settings", { places_provider: $("places-provider").value });
+      state.settings = await post("/api/settings", { places_provider: chosenProvider() });
       state.status = await api("/api/status");
       renderSettings();
-      toast("Places provider saved");
+      toast("Place names provider saved");
       // Names can change with the provider; refresh what shows them.
       await refreshMeta();
       await Promise.all([refreshExplore(false), refreshInsights()]);

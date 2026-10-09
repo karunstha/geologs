@@ -5,7 +5,7 @@ import { clock, coordinateText, durationText, formatTime, kmh, localDateKey } fr
 import { state } from "../core/state.js";
 import { modeInfo, modeName, placeIcons } from "../ui/icons.js";
 import { params } from "../views/history.js";
-import { editVisitedPlace } from "../views/place-dialogs.js";
+import { dayVisits, editVisitedPlace } from "../views/place-dialogs.js";
 import { renderModePicker, stayWhen } from "../views/timeline.js";
 
 export let map, pathLayer, placeLayer, highlightLayer, currentMarker, searchLayer;
@@ -31,9 +31,10 @@ export function initMap() {
       (button) =>
         (button.onclick = () => {
           map.closePopup();
-          editVisitedPlace(
-            state.day?.places_including_home.find((place) => place.cluster_id === +button.dataset.editPlace),
+          const place = state.day?.places_including_home.find(
+            (item) => item.cluster_id === +button.dataset.editPlace,
           );
+          editVisitedPlace(place, dayVisits(place));
         }),
     );
     element?.querySelectorAll("[data-edit-stay]").forEach(
@@ -88,11 +89,11 @@ export function pointPopup(title, lines, lat, lon, edit = "") {
 
 // A pin stands for a place (all its visits); a selected stay is one visit's spot.
 export function editPlaceAction(clusterId) {
-  return `<button type="button" class="popup-action" data-edit-place="${clusterId}">Edit place</button>`;
+  return `<button type="button" class="popup-action" data-edit-place="${clusterId}">Rename place</button>`;
 }
 
 export function editStayAction(stayId) {
-  return `<button type="button" class="popup-action" data-edit-stay="${stayId}">Fix this visit's name</button>`;
+  return `<button type="button" class="popup-action" data-edit-stay="${stayId}">Rename this visit</button>`;
 }
 
 export function tripKey(trip) {
@@ -192,7 +193,7 @@ export function drawMap(fit = false) {
       .bindPopup(
         pointPopup(
           place.name,
-          ["Saved place · " + Math.round(place.radius_m) + " m radius"],
+          ["Saved place · " + Math.round(place.radius_m) + " m zone"],
           place.lat,
           place.lon,
         ),

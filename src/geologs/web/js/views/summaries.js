@@ -1,37 +1,54 @@
 // Summaries: the saved-day index and a day's stored record.
 import { api } from "../core/api.js";
 import { $, copyText, safe, toast } from "../core/dom.js";
-import { clock, distanceText, durationText, formatTime, localDateKey, longDate } from "../core/format.js";
+import {
+  ago,
+  clock,
+  dayTitle,
+  distanceText,
+  durationText,
+  formatTime,
+  localDateKey,
+  longDate,
+  plural,
+} from "../core/format.js";
 import { state } from "../core/state.js";
+import { actionIcon } from "../ui/actions.js";
 import { modeIcon, modeInfo, modeName, placeIcon, statusPill, summaryIcons, zoneText } from "../ui/icons.js";
 import { refreshExplore } from "./history.js";
 import { showView } from "./shell.js";
 
 export function summaryLine(item) {
-  return `${item.trip_count} trip${item.trip_count === 1 ? "" : "s"} · ${Number(item.distance_km).toFixed(1)} km · ${item.place_count} place${item.place_count === 1 ? "" : "s"}${item.reminder_count ? ` · ${item.reminder_count} reminder${item.reminder_count === 1 ? "" : "s"}` : ""}`;
+  return [
+    plural(item.trip_count, "trip"),
+    `${Number(item.distance_km).toFixed(1)} km`,
+    plural(item.place_count, "place"),
+    item.reminder_count ? plural(item.reminder_count, "reminder") : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
 }
 
-export function summaryDateParts(value) {
-  const [year, month, day] = value.split("-").map(Number),
-    date = new Date(year, month - 1, day);
-  return {
-    month: date.toLocaleDateString(undefined, { month: "long", year: "numeric" }),
-    weekday: date.toLocaleDateString(undefined, { weekday: "short" }),
-    day,
-  };
-}
-
-export function summaryCatalogMarkup(items) {
+function catalogMarkup(items) {
   const groups = new Map();
   for (const item of items) {
-    const parts = summaryDateParts(item.date);
-    if (!groups.has(parts.month)) groups.set(parts.month, []);
-    groups.get(parts.month).push({ ...item, ...parts });
+    const [year, month, day] = item.date.split("-").map(Number);
+    const date = new Date(year, month - 1, day);
+    const heading = date.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+    if (!groups.has(heading)) groups.set(heading, []);
+    groups
+      .get(heading)
+      .push({ ...item, day, weekday: date.toLocaleDateString(undefined, { weekday: "short" }) });
   }
   return [...groups.entries()]
     .map(
-      ([month, days]) =>
-        `<section class="summary-month"><h3>${safe(month)}</h3>${days.map((item) => `<button type="button" class="summary-day${item.date === state.summaryDate ? " selected" : ""}" data-summary="${safe(item.date)}" aria-current="${item.date === state.summaryDate ? "date" : "false"}" aria-label="${safe(longDate(item.date) + ", " + summaryLine(item))}"><span class="summary-day-calendar"><span>${safe(item.weekday)}</span><strong>${item.day}</strong></span><span class="summary-day-copy">${item.points ? `<strong>${Number(item.distance_km).toFixed(1)} km</strong><small>${item.trip_count} trip${item.trip_count === 1 ? "" : "s"} · ${item.place_count} place${item.place_count === 1 ? "" : "s"}${item.reminder_count ? ` · ${item.reminder_count} reminder${item.reminder_count === 1 ? "" : "s"}` : ""}</small>` : '<strong class="muted">No data</strong><small>Nothing recorded</small>'}</span><span class="summary-day-arrow" aria-hidden="true">›</span></button>`).join("")}</section>`,
+      ([heading, days]) =>
+        `<section class="summary-month"><h3>${safe(heading)}</h3>${days
+          .map((item) => {
+            const selected = item.date === state.summaryDate;
+            return `<button type="button" class="summary-day${selected ? " selected" : ""}" data-summary="${safe(item.date)}" aria-current="${selected ? "date" : "false"}" aria-label="${safe(longDate(item.date) + ", " + summaryLine(item))}"><span class="summary-day-calendar"><span>${safe(item.weekday)}</span><strong>${item.day}</strong></span><span class="summary-day-copy"><strong>${Number(item.distance_km).toFixed(1)} km</strong><small>${safe([plural(item.trip_count, "trip"), plural(item.place_count, "place")].join(" · "))}</small></span><span class="summary-day-arrow" aria-hidden="true">${actionIcon("open")}</span></button>`;
+          })
+          .join("")}</section>`,
     )
     .join("");
 }
@@ -41,55 +58,77 @@ export async function refreshSummaries() {
   $("summary-count").textContent = state.summaryCatalog.length
     ? state.summaryCatalog.length.toLocaleString()
     : "";
-  $("summary-count").hidden = !state.summaryCatalog.length;
   $("summary-date").max = localDateKey();
-  $("summary-index").innerHTML =
-    summaryCatalogMarkup(state.summaryCatalog) ||
-    '<div class="summary-index-empty"><strong>No saved days yet</strong><p>A summary is saved after the first completed day. You can also jump to a past date to build one.</p></div>';
-  $("summary-index")
-    .querySelectorAll("[data-summary]")
-    .forEach((button) => (button.onclick = () => openSummary(button.dataset.summary, false, true)));
-  // Open the newest day that has something to show.
-  const first = state.summaryCatalog.find((item) => item.points) || state.summaryCatalog[0];
-  if (!state.summaryDate && first) openSummary(first.date);
+  const index = $("summary-index");
+  index.innerHTML =
+    catalogMarkup(state.summaryCatalog) ||
+    '<div class="empty-block"><strong>No saved days yet</strong><span>Each day is saved after midnight. You can also open any past date above.</span></div>';
+  index.querySelectorAll("[data-summary]").forEach((button) => {
+    button.onclick = () => openSummary(button.dataset.summary, true);
+  });
+  if (!state.summaryDate && state.summaryCatalog[0]) openSummary(state.summaryCatalog[0].date);
 }
 
-export async function openSummary(date, build = false, reveal = false) {
-  state.summaryDate = date;
-  $("summary-date").value = date;
+function markSelected(date) {
   document.querySelectorAll("#summary-index [data-summary]").forEach((button) => {
     const selected = button.dataset.summary === date;
     button.classList.toggle("selected", selected);
     button.setAttribute("aria-current", selected ? "date" : "false");
+    if (selected) button.scrollIntoView({ block: "nearest", inline: "nearest" });
   });
+}
+
+// Show a saved day, or build it when it isn't saved yet. A day with nothing recorded is never stored.
+export async function openSummary(date, reveal = false) {
+  state.summaryDate = date;
+  $("summary-date").value = date;
+  markSelected(date);
   const box = $("summary-detail");
   box.setAttribute("aria-busy", "true");
-  box.innerHTML = `<div class="summary-loading"><span class="summary-spinner" aria-hidden="true"></span><strong>${build ? "Building your summary" : "Opening your summary"}</strong><span>${safe(longDate(date))}</span></div>`;
-  if (reveal && window.matchMedia("(max-width:950px)").matches)
+  box.innerHTML = `<div class="summary-loading"><span class="summary-spinner" aria-hidden="true"></span><strong>Opening ${safe(dayTitle(date))}</strong></div>`;
+  if (reveal && window.matchMedia("(max-width:900px)").matches)
     box.scrollIntoView({
       behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
       block: "start",
     });
+  const stored = () => api("/api/daily-summary/stored?" + new URLSearchParams({ date }));
   try {
-    // Building writes the record (or refreshes it if its data changed); reading shows exactly what is stored.
-    if (build) {
-      await api("/api/daily-summary?" + new URLSearchParams({ date }));
+    let record;
+    try {
+      record = await stored();
+    } catch (error) {
+      if (!/no summary is stored/.test(error.message)) throw error;
+      const built = await api("/api/daily-summary?" + new URLSearchParams({ date }));
+      if (state.summaryDate !== date) return;
+      if (!(built.totals?.raw_fixes > 0)) {
+        renderNothingRecorded(date);
+        return;
+      }
+      record = await stored();
       await refreshSummaries();
     }
-    renderSummaryDetail(await api("/api/daily-summary/stored?" + new URLSearchParams({ date })));
+    renderSummaryDetail(record);
   } catch (error) {
     if (state.summaryDate !== date) return;
     box.removeAttribute("aria-busy");
-    box.innerHTML = `<div class="summary-missing"><span class="empty-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="15" rx="2"/><path d="M8 3v4M16 3v4M4 10h16M9 15h6"/></svg></span><div><span class="eyebrow">Not saved yet</span><h2>${safe(longDate(date))}</h2><p>${safe(error.message)}.</p></div><button type="button" class="button primary" id="build-summary">Build this summary</button></div>`;
-    $("build-summary").onclick = () => openSummary(date, true);
+    box.innerHTML = `<div class="summary-empty-state"><span class="empty-icon" aria-hidden="true">${summaryIcons.places}</span><h2>Couldn't open ${safe(dayTitle(date))}</h2><p>${safe(error.message)}</p><button type="button" class="button secondary" id="summary-retry">Try again</button></div>`;
+    $("summary-retry").onclick = () => openSummary(date);
   }
 }
 
-export function summaryMetric(label, value, icon) {
+function renderNothingRecorded(date) {
+  const box = $("summary-detail");
+  box.removeAttribute("aria-busy");
+  box.innerHTML = `<div class="summary-empty-state"><span class="empty-icon" aria-hidden="true">${summaryIcons.places}</span><h2>Nothing recorded on ${safe(dayTitle(date))}</h2><p>No device sent a location that day, so there is nothing to summarize.</p>${state.summaryCatalog?.length ? '<button type="button" class="button secondary" id="summary-latest">Open the latest saved day</button>' : ""}</div>`;
+  if (state.summaryCatalog?.length)
+    $("summary-latest").onclick = () => openSummary(state.summaryCatalog[0].date);
+}
+
+function metric(label, value, icon) {
   return `<div><span class="summary-metric-icon" aria-hidden="true">${summaryIcons[icon]}</span><dt>${safe(label)}</dt><dd>${safe(value)}</dd></div>`;
 }
 
-export function summarySpan(start, end, date) {
+function span(start, end, date) {
   // A stay that began the day before reads "Until …", one that runs past midnight "From …".
   const early = localDateKey(new Date(start)) < date,
     late = localDateKey(new Date(end)) > date;
@@ -102,14 +141,14 @@ export function summarySpan(start, end, date) {
         : `${clock(start)} – ${clock(end)}`;
 }
 
-export function summaryTimeline(value) {
+function timelineMarkup(value) {
   const events = [];
   for (const visit of value.visits || [])
     events.push({
       at: visit.arrival,
       type: "visit",
       title: visit.place || "Unnamed place",
-      time: summarySpan(visit.arrival, visit.departure, value.date),
+      time: span(visit.arrival, visit.departure, value.date),
       detail: [
         zoneText(visit.zone, visit.place),
         durationText(visit.observed_minutes),
@@ -117,12 +156,12 @@ export function summaryTimeline(value) {
           ? `${modeName(visit.activity)}${visit.distance_km ? " " + distanceText(visit.distance_km) : ""}`
           : "",
         (visit.moved_within || []).length
-          ? "Moved within: " +
+          ? "moved within: " +
             visit.moved_within
               .map((move) => `${modeName(move.mode).toLowerCase()} ${distanceText(move.distance_km)}`)
               .join(", ")
           : "",
-        visit.ongoing && value.date === localDateKey() ? "Still there" : "",
+        visit.ongoing && value.date === localDateKey() ? "still there" : "",
       ]
         .filter(Boolean)
         .join(" · "),
@@ -133,13 +172,13 @@ export function summaryTimeline(value) {
       at: trip.start,
       type: "trip",
       title: trip.round_trip
-        ? `Round trip from ${trip.from || "a stay"}`
+        ? `Round trip from ${trip.from || "a stay"}${trip.via ? ` via ${trip.via}` : ""}`
         : `${trip.from || "A stay"} → ${trip.to || "a stay"}`,
       time: `${clock(trip.start)} – ${clock(trip.end)}`,
       detail: [
         `${modeName(trip.mode)} ${distanceText(trip.distance_km)}`,
         durationText(trip.duration_minutes),
-        trip.coverage_complete ? "" : "Coverage gap",
+        trip.coverage_complete ? "" : "partly unrecorded",
       ]
         .filter(Boolean)
         .join(" · "),
@@ -155,43 +194,42 @@ export function summaryTimeline(value) {
       icon: '<span class="summary-gap-icon" aria-hidden="true">···</span>',
     });
   events.sort((a, b) => String(a.at).localeCompare(String(b.at)));
-  if (!events.length)
-    return '<div class="summary-section-empty">No visits or trips were stored for this day.</div>';
+  if (!events.length) return '<div class="summary-section-empty">No visits or trips on this day.</div>';
   return `<ol class="summary-timeline">${events.map((event) => `<li class="${event.type}"><div class="summary-timeline-rail">${event.icon}</div><div class="summary-timeline-card"><span class="summary-event-time">${safe(event.time)}</span><strong>${safe(event.title)}</strong><small>${safe(event.detail)}</small></div></li>`).join("")}</ol>`;
 }
 
-export function summaryPlaceRows(places) {
-  if (!places.length) return '<div class="summary-section-empty">No places were stored for this day.</div>';
+function placesMarkup(places) {
+  if (!places.length) return '<div class="summary-section-empty">No places on this day.</div>';
   return `<div class="summary-place-list">${places
-    .map(
-      (place) =>
-        `<div class="summary-place-row">${placeIcon(place)}<div><strong>${safe(place.name || "Unnamed place")}${place.home ? '<span class="summary-home-tag">Home</span>' : ""}</strong><small>${safe(
-          [
-            zoneText(place.zone, place.name),
-            `${place.visits} visit${place.visits === 1 ? "" : "s"}`,
-            Object.entries(place.activities || {})
-              .map(([mode, count]) => modeName(mode) + (count > 1 ? ` ×${count}` : ""))
-              .join(", "),
-            place.address && place.address !== place.name ? place.address : "",
-          ]
-            .filter(Boolean)
-            .join(" · "),
-        )}</small></div><span class="summary-place-duration">${safe(durationText(place.observed_minutes))}</span></div>`,
-    )
+    .map((place) => {
+      const name = place.name || "Unnamed place";
+      // "Home" already says it; other names for home get a tag.
+      const tag =
+        place.home && !/^(my )?home$/i.test(name) ? '<span class="summary-home-tag">Home</span>' : "";
+      const details = [
+        zoneText(place.zone, place.name),
+        plural(place.visits, "visit"),
+        Object.entries(place.activities || {})
+          .map(([mode, count]) => modeName(mode) + (count > 1 ? ` ×${count}` : ""))
+          .join(", "),
+        place.address && place.address !== place.name ? place.address : "",
+      ].filter(Boolean);
+      return `<div class="summary-place-row">${placeIcon(place)}<div><strong>${safe(name)}${tag}</strong><small>${safe(details.join(" · "))}</small></div><span class="summary-place-duration">${safe(durationText(place.observed_minutes))}</span></div>`;
+    })
     .join("")}</div>`;
 }
 
-export function summaryReminderRows(value) {
+function remindersMarkup(value) {
   const reminders = [
     ...(value.reminders_triggered || []).map((item) => ({
       ...item,
-      status: "Triggered",
+      status: "Fired",
       at: item.triggered_at,
       tone: "success",
     })),
     ...(value.reminders_created || []).map((item) => ({
       ...item,
-      status: "Created",
+      status: "Added",
       at: item.created_at,
       tone: "created",
     })),
@@ -203,27 +241,48 @@ export function summaryReminderRows(value) {
     })),
     ...(value.active_reminders_at_end || []).map((item) => ({
       ...item,
-      status: "Still active",
+      status: "Still waiting",
       at: null,
       tone: "active",
     })),
   ];
   if (!reminders.length) return '<div class="summary-section-empty">No reminder activity.</div>';
-  return `<div class="summary-reminder-list">${reminders.map((item) => `<div class="summary-reminder-row"><span class="summary-reminder-dot ${item.tone}" aria-hidden="true"></span><div><strong>${safe(item.text)}</strong><small>${safe([item.status, item.at ? clock(item.at) : "", item.place_name].filter(Boolean).join(" · "))}</small></div></div>`).join("")}</div>`;
+  return `<div class="summary-reminder-list">${reminders
+    .map(
+      (item) =>
+        `<div class="summary-reminder-row"><span class="summary-reminder-dot ${item.tone}" aria-hidden="true"></span><div><strong>${safe(item.text)}</strong><small>${safe([item.status, item.at ? clock(item.at) : "", item.place_name].filter(Boolean).join(" · "))}</small></div></div>`,
+    )
+    .join("")}</div>`;
 }
 
-export function summaryRow(title, detail) {
-  return `<div class="list-item"><div><strong>${safe(title)}</strong>${detail ? `<small>${safe(detail)}</small>` : ""}</div></div>`;
+function coverageMarkup(value) {
+  const gaps = value.coverage_gaps || [];
+  if (!gaps.length)
+    return '<section class="summary-coverage complete"><span class="summary-coverage-icon" aria-hidden="true">✓</span><div><strong>Covered all day</strong><p>No stretch longer than 30 minutes without a location.</p></div></section>';
+  const missing = gaps.reduce((sum, gap) => sum + gap.minutes, 0);
+  return `<section class="summary-coverage has-gaps"><span class="summary-coverage-icon" aria-hidden="true">!</span><div><strong>${safe(durationText(missing))} without location, in ${plural(gaps.length, "gap")}</strong><p>${gaps.map((gap) => `${safe(clock(gap.start))} – ${safe(clock(gap.end))}`).join(" · ")}. Where no samples arrived, GeoLogs can't say where you were.</p></div></section>`;
+}
+
+function neighbours(date) {
+  const dates = (state.summaryCatalog || []).map((item) => item.date);
+  return {
+    older: dates.find((item) => item < date),
+    newer: [...dates].reverse().find((item) => item > date),
+  };
 }
 
 export function renderSummaryDetail(record) {
   if (state.summaryDate !== record.date) return;
   const value = record.summary,
     totals = value.totals || {};
+  if (!(totals.raw_fixes > 0)) {
+    renderNothingRecorded(record.date);
+    return;
+  }
   const homeReturn = value.home_return?.summary;
   // The brief's summary is the same facts in plain sentences.
-  const overviewText = record.brief?.summary || value.overview || "No overview was stored for this day.";
-  const displayOverview =
+  const overviewText = record.brief?.summary || value.overview || "";
+  const overview =
     homeReturn && overviewText.endsWith(` ${homeReturn}`)
       ? overviewText.slice(0, -homeReturn.length - 1)
       : overviewText;
@@ -233,13 +292,13 @@ export function renderSummaryDetail(record) {
     ["Trips", totals.trips ?? 0, "trips"],
     ["Places", totals.places ?? 0, "places"],
   ];
-  const secondaryFacts = [
+  const secondary = [
     ["Sampled distance", `${Number(totals.sampled_distance_km || 0).toFixed(1)} km`],
     [
       "Location fixes",
-      `${(totals.timeline_fixes ?? 0).toLocaleString()} key / ${(totals.raw_fixes ?? 0).toLocaleString()} raw`,
+      `${(totals.timeline_fixes ?? 0).toLocaleString()} key of ${(totals.raw_fixes ?? 0).toLocaleString()}`,
     ],
-    ["Reminders", `${totals.reminders_triggered ?? 0} triggered / ${totals.reminders_created ?? 0} created`],
+    ["Reminders", `${totals.reminders_triggered ?? 0} fired · ${totals.reminders_created ?? 0} added`],
   ];
   const activity = Object.entries(value.activity_totals || {})
     .filter(([mode, item]) => item.count && modeInfo[mode])
@@ -248,34 +307,25 @@ export function renderSummaryDetail(record) {
         `<span class="chip" style="--mode:${modeInfo[mode].color}">${modeIcon(mode)}<strong>${modeInfo[mode].noun}</strong><span>${distanceText(item.distance_km)} · ${durationText(item.minutes)}</span></span>`,
     )
     .join("");
-  const gaps = (value.coverage_gaps || []).map((gap) =>
-    summaryRow("No location data", `${clock(gap.start)} – ${clock(gap.end)} · ${durationText(gap.minutes)}`),
-  );
   // Rough token estimate (about 4 characters each) to show what the brief saves an AI tool.
-  const tokens = (text) => "≈" + Math.round(text.length / 4).toLocaleString() + " tokens",
-    brief = record.brief;
-  const briefBlock = `<section class="summary-block summary-brief"><div class="brief-head"><div><h3>Brief for AI tools</h3><p>A compact version for MCP tools and language models.</p></div>${brief ? `<small>${tokens(JSON.stringify(brief))} · full record ${tokens(JSON.stringify(value))}</small><button type="button" class="button secondary" id="copy-brief">Copy brief</button>` : ""}</div>
+  const tokens = (text) => "≈" + Math.round(text.length / 4).toLocaleString() + " tokens";
+  const brief = record.brief;
+  const briefBlock = `<section class="summary-block summary-brief"><div class="brief-head"><div><h3>Brief for AI tools</h3><p>The same day in a few plain lines, for MCP tools and language models.</p></div>${brief ? `<small>${tokens(JSON.stringify(brief))} · full record ${tokens(JSON.stringify(value))}</small><button type="button" class="button secondary small" id="copy-brief">Copy brief</button>` : ""}</div>
     ${brief ? `<pre>${safe(JSON.stringify(brief, null, 2))}</pre>` : '<p class="empty">No brief is stored with this record yet. Refresh to build it.</p>'}</section>`;
-  $("summary-detail").removeAttribute("aria-busy");
-  if (!(totals.raw_fixes > 0)) {
-    $("summary-detail").innerHTML =
-      `<div class="summary-hero"><div class="summary-head"><div><div class="summary-status-line">${statusPill("neutral", "No data")}<span>${safe(record.timezone)}</span></div><h2>${safe(longDate(record.date))}</h2><div class="summary-updated">Updated ${safe(formatTime(record.updated_at))}</div></div><div class="summary-actions"><button type="button" class="button secondary" id="summary-refresh">Refresh</button></div></div></div>
-      <div class="summary-empty-state"><span class="empty-icon" aria-hidden="true">${summaryIcons.places}</span><h2>No location recorded</h2><p>No device sent a location on this day, so there are no visits or trips to summarize.${record.stale ? " Newer data has arrived since this was saved; refresh to include it." : ""}</p></div>`;
-    $("summary-refresh").onclick = () => openSummary(record.date, true);
-    return;
-  }
-  $("summary-detail").innerHTML =
-    `<div class="summary-hero"><div class="summary-head"><div><div class="summary-status-line"><span class="summary-status ${record.stale ? "stale" : "current"}">${record.stale ? "Needs refresh" : "Saved summary"}</span><span>${safe(record.timezone)}</span></div><h2>${safe(longDate(record.date))}</h2><div class="summary-updated">Updated ${safe(formatTime(record.updated_at))}${record.created_at !== record.updated_at ? " · First saved " + safe(formatTime(record.created_at)) : ""}</div></div>
-      <div class="summary-actions"><button type="button" class="button primary" id="summary-history">Open in History</button><button type="button" class="button secondary" id="summary-refresh">Refresh summary</button></div></div>
-      <p class="summary-overview">${safe(displayOverview)}</p>${homeReturn ? `<div class="summary-home-return"><span aria-hidden="true">⌂</span><div><small>Cross-midnight home return</small><strong>${safe(homeReturn)}</strong></div></div>` : ""}</div>
-    ${record.stale ? '<div class="summary-stale-note"><span aria-hidden="true">!</span><div><strong>This day has newer location data</strong><p>Refresh the summary to include the latest changes.</p></div></div>' : ""}
-    <dl class="summary-facts">${facts.map(([label, text, icon]) => summaryMetric(label, text, icon)).join("")}</dl>
-    <dl class="summary-secondary-facts">${secondaryFacts.map(([label, text]) => `<div><dt>${safe(label)}</dt><dd>${safe(text)}</dd></div>`).join("")}</dl>
-    ${activity ? `<section class="summary-content-section summary-activity"><div class="summary-section-head"><span>Movement</span><h3>Activity</h3></div><div class="activity-chips">${activity}</div></section>` : ""}
-    <section class="summary-content-section"><div class="summary-section-head"><span>In order</span><h3>Day timeline</h3></div>${summaryTimeline(value)}</section>
-    <div class="summary-lower-grid"><section class="summary-content-section"><div class="summary-section-head"><span>Stops</span><h3>Places</h3></div>${summaryPlaceRows(value.places || [])}</section><section class="summary-content-section"><div class="summary-section-head"><span>To-dos</span><h3>Reminders</h3></div>${summaryReminderRows(value)}</section></div>
-    <section class="summary-coverage ${gaps.length ? "has-gaps" : "complete"}"><span class="summary-coverage-icon" aria-hidden="true">${gaps.length ? "!" : "✓"}</span><div><strong>${gaps.length ? `${gaps.length} coverage gap${gaps.length === 1 ? "" : "s"}` : "Coverage looks complete"}</strong><p>${safe(value.coverage_note || "No gaps over 30 minutes.")}</p>${gaps.length ? `<div class="summary-coverage-gaps">${gaps.join("")}</div>` : ""}</div></section>
-    <details class="summary-technical"><summary><span><strong>AI &amp; record details</strong><small>View the compact brief, token estimate, and stored JSON</small></span><span class="summary-disclosure" aria-hidden="true">⌄</span></summary><div class="summary-technical-body">${briefBlock}<details class="summary-json"><summary>Stored JSON <small>schema ${safe(value.schema_version ?? "?")}</small></summary><pre>${safe(JSON.stringify(value, null, 2))}</pre></details></div></details>`;
+  const { older, newer } = neighbours(record.date);
+  const box = $("summary-detail");
+  box.removeAttribute("aria-busy");
+  box.innerHTML = `<div class="summary-hero"><div class="summary-head"><div class="summary-title"><div class="summary-status-line">${record.stale ? statusPill("warning", "Needs refresh") : statusPill("success", "Saved")}<span title="${safe(formatTime(record.updated_at))}">Updated ${safe(ago(record.updated_at))} · ${safe(record.timezone)}</span></div><h2>${safe(longDate(record.date))}</h2></div>
+      <div class="summary-actions"><div class="day-step"><button type="button" class="icon-button bordered" id="summary-older" aria-label="Older day" title="Older day"${older ? "" : " disabled"}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14.5 6-6 6 6 6"/></svg></button><button type="button" class="icon-button bordered" id="summary-newer" aria-label="Newer day" title="Newer day"${newer ? "" : " disabled"}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9.5 6 6 6-6 6"/></svg></button></div><button type="button" class="button secondary" id="summary-refresh">Refresh</button><button type="button" class="button primary" id="summary-history">Open in History</button></div></div>
+      ${overview ? `<p class="summary-overview">${safe(overview)}</p>` : ""}${homeReturn ? `<div class="summary-home-return"><span aria-hidden="true">⌂</span><div><small>Home after midnight</small><strong>${safe(homeReturn)}</strong></div></div>` : ""}</div>
+    ${record.stale ? '<div class="summary-stale-note"><span aria-hidden="true">!</span><div><strong>Newer location data has arrived for this day</strong><p>Refresh to include it.</p></div></div>' : ""}
+    <dl class="summary-facts">${facts.map(([label, text, icon]) => metric(label, text, icon)).join("")}</dl>
+    <dl class="summary-secondary-facts">${secondary.map(([label, text]) => `<div><dt>${safe(label)}</dt><dd>${safe(text)}</dd></div>`).join("")}</dl>
+    ${activity ? `<section class="summary-content-section summary-activity"><div class="summary-section-head"><h3>Activity</h3></div><div class="activity-chips">${activity}</div></section>` : ""}
+    <section class="summary-content-section"><div class="summary-section-head"><h3>Timeline</h3></div>${timelineMarkup(value)}</section>
+    <div class="summary-lower-grid"><section class="summary-content-section"><div class="summary-section-head"><h3>Places</h3></div>${placesMarkup(value.places || [])}</section><section class="summary-content-section"><div class="summary-section-head"><h3>Reminders</h3></div>${remindersMarkup(value)}</section></div>
+    ${coverageMarkup(value)}
+    <details class="summary-technical"><summary><span><strong>For AI tools and developers</strong><small>The compact brief, its size, and the stored record</small></span><span class="summary-disclosure" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></span></summary><div class="summary-technical-body">${briefBlock}<details class="summary-json"><summary>Stored record <small>JSON · schema ${safe(value.schema_version ?? "?")}</small></summary><pre>${safe(JSON.stringify(value, null, 2))}</pre></details></div></details>`;
   $("summary-history").onclick = () => {
     state.focusPlace = null;
     state.followToday = record.date === localDateKey();
@@ -283,7 +333,18 @@ export function renderSummaryDetail(record) {
     showView("explore");
     refreshExplore().catch((error) => toast(error.message));
   };
-  $("summary-refresh").onclick = () => openSummary(record.date, true);
+  $("summary-refresh").onclick = async () => {
+    try {
+      await api("/api/daily-summary?" + new URLSearchParams({ date: record.date }));
+      await refreshSummaries();
+      await openSummary(record.date);
+      toast("Summary refreshed");
+    } catch (error) {
+      toast(error.message);
+    }
+  };
+  if (older) $("summary-older").onclick = () => openSummary(older);
+  if (newer) $("summary-newer").onclick = () => openSummary(newer);
   if (brief) $("copy-brief").onclick = () => copyText(JSON.stringify(brief, null, 2), "Brief copied");
 }
 
@@ -291,6 +352,6 @@ export function initSummaries() {
   $("summary-open-form").onsubmit = (event) => {
     event.preventDefault();
     const date = $("summary-date").value;
-    if (date) openSummary(date, !state.summaryCatalog?.some((item) => item.date === date), true);
+    if (date) openSummary(date, true);
   };
 }

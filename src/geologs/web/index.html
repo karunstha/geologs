@@ -64,7 +64,14 @@
       <section id="current-location" class="current-location" hidden aria-live="polite">
         <span class="live-location-dot" aria-hidden="true"></span>
         <div class="current-location-main"><span class="current-label">Now</span><strong id="current-place">Unknown place</strong><small id="current-updated"></small></div>
-        <div class="current-location-actions"><span class="live-badge">Latest fix</span><button id="current-coordinates" class="coordinate-copy" type="button" title="Copy coordinates"></button></div>
+        <div class="current-location-actions"><button id="current-coordinates" class="coordinate-copy" type="button" title="Copy coordinates"></button></div>
+      </section>
+
+      <section id="day-empty" class="card day-empty" hidden aria-live="polite">
+        <span class="empty-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 6.5 9 4l6 2.5L20 4v13.5L15 20l-6-2.5L4 20Z"/><path d="M9 4v13.5M15 6.5V20"/></svg></span>
+        <h2 id="day-empty-title">Nothing recorded</h2>
+        <p id="day-empty-copy"></p>
+        <div id="day-empty-actions" class="day-empty-actions"></div>
       </section>
 
       <div id="summary" class="card flush day-stats" hidden>
@@ -77,10 +84,10 @@
         <div class="history-activity"><div id="activity-chips" class="activity-chips" aria-label="Activity by mode"></div></div>
       </div>
 
-      <div id="history-layout" class="history-layout no-data">
+      <div id="history-layout" class="history-layout" hidden>
         <section class="card flush map-shell" aria-label="Recorded location map">
           <div class="map-topline"><strong id="map-note" class="map-note">Recorded route</strong><div class="map-actions"><button id="fit-day" class="button secondary small" type="button" hidden>Whole day</button><button id="locate" class="button secondary small" type="button" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/></svg><span>Current location</span></button></div></div>
-          <div class="map-stage"><div id="map" role="application" aria-label="Location map"></div><div id="history-empty" class="map-empty"><span class="empty-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 6.5 9 4l6 2.5L20 4v13.5L15 20l-6-2.5L4 20Z"/><path d="M9 4v13.5M15 6.5V20"/></svg></span><strong>No locations recorded for this day</strong><span id="history-empty-copy">Choose another date to explore your history.</span></div></div>
+          <div class="map-stage"><div id="map" role="application" aria-label="Location map"></div></div>
           <div id="map-footer" class="map-footer" hidden><span id="map-legend" class="map-legend"></span><span class="map-caveat">Gaps and implausible jumps are not connected</span></div>
         </section>
         <aside id="inspector" class="card flush inspector" hidden aria-label="Day timeline">
@@ -94,14 +101,12 @@
           <button class="detail-tab active" data-panel="places" role="tab" aria-selected="true">Places</button>
           <button class="detail-tab" data-panel="speed" role="tab" aria-selected="false">Speed</button>
           <button class="detail-tab" data-panel="samples" role="tab" aria-selected="false">Samples</button>
-          <button class="detail-tab" data-panel="patterns" role="tab" aria-selected="false">Patterns</button>
-          <button class="detail-tab" data-panel="coverage" role="tab" aria-selected="false">Coverage</button>
+          <button class="detail-tab" data-panel="data" role="tab" aria-selected="false">Data</button>
         </div>
         <div class="detail-panel active" data-panel-view="places"><div id="visited-places" class="list"></div></div>
-        <div class="detail-panel" data-panel-view="speed"><div id="speed-chart" class="chart-wrap"></div></div>
-        <div class="detail-panel" data-panel-view="samples"><div class="sample-toolbar"><div class="segmented"><button class="active" data-sample-view="timeline">Key fixes</button><button data-sample-view="raw">Raw samples</button></div><p id="sample-count" class="muted"></p></div><div class="table-wrap"><table><thead><tr><th>Time</th><th>Type</th><th>Source</th><th>Mode</th><th>Speed</th><th>Coordinates</th><th>Accuracy</th><th><span class="sr-only">Map</span></th></tr></thead><tbody id="points-table"></tbody></table></div><div id="raw-pagination" class="pagination" hidden><button id="raw-previous" class="button secondary small">Previous</button><span id="raw-page"></span><button id="raw-next" class="button secondary small">Next</button></div></div>
-        <div class="detail-panel" data-panel-view="patterns"><p id="prediction" class="callout"></p><div class="pattern-columns"><section><h3>Common places</h3><div id="pattern-places" class="list"></div></section><section><h3>Transitions</h3><div id="transitions" class="list"></div></section></div></div>
-        <div class="detail-panel" data-panel-view="coverage"><div id="coverage" class="list"></div></div>
+        <div class="detail-panel" data-panel-view="speed"><div id="speed-chart"></div></div>
+        <div class="detail-panel" data-panel-view="samples"><div class="sample-toolbar"><div class="segmented"><button class="active" data-sample-view="timeline">Key fixes</button><button data-sample-view="raw">Raw samples</button></div><p id="sample-count" class="muted"></p></div><div class="table-wrap"><table><thead><tr><th>Time</th><th>Type</th><th>Source</th><th>Part of</th><th>Speed</th><th>Coordinates</th><th>Accuracy</th><th><span class="sr-only">Map</span></th></tr></thead><tbody id="points-table"></tbody></table></div><div id="raw-pagination" class="pagination" hidden><button id="raw-previous" class="button secondary small">Previous</button><span id="raw-page"></span><button id="raw-next" class="button secondary small">Next</button></div></div>
+        <div class="detail-panel" data-panel-view="data"><div id="day-data" class="day-data"></div></div>
       </section>
     </section>
 
@@ -116,34 +121,46 @@
         <div id="visit-results" class="visit-results" aria-live="polite"></div>
       </section>
       <div class="segmented page-tabs" role="tablist" aria-label="Places">
-        <button class="active" data-places-tab="saved" role="tab" aria-selected="true">Saved places <span id="saved-place-count" class="tab-count"></span></button>
-        <button data-places-tab="visited" role="tab" aria-selected="false">Places visited <span id="visited-place-count" class="tab-count"></span></button>
+        <button class="active" data-places-tab="saved" role="tab" aria-selected="true">Saved <span id="saved-place-count" class="tab-count"></span></button>
+        <button data-places-tab="visited" role="tab" aria-selected="false">Visited <span id="visited-place-count" class="tab-count"></span></button>
+        <button data-places-tab="patterns" role="tab" aria-selected="false">Patterns</button>
       </div>
       <section class="card places-panel active" data-places-panel="saved"><div class="card-head"><div><h2>Saved places</h2><p>Zones you named. Visits inside keep their own names; the zone adds up your time and fires arrival reminders.</p></div></div><div id="places-list" class="list rows"></div></section>
       <section class="card places-panel" data-places-panel="visited"><div class="card-head"><div><h2>Places visited</h2><p>Every place with a confirmed stay, ranked by time spent.</p></div></div><div id="all-visited-places" class="list rows"></div></section>
+      <section class="card places-panel" data-places-panel="patterns"><div class="card-head"><div><h2>Patterns</h2><p>Where you spend your time and how you usually move between places, across your whole history.</p></div></div>
+        <div id="prediction" class="callout"></div>
+        <div class="pattern-columns"><section><h3>Most time spent</h3><div id="pattern-places" class="list"></div></section><section><h3>Usual routes</h3><div id="transitions" class="list"></div></section></div>
+      </section>
     </section>
 
     <section id="reminders-view" class="view" aria-labelledby="reminders-title">
       <div class="page-head">
         <div class="page-title"><h1 id="reminders-title">Reminders</h1><p class="page-subtitle">One-time notes that appear when you arrive somewhere.</p></div>
-        <button id="notifications" class="button secondary" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 16.5h12l-1.6-2.6V10a4.4 4.4 0 0 0-8.8 0v3.9Z"/><path d="M10 19.5h4"/></svg><span>Enable browser alerts</span></button>
+        <button id="notifications" class="button secondary" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 16.5h12l-1.6-2.6V10a4.4 4.4 0 0 0-8.8 0v3.9Z"/><path d="M10 19.5h4"/></svg><span id="notifications-label">Enable browser alerts</span></button>
       </div>
       <div class="reminders-layout">
         <section class="card reminder-composer" aria-labelledby="new-reminder-title"><div class="card-head"><div><h2 id="new-reminder-title">New reminder</h2><p>What to remember, and where.</p></div></div>
           <form id="reminder-form" class="form-stack">
             <label class="field"><span>Remind me to</span><input id="reminder-text" class="input" required maxlength="500" placeholder="Pick up salt"></label>
-            <label class="field"><span>When I arrive at</span><select id="reminder-place" class="input" required></select></label>
-            <div id="reminder-named-place" class="form-stack subpanel" hidden><label class="field"><span>Place name</span><input id="reminder-match-name" class="input" maxlength="120" placeholder="Starbucks" autocomplete="off"></label><p class="help">Fires the first time you stop for about three minutes within 150 m of a place with this name, anywhere. Small spelling differences are fine.</p></div>
+            <fieldset class="field choice-field"><legend>When I arrive at</legend>
+              <div class="segmented choice" role="radiogroup" aria-label="Kind of place">
+                <label><input type="radio" name="reminder-kind" value="saved" checked><span>A saved place</span></label>
+                <label><input type="radio" name="reminder-kind" value="named"><span>A place by name</span></label>
+                <label><input type="radio" name="reminder-kind" value="location"><span>A location</span></label>
+              </div>
+            </fieldset>
+            <div id="reminder-saved-place" class="form-stack"><label class="field"><span class="sr-only">Saved place</span><select id="reminder-place" class="input" required></select></label><p id="reminder-no-places" class="help" hidden>Save a place on the Places page first, or choose a place by name or a location.</p></div>
+            <div id="reminder-named-place" class="form-stack" hidden><label class="field"><span class="sr-only">Place name</span><input id="reminder-match-name" class="input" maxlength="120" placeholder="Starbucks, Walgreens, a library…" autocomplete="off"></label></div>
             <div id="reminder-custom-place" class="form-stack subpanel" hidden>
-              <div class="search-row"><input id="reminder-place-search" class="input" placeholder="Search for a place" aria-label="Search reminder destination"><button id="reminder-search-button" class="button secondary" type="button">Search</button></div>
+              <div class="search-row"><input id="reminder-place-search" class="input" placeholder="Search for an address or place" aria-label="Search for the reminder's location"><button id="reminder-search-button" class="button secondary" type="button">Search</button></div>
               <div id="reminder-search-results" class="result-list"></div>
               <label class="field"><span>Place name</span><input id="reminder-place-name" class="input" maxlength="120" placeholder="Walmart"></label>
               <div class="form-pair"><label class="field"><span>Latitude</span><input id="reminder-lat" class="input" type="number" step="any" min="-90" max="90"></label><label class="field"><span>Longitude</span><input id="reminder-lon" class="input" type="number" step="any" min="-180" max="180"></label></div>
-              <div class="inline-actions"><button id="reminder-use-current" class="button ghost small" type="button">Use current coordinates</button><button id="reminder-reverse" class="button ghost small" type="button">Find place from coordinates</button></div>
+              <div class="inline-actions"><button id="reminder-use-current" class="button ghost small" type="button">Use my current location</button><button id="reminder-reverse" class="button ghost small" type="button">Look up these coordinates</button></div>
               <label class="field"><span>Arrival radius (m)</span><input id="reminder-radius" class="input" type="number" min="20" max="5000" value="150"></label>
               <input id="reminder-address" type="hidden"><input id="reminder-category" type="hidden"><input id="reminder-provider-id" type="hidden">
             </div>
-            <p class="help">Triggers once, when a new location enters the area.</p>
+            <p id="reminder-hint" class="help"></p>
             <div class="form-actions"><button class="button primary">Create reminder</button></div>
           </form>
         </section>
@@ -182,7 +199,7 @@
             </div>
             <div class="card">
               <div class="card-head"><div><h3>Connect a tracker app</h3><p>Phones send locations straight here, with no polling. Use an address your phone can reach, such as HTTPS or a private network like Tailscale.</p></div></div>
-              <p id="ingest-token-note" class="callout" hidden></p>
+              <p id="ingest-token-note" class="callout warning" hidden><strong>Give phones their own token</strong><span>Set GEOLOGS_INGEST_TOKEN in .env. Until then, apps need your main access token, which can also read your whole history.</span></p>
               <div id="tracker-endpoints" class="tracker-list"></div>
             </div>
           </section>
@@ -200,7 +217,7 @@
           <section id="settings-places" class="settings-section" aria-labelledby="place-names-title">
             <div class="section-intro"><h2 id="place-names-title">Place names</h2><p>The service that turns coordinates into names for stays, places, and search.</p></div>
             <form id="places-form" class="card settings-form">
-              <label class="setting-row"><span class="setting-label"><strong>Places provider</strong><small id="places-provider-help"></small></span><select id="places-provider" class="input"></select></label>
+              <fieldset class="setting-group"><legend class="setting-label"><strong>Provider</strong><small id="places-provider-help"></small></legend><div id="places-provider-options" class="choice-cards"></div></fieldset>
               <p id="mapbox-terms" class="callout warning" hidden>Mapbox allows Search Box results for temporary use only. GeoLogs keeps place names in its lookup cache, saved places, and daily summaries, which goes beyond those terms.</p>
               <p class="help setting-note">After switching, names are looked up again with the new provider as you view them. Your own name corrections always win.</p>
               <div class="card-foot"><button class="button primary">Save changes</button></div>
@@ -209,14 +226,14 @@
 
           <section id="settings-summaries" class="settings-section" aria-labelledby="summaries-settings-title">
             <div class="section-intro"><h2 id="summaries-settings-title">Daily summaries</h2><p>Each completed day is saved after midnight in your timezone, with a compact brief for AI tools over MCP.</p></div>
-            <div class="card"><div class="card-head"><div><h3>Recently saved</h3></div><button id="explore-summaries" class="button secondary small" type="button">Open summaries</button></div><div id="daily-summaries" class="list rows"></div></div>
+            <div class="card"><div class="card-head"><div><h3>Recently saved</h3></div><button id="explore-summaries" class="button secondary small" type="button">All summaries</button></div><div id="daily-summaries" class="list rows link-rows"></div></div>
           </section>
 
           <section id="settings-access" class="settings-section" aria-labelledby="access-title">
             <div class="section-intro"><h2 id="access-title">Access</h2><p>How this browser and your devices sign in.</p></div>
             <div class="card">
               <div class="setting-row static"><span class="setting-label"><strong>This browser</strong><small id="access-browser">Signed in with the access token for 30 days.</small></span><button id="sign-out" class="button secondary" type="button">Sign out</button></div>
-              <div class="setting-row static"><span class="setting-label"><strong>Phone token</strong><small id="access-ingest">GEOLOGS_INGEST_TOKEN lets devices send locations without being able to read anything.</small></span><span id="access-ingest-badge" class="status-pill"></span></div>
+              <div class="setting-row static"><span class="setting-label"><strong>Phone token</strong><small id="access-ingest">GEOLOGS_INGEST_TOKEN lets devices send locations without being able to read anything.</small></span><span id="access-ingest-badge"></span></div>
               <div class="setting-row static"><span class="setting-label"><strong>Access token</strong><small>Change GEOLOGS_TOKEN in .env to sign every browser out.</small></span></div>
             </div>
           </section>
@@ -241,10 +258,10 @@
 
   <dialog id="label-dialog" class="dialog" aria-labelledby="label-dialog-title">
     <div class="dialog-head"><div><h2 id="label-dialog-title">What is this place?</h2><p>Pick where you actually were. History, summaries, and search use this name; it is not added to saved places.</p></div><button id="close-label-dialog" class="icon-button" type="button" aria-label="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
-    <section class="dialog-section"><div class="card-head compact"><h3>Places around this visit</h3><span id="nearby-note" class="muted"></span></div><div id="nearby-places" class="result-list nearby-list" aria-live="polite"></div></section>
+    <section class="dialog-section"><div class="card-head compact"><h3 id="nearby-title">Places around this visit</h3><span id="nearby-note" class="muted"></span></div><div id="nearby-places" class="result-list nearby-list" aria-live="polite"></div></section>
     <section class="dialog-section"><form id="label-form" class="form-stack"><input type="hidden" id="label-category"><input type="hidden" id="label-provider-id"><input type="hidden" id="label-address">
       <label class="field"><span>Name</span><input id="label-name" class="input" required maxlength="120" autocomplete="off" autofocus></label>
-      <fieldset class="scope-choice"><legend>Apply to</legend><label id="scope-visit-option"><input type="radio" name="label-scope" value="visit" checked><span><strong id="scope-visit-title">Only this visit</strong><small id="scope-visit-detail"></small></span></label><label><input type="radio" name="label-scope" value="spot"><span><strong>Every visit to this spot</strong><small id="scope-spot-detail"></small></span></label></fieldset>
+      <fieldset id="label-scope" class="scope-choice"><legend>Apply to</legend><label id="scope-visit-option"><input type="radio" name="label-scope" value="visit" checked><span><strong id="scope-visit-title">Only this visit</strong><small id="scope-visit-detail"></small></span></label><label><input type="radio" name="label-scope" value="spot"><span><strong>Every visit to this spot</strong><small id="scope-spot-detail"></small></span></label></fieldset>
       <p id="label-where" class="help"></p>
       <div class="dialog-actions"><button type="button" id="reset-label" class="button ghost" hidden>Use automatic name</button><button type="button" id="cancel-label" class="button secondary">Cancel</button><button class="button primary">Save name</button></div>
     </form></section>

@@ -126,3 +126,99 @@ input[type="date"].input {
     flex: 1;
   }
 }
+/* A group of radio buttons drawn as a segmented control. */
+.choice-field {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.choice-field legend {
+  margin-bottom: 6px;
+  padding: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+.segmented.choice {
+  display: flex;
+  width: 100%;
+}
+.segmented.choice label {
+  flex: 1;
+  position: relative;
+}
+.segmented.choice input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+.segmented.choice span {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: 8px;
+  color: var(--text-2);
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.segmented.choice input:checked + span {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-sm);
+}
+.segmented.choice input:focus-visible + span {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+/* Radio options drawn as cards, with a status on the right. */
+.choice-cards {
+  display: grid;
+  gap: 8px;
+}
+.choice-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.choice-card:hover {
+  background: var(--surface-2);
+}
+.choice-card:has(input:checked) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.choice-card.unavailable {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+.choice-card input {
+  margin: 0;
+  accent-color: var(--accent);
+}
+.choice-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+.choice-body strong {
+  font-size: 14px;
+  font-weight: 600;
+}
+.choice-body small {
+  color: var(--text-2);
+  font-size: 12.5px;
+}
+@media (max-width: 760px) {
+  .segmented.choice span {
+    padding: 0 6px;
+    font-size: 12.5px;
+  }
+}

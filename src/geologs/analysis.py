@@ -1098,7 +1098,7 @@ def day_summary(store, date, timezone_name="UTC", source=None):
     end = (day_end - timedelta(microseconds=1)).isoformat()
     # Switching the places provider in Settings re-resolves every day's names.
     provider = places_provider_identity(store)
-    cache_identity = json.dumps(["day-v13", date, timezone_name, source, provider], separators=(",", ":"))
+    cache_identity = json.dumps(["day-v14", date, timezone_name, source, provider], separators=(",", ":"))
     cache_key = "day:" + hashlib.sha256(cache_identity.encode()).hexdigest()
     watermark = store.analysis_watermark(start, end, source)
     cached = store.cached_analysis(cache_key, watermark)
@@ -1222,6 +1222,7 @@ def day_summary(store, date, timezone_name="UTC", source=None):
             "movement_minutes": round(sum(totals["minutes"] for totals in activity_totals.values()), 1),
             "movement_km": round(sum(totals["distance_km"] for totals in activity_totals.values()), 2),
             "coverage_gaps": _coverage_gaps(points, trips), "timeline_sources": timeline_sources,
+            "samples_by_source": samples_by_source,
             "visited_places": visited_places, "places_including_home": places_including_home,
             "first_fix": points[-1]["timestamp"] if points else None,
             "last_fix": points[0]["timestamp"] if points else None,
@@ -1376,7 +1377,11 @@ def daily_overview(store, date, timezone_name=None, source=None):
              "home_return": home_return,
              "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
     if canonical:
-        store.save_daily_overview(value, watermark, daily_brief(value))
+        # A day nothing was recorded on is not worth a record; drop one saved before data was removed.
+        if totals["raw_fixes"]:
+            store.save_daily_overview(value, watermark, daily_brief(value))
+        else:
+            store.delete_daily_overview(date, timezone_name)
     return value
 
 
@@ -1531,7 +1536,7 @@ def stored_daily_record(store, date):
     except ValueError as exc:
         raise ValueError("date must be YYYY-MM-DD") from exc
     row = store.db.execute("""SELECT summary_date,timezone,watermark,summary,brief,created_at,updated_at FROM daily_summaries
-        WHERE summary_date=? AND timezone=? AND source=''""", (date, timezone_name)).fetchone()
+        WHERE summary_date=? AND timezone=? AND source='' AND points>0""", (date, timezone_name)).fetchone()
     if row is None:
         raise ValueError(f"no summary is stored for {date} yet")
     start = local_start.astimezone(timezone.utc).isoformat()

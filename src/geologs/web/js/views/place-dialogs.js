@@ -6,7 +6,9 @@ import { clock, coordinateText, metresBetween } from "../core/format.js";
 import { state } from "../core/state.js";
 import { map, searchLayer } from "../map/map.js";
 import { placeIcon } from "../ui/icons.js";
-import { refreshExplore, refreshInsights } from "./history.js";
+import { refreshExplore } from "./history.js";
+import { refreshInsights } from "./patterns.js";
+import { showView } from "./shell.js";
 
 export function openPlaceDialog(place = {}) {
   $("place-form").reset();
@@ -45,15 +47,17 @@ export function visitTimes(visits) {
   return visits.map((stay) => `${clock(stay.started_at)} – ${clock(stay.ended_at)}`).join(", ");
 }
 
-export function editVisitedPlace(place, visits = null) {
-  // visits: the stays this fix is about. A pin or day row covers the place's visits that day;
-  // the Places page has no particular visit, so only the every-visit choice applies there.
+// The visits to a place on the day shown in History (place ids are only meaningful within that day).
+export function dayVisits(place) {
+  return state.day && place?.cluster_id != null
+    ? state.day.stays.filter((stay) => stay.cluster_id === place.cluster_id)
+    : [];
+}
+
+export function editVisitedPlace(place, visits = []) {
+  // visits: the stays this fix is about. A pin or day row passes that day's visits; the
+  // Places page has no particular visit, so only the every-visit choice applies there.
   if (!place) return;
-  visits =
-    visits ??
-    (state.day && place.cluster_id != null
-      ? state.day.stays.filter((stay) => stay.cluster_id === place.cluster_id)
-      : []);
   const target = labelTarget(place, visits);
   const labelIds = [
     ...new Set([place.label_id, ...visits.map((stay) => stay.label_id)].filter((id) => id != null)),
@@ -83,7 +87,12 @@ export function editVisitedPlace(place, visits = null) {
   $("scope-spot-detail").textContent = `Past and future visits within ${target.radius_m} m`;
   const scope = !visits.length || (current && !current.started_at) ? "spot" : "visit";
   document.querySelector(`input[name="label-scope"][value="${scope}"]`).checked = true;
-  $("label-where").textContent = `Pinned at ${coordinateText(target.lat, target.lon)}.`;
+  // With no particular visit there is only one choice, so say it instead of offering it.
+  $("label-scope").hidden = !visits.length;
+  $("nearby-title").textContent = visits.length ? "Places around this visit" : "Places around here";
+  $("label-where").textContent = visits.length
+    ? `Pinned at ${coordinateText(target.lat, target.lon)}.`
+    : `Applies to every visit within ${target.radius_m} m of ${coordinateText(target.lat, target.lon)}, past and future.`;
   $("reset-label").hidden = !labelIds.length;
   loadNearbyPlaces(target);
   $("label-dialog").showModal();
@@ -126,7 +135,18 @@ export async function loadNearbyPlaces(target) {
         }),
     );
   } catch (error) {
-    if (request === loadNearbyPlaces.request) box.innerHTML = `<p class="empty">${safe(error.message)}</p>`;
+    if (request !== loadNearbyPlaces.request) return;
+    // Without a places provider there is nothing to suggest; say so and point to the setting.
+    const noProvider = /API_KEY|ACCESS_TOKEN|PHOTON_URL|provider/i.test(error.message);
+    box.innerHTML = noProvider
+      ? '<div class="callout"><strong>No suggestions without a places provider</strong><span>Type the name below, or choose a provider in Settings → Place names to see places nearby.</span><button type="button" class="button secondary small" id="nearby-settings">Open Place names settings</button></div>'
+      : `<p class="empty">${safe(error.message)}</p>`;
+    if (noProvider)
+      $("nearby-settings").onclick = () => {
+        $("label-dialog").close();
+        showView("settings");
+        document.getElementById("settings-places").scrollIntoView({ block: "start" });
+      };
   }
 }
 

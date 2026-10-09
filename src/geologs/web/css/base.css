@@ -122,24 +122,6 @@ code,
   font-size: 12.5px;
   line-height: 1.5;
 }
-.empty-icon {
-  width: 44px;
-  height: 44px;
-  display: grid;
-  place-items: center;
-  border-radius: 12px;
-  background: var(--surface-3);
-  color: var(--text-2);
-}
-.empty-icon svg {
-  width: 22px;
-  height: 22px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.7;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
 @media (max-width: 760px) {
   h1 {
     font-size: 23px;

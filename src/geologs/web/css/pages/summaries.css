@@ -802,3 +802,59 @@
     padding: 28px 20px;
   }
 }
+.day-step {
+  display: flex;
+  gap: 4px;
+  margin-right: 4px;
+}
+.summary-day-arrow svg,
+.summary-disclosure svg {
+  display: block;
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.summary-title h2 {
+  margin-top: 6px;
+}
+/* On phones the saved days become a horizontal strip of dates above the day. */
+@media (max-width: 900px) {
+  .summary-index {
+    padding: 12px 0 10px;
+  }
+  .summary-index > .card-head {
+    padding: 0 14px;
+  }
+  .summary-index-list {
+    display: flex;
+    gap: 8px;
+    min-height: 0;
+    max-height: none;
+    padding: 2px 14px 4px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scroll-snap-type: x proximity;
+    scrollbar-width: none;
+  }
+  .summary-month {
+    display: contents;
+  }
+  .summary-month > h3 {
+    display: none;
+  }
+  .summary-day {
+    flex: none;
+    width: auto;
+    grid-template-columns: 40px auto;
+    padding: 6px 12px 6px 6px;
+    border: 1px solid var(--border);
+    scroll-snap-align: start;
+  }
+  .summary-day-arrow {
+    display: none;
+  }
+}

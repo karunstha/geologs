@@ -169,27 +169,6 @@ td small {
 .table-map:hover {
   background: var(--accent-soft);
 }
-.mode-tag {
-  display: inline-block;
-  padding: 2px 8px;
-  border-radius: 6px;
-  background: var(--success-soft);
-  color: var(--success);
-  font-size: 12px;
-  font-weight: 560;
-}
-.mode-tag.driving {
-  background: color-mix(in srgb, #3567ad 14%, var(--surface));
-  color: #3f73b8;
-}
-.mode-tag.running_cycling {
-  background: var(--warning-soft);
-  color: var(--warning);
-}
-.mode-tag.unknown {
-  background: var(--neutral-soft);
-  color: var(--neutral);
-}
 .pagination {
   display: flex;
   align-items: center;
@@ -229,13 +208,61 @@ td small {
   }
 }
 @media (max-width: 760px) {
+  /* Icon actions and pills fit beside the text, so rows stay on one line. */
   .rows .list-item {
     align-items: flex-start;
-    flex-direction: column;
     gap: 8px;
   }
-  .rows .list-item > .actions,
-  .rows .list-item > button {
-    align-self: flex-start;
-  }
+}
+.list.rows,
+.places-panel .list {
+  max-height: none;
+}
+/* A second line under a row's details, such as an address. */
+.place-main > div > span {
+  display: block;
+  margin-top: 1px;
+  color: var(--text-3);
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+/* A whole row that opens something. */
+.row-link {
+  width: 100%;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: none;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.row-link:last-child {
+  border-bottom: 0;
+}
+.row-link:hover strong {
+  color: var(--accent-text);
+}
+.row-chevron {
+  display: grid;
+  color: var(--text-3);
+}
+.row-chevron svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+td.numeric {
+  text-align: right;
+}
+td.mono {
+  font-family: var(--mono);
+  font-size: 12.5px;
+}
+td .row-actions .icon-button {
+  width: 28px;
+  height: 28px;
 }

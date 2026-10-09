@@ -2,36 +2,46 @@
 import { refreshMeta } from "../app/refresh.js";
 import { api, post } from "../core/api.js";
 import { $, safe, toast } from "../core/dom.js";
-import { formatTime } from "../core/format.js";
+import { ago, formatTime } from "../core/format.js";
 import { state } from "../core/state.js";
-import { placeIcon } from "../ui/icons.js";
+import { onEach, rowActions } from "../ui/actions.js";
+import { placeIcon, statusPill } from "../ui/icons.js";
+
+function destinationKind() {
+  return document.querySelector('input[name="reminder-kind"]:checked')?.value || "saved";
+}
 
 export function fillPlaceSelectors() {
   const select = $("reminder-place"),
     value = select.value;
   select.innerHTML =
-    '<option value="">Select a saved place</option>' +
-    state.places.map((p) => `<option value="${p.id}">${safe(p.name)}</option>`).join("") +
-    '<option value="other">Other place or coordinates…</option><option value="named">Any place named…</option>';
+    `<option value="">${state.places.length ? "Choose a saved place" : "No saved places yet"}</option>` +
+    state.places.map((place) => `<option value="${place.id}">${safe(place.name)}</option>`).join("");
   select.value = [...select.options].some((option) => option.value === value) ? value : "";
+  select.disabled = !state.places.length;
+  $("reminder-no-places").hidden = !!state.places.length;
   toggleReminderDestination();
 }
 
 export function toggleReminderDestination() {
-  const choice = $("reminder-place").value,
-    custom = choice === "other",
-    named = choice === "named";
-  $("reminder-custom-place").hidden = !custom;
-  $("reminder-named-place").hidden = !named;
-  $("reminder-match-name").required = named;
-  for (const id of ["reminder-lat", "reminder-lon"]) $(id).required = custom;
+  const kind = destinationKind();
+  $("reminder-saved-place").hidden = kind !== "saved";
+  $("reminder-named-place").hidden = kind !== "named";
+  $("reminder-custom-place").hidden = kind !== "location";
+  $("reminder-place").required = kind === "saved";
+  $("reminder-match-name").required = kind === "named";
+  for (const id of ["reminder-lat", "reminder-lon"]) $(id).required = kind === "location";
+  $("reminder-hint").textContent =
+    kind === "named"
+      ? "Fires the first time you stop for a few minutes near any place with this name."
+      : "Fires once, the first time a new location arrives inside the area.";
 }
 
-export function reminderWhere(reminder) {
+function reminderWhere(reminder) {
   return reminder.match_name ? `Any place named “${reminder.match_name}”` : reminder.place_name;
 }
 
-export function setReminderDestination(place) {
+function setReminderDestination(place) {
   $("reminder-place-name").value = (place.name || place.place_name || "").slice(0, 120);
   $("reminder-lat").value = place.lat ?? "";
   $("reminder-lon").value = place.lon ?? "";
@@ -42,82 +52,117 @@ export function setReminderDestination(place) {
 }
 
 export function renderReminders() {
-  $("active-reminder-count").textContent = state.reminders.length.toLocaleString();
-  $("active-reminder-count").hidden = !state.reminders.length;
-  $("reminder-history-count").textContent = state.reminderHistory.length.toLocaleString();
-  $("reminder-history-count").hidden = !state.reminderHistory.length;
-  $("reminders-list").innerHTML =
+  $("active-reminder-count").textContent = state.reminders.length
+    ? state.reminders.length.toLocaleString()
+    : "";
+  $("reminder-history-count").textContent = state.reminderHistory.length
+    ? state.reminderHistory.length.toLocaleString()
+    : "";
+  const waiting = $("reminders-list");
+  waiting.innerHTML =
     state.reminders
       .map(
-        (r) =>
-          `<div class="list-item"><div class="place-main">${placeIcon(r)}<div><strong>${safe(r.text)}</strong><small>${safe(r.match_name ? reminderWhere(r) : "At " + r.place_name)} · Created ${safe(formatTime(r.created_at))}</small></div></div><button data-cancel-reminder="${r.id}">Cancel</button></div>`,
+        (reminder) =>
+          `<div class="list-item"><div class="place-main">${placeIcon(reminder)}<div><strong>${safe(reminder.text)}</strong><small title="${safe(formatTime(reminder.created_at))}">${safe(reminder.match_name ? reminderWhere(reminder) : "At " + reminder.place_name)} · added ${safe(ago(reminder.created_at))}</small></div></div>${rowActions([{ icon: "cancel", label: "Cancel reminder", data: `data-cancel-reminder="${reminder.id}"`, tone: "danger" }])}</div>`,
       )
-      .join("") || '<div class="empty">No active reminders.</div>';
-  $("reminders-list")
-    .querySelectorAll("[data-cancel-reminder]")
-    .forEach(
-      (button) =>
-        (button.onclick = async () => {
-          try {
-            await post("/api/reminders/cancel", { id: +button.dataset.cancelReminder });
-            await refreshMeta();
-            toast("Reminder cancelled");
-          } catch (error) {
-            toast(error.message);
-          }
-        }),
-    );
-  $("reminder-history").innerHTML =
-    state.reminderHistory
-      .map(
-        (item) =>
-          `<div class="list-item"><div class="place-main">${placeIcon(item)}<div><strong>${safe(item.text)}</strong><small>${safe(reminderWhere(item))} · ${item.status === "triggered" ? "Triggered " + safe(formatTime(item.triggered_at)) : "Cancelled " + safe(formatTime(item.cancelled_at || item.created_at))}</small></div></div></div>`,
-      )
-      .join("") || '<div class="empty">Triggered and cancelled reminders will appear here.</div>';
-}
-
-export function initReminders() {
-  $("reminder-place").onchange = toggleReminderDestination;
-  $("reminder-search-button").onclick = async () => {
-    const query = $("reminder-place-search").value.trim();
-    if (!query) {
-      toast("Enter a place name");
-      return;
-    }
+      .join("") ||
+    '<div class="empty-block"><strong>Nothing waiting</strong><span>Reminders you create appear here until they fire.</span></div>';
+  onEach(waiting, "cancel-reminder", async (id) => {
     try {
-      const q = new URLSearchParams({ q: query });
-      if (state.current) {
-        q.set("lat", state.current.lat);
-        q.set("lon", state.current.lon);
-      }
-      const results = await api("/api/geocode?" + q);
-      $("reminder-search-results").innerHTML =
-        results
-          .map(
-            (place, index) =>
-              `<div class="result-item"><div class="place-main">${placeIcon(place)}<div><strong>${safe(place.name)}</strong><span>${safe(place.address || "")} · ${Number(place.lat).toFixed(5)}, ${Number(place.lon).toFixed(5)}</span></div></div><button type="button" data-reminder-result="${index}">Use</button></div>`,
-          )
-          .join("") || '<p class="empty">No matches.</p>';
-      $("reminder-search-results")
-        .querySelectorAll("[data-reminder-result]")
-        .forEach(
-          (button) =>
-            (button.onclick = () => setReminderDestination(results[+button.dataset.reminderResult])),
-        );
+      await post("/api/reminders/cancel", { id: +id });
+      await refreshMeta();
+      toast("Reminder cancelled");
     } catch (error) {
       toast(error.message);
     }
-  };
+  });
+  $("reminder-history").innerHTML =
+    state.reminderHistory
+      .map((item) => {
+        const fired = item.status === "triggered";
+        const at = fired ? item.triggered_at : item.cancelled_at || item.created_at;
+        return `<div class="list-item"><div class="place-main">${placeIcon(item)}<div><strong>${safe(item.text)}</strong><small title="${safe(formatTime(at))}">${safe(reminderWhere(item))} · ${safe(ago(at))}</small></div></div>${statusPill(fired ? "success" : "neutral", fired ? "Fired" : "Cancelled")}</div>`;
+      })
+      .join("") ||
+    '<div class="empty-block"><strong>No history yet</strong><span>Reminders that fire or are cancelled are kept here.</span></div>';
+}
+
+// The alerts button says what the browser allows rather than always offering to enable.
+function renderAlertState() {
+  const button = $("notifications");
+  const label = $("notifications-label");
+  if (!("Notification" in window)) {
+    label.textContent = "Alerts unavailable";
+    button.disabled = true;
+    button.title = "This browser can't show notifications.";
+    return;
+  }
+  const permission = Notification.permission;
+  button.dataset.state = permission;
+  button.disabled = permission === "granted";
+  label.textContent =
+    permission === "granted"
+      ? "Browser alerts on"
+      : permission === "denied"
+        ? "Alerts blocked"
+        : "Enable browser alerts";
+  button.title =
+    permission === "denied"
+      ? "Allow notifications for this site in your browser settings."
+      : permission === "granted"
+        ? "Arrival reminders also appear as notifications while this tab is open."
+        : "Show arrival reminders as notifications while this tab is open.";
+}
+
+async function searchDestination() {
+  const query = $("reminder-place-search").value.trim();
+  if (!query) {
+    toast("Enter a place to search for");
+    return;
+  }
+  const box = $("reminder-search-results");
+  box.innerHTML = '<p class="empty">Searching…</p>';
+  try {
+    const params = new URLSearchParams({ q: query });
+    if (state.current) {
+      params.set("lat", state.current.lat);
+      params.set("lon", state.current.lon);
+    }
+    const results = await api("/api/geocode?" + params);
+    box.innerHTML =
+      results
+        .map(
+          (place, index) =>
+            `<div class="result-item"><div class="place-main">${placeIcon(place)}<div><strong>${safe(place.name)}</strong><span>${safe(place.address || `${Number(place.lat).toFixed(5)}, ${Number(place.lon).toFixed(5)}`)}</span></div></div><button type="button" data-reminder-result="${index}">Use</button></div>`,
+        )
+        .join("") || '<p class="empty">No matches. Try another name, or enter coordinates.</p>';
+    onEach(box, "reminder-result", (index) => setReminderDestination(results[+index]));
+  } catch (error) {
+    box.innerHTML = `<p class="empty">${safe(error.message)}</p>`;
+  }
+}
+
+export function initReminders() {
+  document
+    .querySelectorAll('input[name="reminder-kind"]')
+    .forEach((input) => (input.onchange = toggleReminderDestination));
+  $("reminder-search-button").onclick = searchDestination;
+  $("reminder-place-search").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      searchDestination();
+    }
+  });
   $("reminder-use-current").onclick = () => {
     if (!state.current) {
-      toast("No current location is available");
+      toast("No current location yet");
       return;
     }
     setReminderDestination({
       ...state.current,
       name: state.current.place_name || state.current.address || "Current location",
     });
-    toast("Current coordinates selected");
+    toast("Using your current location");
   };
   $("reminder-reverse").onclick = async () => {
     if (!$("reminder-lat").value || !$("reminder-lon").value) {
@@ -125,49 +170,49 @@ export function initReminders() {
       return;
     }
     try {
-      const q = new URLSearchParams({ lat: $("reminder-lat").value, lon: $("reminder-lon").value });
-      const result = await api("/api/reverse?" + q);
+      const params = new URLSearchParams({ lat: $("reminder-lat").value, lon: $("reminder-lon").value });
+      const result = await api("/api/reverse?" + params);
       setReminderDestination({ ...result, lat: +$("reminder-lat").value, lon: +$("reminder-lon").value });
-      toast(result.approximate ? "Nearby cached place found — verify before creating" : "Place found");
+      toast(result.approximate ? "Found a nearby place; check it before saving" : "Place found");
     } catch (error) {
       toast(error.message);
     }
   };
-  $("reminder-form").onsubmit = async (e) => {
-    e.preventDefault();
+  $("reminder-form").onsubmit = async (event) => {
+    event.preventDefault();
+    const text = $("reminder-text").value;
+    const kind = destinationKind();
+    const payload =
+      kind === "named"
+        ? { text, match_name: $("reminder-match-name").value }
+        : kind === "location"
+          ? {
+              text,
+              place_name: $("reminder-place-name").value,
+              lat: +$("reminder-lat").value,
+              lon: +$("reminder-lon").value,
+              radius_m: +$("reminder-radius").value,
+              address: $("reminder-address").value,
+              category: $("reminder-category").value,
+              provider_place_id: $("reminder-provider-id").value,
+            }
+          : { text, place_id: +$("reminder-place").value };
     try {
-      const custom = $("reminder-place").value === "other";
-      const payload =
-        $("reminder-place").value === "named"
-          ? { text: $("reminder-text").value, match_name: $("reminder-match-name").value }
-          : custom
-            ? {
-                text: $("reminder-text").value,
-                place_name: $("reminder-place-name").value,
-                lat: +$("reminder-lat").value,
-                lon: +$("reminder-lon").value,
-                radius_m: +$("reminder-radius").value,
-                address: $("reminder-address").value,
-                category: $("reminder-category").value,
-                provider_place_id: $("reminder-provider-id").value,
-              }
-            : { text: $("reminder-text").value, place_id: +$("reminder-place").value };
       await post("/api/reminders", payload);
       $("reminder-form").reset();
       $("reminder-search-results").innerHTML = "";
       toggleReminderDestination();
       await refreshMeta();
       toast("Reminder created");
-    } catch (err) {
-      toast(err.message);
+    } catch (error) {
+      toast(error.message);
     }
   };
   $("notifications").onclick = async () => {
-    if (!("Notification" in window)) {
-      toast("Browser notifications are unavailable");
-      return;
-    }
+    if (!("Notification" in window)) return;
     const permission = await Notification.requestPermission();
-    toast(permission === "granted" ? "Browser alerts enabled" : "Browser alerts were not enabled");
+    renderAlertState();
+    toast(permission === "granted" ? "Browser alerts are on" : "Browser alerts weren't turned on");
   };
+  renderAlertState();
 }

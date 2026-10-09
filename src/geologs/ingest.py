@@ -154,4 +154,19 @@ def generic(payload, query, headers):
     return points, skipped, None
 
 
+def claimed_source(kind, query, headers):
+    """The source a request names before its body is read, so a rejected phone can still be told apart."""
+    if query.get("source"):
+        return _source(kind, None, query["source"])
+    if kind == "owntracks":
+        name = "/".join(part for part in (headers.get("X-Limit-U") or query.get("u"), headers.get("X-Limit-D") or query.get("d")) if part)
+    elif kind == "osmand":
+        name = query.get("id") or query.get("deviceid")
+    elif kind == "generic":
+        name = _first(query, "device", "id", "tid")
+    else:
+        name = query.get("device")
+    return _source(kind, name) if name else None
+
+
 FORMATS = {"owntracks": owntracks, "overland": overland, "osmand": osmand, "generic": generic}

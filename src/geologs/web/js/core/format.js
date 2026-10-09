@@ -26,6 +26,28 @@ export function clock(value) {
   return new Date(value).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", ...zoneOptions() });
 }
 
+// Time of day to the second, for raw samples.
+export function clockPrecise(value) {
+  return new Date(value).toLocaleTimeString([], {
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
+    ...zoneOptions(),
+  });
+}
+
+// "Thursday, October 8" for a YYYY-MM-DD date.
+export function dayTitle(value) {
+  const [year, month, day] = value.split("-").map(Number);
+  return new Intl.DateTimeFormat(undefined, { weekday: "long", month: "long", day: "numeric" }).format(
+    new Date(year, month - 1, day, 12),
+  );
+}
+
+export function plural(count, word, many = word + "s") {
+  return `${Number(count).toLocaleString()} ${count === 1 ? word : many}`;
+}
+
 export function durationText(minutes) {
   const total = Math.round(minutes || 0);
   if (total < 1) return "<1 min";

@@ -117,6 +117,10 @@
   background: var(--success);
   box-shadow: 0 0 0 3px var(--success-soft);
 }
+.health-dot.error {
+  background: var(--danger);
+  box-shadow: 0 0 0 3px var(--danger-soft);
+}
 .health-dot.warning {
   background: var(--warning);
   box-shadow: 0 0 0 3px var(--warning-soft);
@@ -128,4 +132,66 @@
   .card-head {
     flex-wrap: wrap;
   }
+}
+.empty-icon {
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  background: var(--surface-3);
+  color: var(--text-2);
+}
+.empty-icon svg {
+  width: 22px;
+  height: 22px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.callout > strong {
+  display: block;
+  color: var(--text);
+  font-size: 13.5px;
+}
+.callout > span {
+  display: block;
+  margin-top: 2px;
+}
+.callout > .button {
+  margin-top: 10px;
+}
+.callout.success {
+  border-color: color-mix(in srgb, var(--success) 25%, var(--border));
+  background: var(--success-soft);
+  color: color-mix(in srgb, var(--success) 75%, var(--text));
+}
+.callout.warning > strong {
+  color: inherit;
+}
+/* A friendly empty list: what will appear, and how to start. */
+.empty-block {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  margin: 4px 0;
+  padding: 22px 18px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--text-2);
+  font-size: 13px;
+  text-align: center;
+}
+.empty-block strong {
+  color: var(--text);
+  font-size: 14px;
+}
+.empty-block span {
+  max-width: 440px;
+}
+.empty-block .button {
+  margin-top: 8px;
 }
