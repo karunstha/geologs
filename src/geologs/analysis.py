@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .core import (MAX_CONNECTED_GAP_SECONDS, MAX_PLAUSIBLE_SPEED_MPS, MAX_SAMPLE_GAP_SECONDS, MOVEMENT_MODES,
-                   _label_place, classify_motion, is_excursion, label_at, mode_override_for, went_elsewhere_between, metres, name_matches,
+                   _label_place, classify_motion, is_excursion, is_home_place, label_at, place_in_zone, zone_at, mode_override_for, went_elsewhere_between, metres, name_matches,
                    nearby_places,
                    parse_time, place_for_coordinate,
                    places_provider_identity, reported_speed, search_text, street_key,
@@ -607,14 +607,7 @@ def merge_split_visits(rows, place_of, moves_between=None):
     return merged
 
 
-def _matching_place(lat, lon, places):
-    matches = [(metres(lat, lon, p["lat"], p["lon"]), p) for p in places]
-    matches = [(d, p) for d, p in matches if d <= p["radius_m"]]
-    return min(matches, key=lambda item: item[0])[1] if matches else None
-
-
-def _is_home_place(place):
-    return str(place.get("name") or place.get("display_name") or "").strip().casefold() in ("home", "my home")
+_is_home_place = is_home_place
 
 
 def stays(store, start=None, end=None, source=None, limit=500):
@@ -636,13 +629,16 @@ def stays(store, start=None, end=None, source=None, limit=500):
     places, labels, overrides = store.places(), store.place_labels(), store.mode_overrides()
     for row in rows:
         row["observed_minutes"] = round((datetime.fromisoformat(row["ended_at"]) - datetime.fromisoformat(row["started_at"])).total_seconds() / 60, 1)
-        # A name you pinned to this spot is the most specific statement about
-        # it, so it wins over a saved place that happens to cover it too.
+        # A saved place is a zone around the stay, not its name: a university
+        # holds many buildings. Only Home names what is inside it, and a name you
+        # pinned to this spot wins over that too.
         label = label_at(labels, row["lat"], row["lon"], row["source"], row["started_at"], row["ended_at"])
-        place = None if label else _matching_place(row["lat"], row["lon"], places)
+        zone = zone_at(places, row["lat"], row["lon"])
+        home = zone if zone and not label and _is_home_place(zone) else None
         row["label_id"] = label["id"] if label else None
-        row["place_id"] = place["id"] if place else None
-        row["place_name"] = label["name"] if label else place["name"] if place else None
+        row["zone_id"], row["zone_name"] = (zone["id"], zone["name"]) if zone else (None, None)
+        row["place_id"] = home["id"] if home else None
+        row["place_name"] = label["name"] if label else home["name"] if home else None
         if row.get("kind") == "area":
             override = mode_override_for(overrides, row["source"], "stay", row["started_at"], row["ended_at"])
             if override:
@@ -737,6 +733,8 @@ def place_patterns(store, limit=50, rows=None):
         cluster["visits"] = counts.get(index, 0)
         cluster["observed_minutes"] = round(cluster["observed_minutes"], 1)
         cluster["display_name"] = cluster["name"] or f"{cluster['lat']:.5f}, {cluster['lon']:.5f}"
+        zone = places.get(cluster["place_id"]) or zone_at(places.values(), cluster["lat"], cluster["lon"])
+        cluster["zone_id"], cluster["zone"] = (zone["id"], zone["name"]) if zone else (None, None)
     ordered = sorted(clusters, key=lambda c: (c["observed_minutes"], c["visits"]), reverse=True)
     return ordered if limit is None else ordered[:min(int(limit), 5000)], mapping
 
@@ -753,10 +751,10 @@ def resolve_place_patterns(store, patterns):
     Provider IDs are authoritative. Equal normalized names are also merged when
     their coordinates are within 2.5 km, which joins large parks and lakes while
     keeping distant branches of a chain separate. A place with no name, only a
-    street address, joins the nearest saved place or name correction on the
-    same street within ADDRESS_MERGE_M (indoor GPS drifted out of Home's
-    circle), else other address-only places there. Two saved places never
-    merge this way.
+    street address, joins Home or the nearest name correction on the same
+    street within ADDRESS_MERGE_M (indoor GPS drifted out of Home's circle),
+    else other address-only places there. Inside another saved place (a zone)
+    a place is named after the building it is in, else after the zone.
     """
     clusters, stay_mapping = patterns
     saved = {place["id"]: place for place in store.places(enrich=True)}
@@ -766,7 +764,8 @@ def resolve_place_patterns(store, patterns):
         place = saved.get(cluster["place_id"])
         label = labels.get(cluster.get("label_id"))
         found = (_label_place(label) if label else place if place
-                 else place_for_coordinate(store, cluster["lat"], cluster["lon"], cluster.get("extent_m")))
+                 else place_in_zone(store, cluster["lat"], cluster["lon"], saved.get(cluster.get("zone_id")),
+                                    cluster.get("extent_m"), lookup=place_for_coordinate))
         name = cluster.get("name") or found.get("name") or found.get("address") or ""
         categories = found.get("categories") if isinstance(found.get("categories"), list) else []
         category = found.get("category") or (categories[0] if categories else "")
@@ -859,6 +858,8 @@ def resolve_place_patterns(store, patterns):
                     item[field] = item.get(field) or place.get(field) or ""
             item["saved"] = item.get("saved") or place.get("saved")
             item["label_id"] = item.get("label_id") or place.get("label_id")
+            if not item.get("zone_id"):
+                item["zone_id"], item["zone"] = place.get("zone_id"), place.get("zone")
             item["categories"] = list(dict.fromkeys((item.get("categories") or []) + (place.get("categories") or [])))
             item["radius_m"] = max(item.get("radius_m") or 0, place.get("radius_m") or 0)
             activities = dict(item.get("activities") or {})
@@ -890,13 +891,25 @@ def visited_places(store, limit=500):
 
 
 def place_overview(store, limit=100):
-    """Visited places (without Home) and visit totals for every saved place (with Home), from one pass."""
-    clusters, _ = resolve_place_patterns(store, place_patterns(store, limit=None))
+    """Visited places (without Home) and visit totals for every saved place (with Home), from one pass.
+
+    A saved place is a zone, so its totals cover every place inside it: one
+    visit to campus is one visit however many buildings it took in.
+    """
+    rows = stays(store, limit=None)
+    clusters, mapping = resolve_place_patterns(store, place_patterns(store, limit=None, rows=rows))
+    by_cluster = {item["cluster_id"]: item for item in clusters}
+    # Home also owns indoor GPS drift that its place absorbed from down the street.
+    zone_of = {stay["id"]: by_cluster[mapping[stay["id"]]].get("place_id") or stay.get("zone_id") for stay in rows}
+    inside = [stay for stay in rows if zone_of[stay["id"]] is not None]
+    visits = _count_visits([(stay["id"], stay.get("previous_stay_id"), stay.get("went_elsewhere"), zone_of[stay["id"]])
+                            for stay in inside])
     saved = {}
-    for item in clusters:
-        if item.get("place_id") is not None:
-            saved[str(item["place_id"])] = {"visits": item["visits"], "observed_minutes": item["observed_minutes"],
-                                            "last_seen": item.get("last_seen")}
+    for stay in inside:
+        zone_id = zone_of[stay["id"]]
+        item = saved.setdefault(str(zone_id), {"visits": visits.get(zone_id, 0), "observed_minutes": 0, "last_seen": None})
+        item["observed_minutes"] = round(item["observed_minutes"] + stay["observed_minutes"], 1)
+        item["last_seen"] = max(item["last_seen"] or "", stay["ended_at"])
     return {"visited": [item for item in clusters if not _is_home_place(item)][:min(max(int(limit), 1), 5000)],
             "saved": saved}
 
@@ -924,7 +937,7 @@ def search_visits(store, query, start=None, end=None, limit=50, timezone_name=No
     matched = {}
     for cluster in clusters:
         words = " ".join(_search_text(value) for value in (
-            cluster.get("name"), cluster.get("display_name"), cluster.get("address"),
+            cluster.get("name"), cluster.get("display_name"), cluster.get("address"), cluster.get("zone"),
             cluster.get("category"), *(cluster.get("categories") or []))).split()
         # Word prefixes: "gas" finds "Gasoline", "lake" does not find "Blake Street".
         if all(any(word.startswith(term) for word in words) for term in terms):
@@ -941,12 +954,12 @@ def search_visits(store, query, start=None, end=None, limit=50, timezone_name=No
                        "departure": departure.isoformat(timespec="minutes"),
                        "observed_minutes": stay["observed_minutes"], "ongoing": bool(stay["ongoing"]),
                        "place": place["name"] or place["display_name"], "address": place.get("address") or "",
-                       "kind": stay["kind"], "activity": stay.get("activity"),
+                       "zone": place.get("zone"), "kind": stay["kind"], "activity": stay.get("activity"),
                        "lat": stay["lat"], "lon": stay["lon"], "source": stay["source"],
                        "stay_id": stay["id"], "started_at": stay["started_at"], "ended_at": stay["ended_at"]})
     visits.sort(key=lambda visit: visit["arrival"], reverse=True)
     places = [{"name": place["name"] or place["display_name"], "address": place.get("address") or "",
-               "category": place.get("category") or "", "visits": place["visits"],
+               "zone": place.get("zone"), "category": place.get("category") or "", "visits": place["visits"],
                "observed_minutes": place["observed_minutes"], "last_seen": place.get("last_seen"),
                "saved": bool(place.get("saved"))}
               for place in sorted(matched.values(), key=lambda item: item.get("last_seen") or "", reverse=True)]
@@ -1018,7 +1031,7 @@ def insights(store, limit=50):
     rows = stays(store, limit=None)
     patterns = resolve_place_patterns(store, place_patterns(store, limit=None, rows=rows))
     edges = transitions(store, limit=None, patterns=patterns, rows=rows)
-    unlabeled = [p for p in patterns[0] if p["place_id"] is None and not p.get("label_id")][:limit]
+    unlabeled = [p for p in patterns[0] if p["place_id"] is None and not p.get("label_id") and p.get("zone_id") is None][:limit]
     return {"frequent_places": patterns[0][:limit],
             "unlabeled_places": unlabeled,
             "transitions": edges[:limit],
@@ -1085,7 +1098,7 @@ def day_summary(store, date, timezone_name="UTC", source=None):
     end = (day_end - timedelta(microseconds=1)).isoformat()
     # Switching the places provider in Settings re-resolves every day's names.
     provider = places_provider_identity(store)
-    cache_identity = json.dumps(["day-v12", date, timezone_name, source, provider], separators=(",", ":"))
+    cache_identity = json.dumps(["day-v13", date, timezone_name, source, provider], separators=(",", ":"))
     cache_key = "day:" + hashlib.sha256(cache_identity.encode()).hexdigest()
     watermark = store.analysis_watermark(start, end, source)
     cached = store.cached_analysis(cache_key, watermark)
@@ -1123,6 +1136,7 @@ def day_summary(store, date, timezone_name="UTC", source=None):
         stay["display_name"] = place["name"] or place["display_name"]
         stay["category"] = place.get("category") or ""
         stay["provider_place_id"] = place.get("provider_place_id") or ""
+        stay["zone"] = place.get("zone")
     chronological = list(reversed(store.timeline(start, end, source=source, limit=None)))
     stay_labels = {stay["id"]: by_cluster[mapping[stay["id"]]]["name"] or by_cluster[mapping[stay["id"]]]["display_name"]
                    for stay in day_stays}
@@ -1135,7 +1149,7 @@ def day_summary(store, date, timezone_name="UTC", source=None):
         for before, trip, after in zip(sequence, sequence[1:], sequence[2:]):
             if trip["mode"] == "cycling" and not trip.get("mode_corrected") and before["mode"] == after["mode"] == "driving":
                 trip.update(mode="driving", modes={"driving": sum(trip["modes"].values())}, mode_from_context=True)
-    kept_trips, internal_moves, saved_places, saved_labels = [], {}, store.places(), store.place_labels()
+    kept_trips, internal_moves, saved_places = [], {}, store.places()
     for trip in trips:
         trip["from_name"] = stay_labels.get(trip["from_stay_id"], trip.get("from_name"))
         trip["to_name"] = stay_labels.get(trip["to_stay_id"], trip.get("to_name"))
@@ -1164,10 +1178,9 @@ def day_summary(store, date, timezone_name="UTC", source=None):
             # Say where a round trip went, so Home -> Home reads as an errand, not a glitch.
             turnaround = trip.get("turnaround")
             if turnaround and turnaround["stop_minutes"]:
-                saved = (label_at(saved_labels, turnaround["lat"], turnaround["lon"])
-                         or _matching_place(turnaround["lat"], turnaround["lon"], saved_places))
-                turnaround["name"] = (saved["name"] if saved else
-                                      place_for_coordinate(store, turnaround["lat"], turnaround["lon"]).get("name") or None)
+                turnaround["name"] = place_in_zone(store, turnaround["lat"], turnaround["lon"],
+                                                   zone_at(saved_places, turnaround["lat"], turnaround["lon"]),
+                                                   lookup=place_for_coordinate).get("name") or None
         kept_trips.append(trip)
     trips = kept_trips
     day_stays = merge_split_visits(day_stays, lambda stay: stay.get("cluster_id"), internal_moves)
@@ -1292,7 +1305,7 @@ def daily_overview(store, date, timezone_name=None, source=None):
     reminders_active_at_end = store.reminders_active_at(end)
     places = [{"name": place.get("name") or place.get("display_name"),
                "address": place.get("address") or "", "home": _is_home_place(place),
-               "category": place.get("category") or "",
+               "zone": place.get("zone"), "category": place.get("category") or "",
                "provider_place_id": place.get("provider_place_id") or "",
                "lat": place["lat"], "lon": place["lon"],
                "visits": place["visits"], "observed_minutes": place["observed_minutes"],
@@ -1316,7 +1329,7 @@ def daily_overview(store, date, timezone_name=None, source=None):
                       "round_trip": bool(trip.get("loop")), "via": (trip.get("turnaround") or {}).get("name") if trip.get("loop") else None,
                       "mode_corrected": bool(trip.get("mode_corrected")),
                       "coverage_complete": trip["coverage_complete"]})
-    visits = [{"place": stay.get("display_name") or stay.get("place_name"),
+    visits = [{"place": stay.get("display_name") or stay.get("place_name"), "zone": stay.get("zone"),
                "arrival": stay["started_at"], "departure": stay["ended_at"],
                "observed_minutes": stay["observed_minutes"], "kind": stay["kind"],
                "activity": stay.get("activity"),
@@ -1324,6 +1337,16 @@ def daily_overview(store, date, timezone_name=None, source=None):
                "moved_within": [{"mode": move["mode"], "distance_km": move["distance_km"]} for move in stay["internal_moves"]],
                "ongoing": bool(stay["ongoing"])}
               for stay in day["stays"]]
+    # Saved places are zones: time inside each one, across the places in it.
+    zones = {}
+    for visit in visits:
+        if visit["zone"]:
+            item = zones.setdefault(visit["zone"], {"name": visit["zone"], "observed_minutes": 0.0, "places": []})
+            item["observed_minutes"] += visit["observed_minutes"]
+            if visit["place"] not in item["places"]:
+                item["places"].append(visit["place"])
+    zones = [{**item, "observed_minutes": round(item["observed_minutes"], 1)} for item in zones.values()
+             if any(place != item["name"] for place in item["places"])]
     home_return = _home_return(store, day_start, day_end, source)
     if home_return:
         home_return["summary"] = _home_return_text(home_return, zone)
@@ -1343,10 +1366,10 @@ def daily_overview(store, date, timezone_name=None, source=None):
                 + f"{len(reminder_events)} reminders triggered; {day['points']} raw fixes.")
     if home_return:
         overview += " " + home_return["summary"]
-    value = {"schema_version": 6, "date": date, "timezone": timezone_name, "source": source,
+    value = {"schema_version": 7, "date": date, "timezone": timezone_name, "source": source,
              "overview": overview, "totals": totals, "activity_counts": day["activity_counts"],
              "activity_totals": day["activity_totals"], "visits": visits,
-             "places": places, "trips": trips, "reminders_created": reminders_created,
+             "places": places, "zones": zones, "trips": trips, "reminders_created": reminders_created,
              "reminders_triggered": reminder_events, "reminders_cancelled": reminders_cancelled,
              "active_reminders_at_end": reminders_active_at_end, "first_fix": day["first_fix"],
              "last_fix": day["last_fix"], "coverage_gaps": day["coverage_gaps"], "coverage_note": day["coverage_note"],
@@ -1425,6 +1448,8 @@ def daily_brief(overview):
         else:
             span = f"{clock(arrival)}-{clock(departure)}"
         text = f"{span} at {visit['place'] or 'an unnamed place'}"
+        if visit.get("zone") and visit["zone"] != visit["place"]:
+            text += f" ({visit['zone']})"
         if visit.get("activity"):
             text += ", " + (_brief_move(visit["activity"], visit["distance_km"]) if visit.get("distance_km")
                             else visit["activity"])
@@ -1455,7 +1480,10 @@ def daily_brief(overview):
         category = (place.get("category") or "").split(",")[0].rsplit(".", 1)[-1].replace("_", " ")
         if category.lower() in name.lower():
             category = ""
-        details = [item for item in (category, place["address"] if place["address"] != name else "") if item]
+        zone_name = place.get("zone") if place.get("zone") != name else ""
+        if category and category.lower() in (zone_name or "").lower():
+            category = ""
+        details = [item for item in (zone_name, category, place["address"] if place["address"] != name else "") if item]
         text = name + (f" ({', '.join(details)})" if details else "") + ": " + _brief_duration(place["observed_minutes"])
         if place["visits"] > 1:
             text += f" over {place['visits']} visits"
@@ -1467,6 +1495,9 @@ def daily_brief(overview):
         places.append(text)
     if places:
         brief["places"] = places
+    if overview.get("zones"):
+        brief["zones"] = [f"{item['name']}: {_brief_duration(item['observed_minutes'])} at {', '.join(item['places'])}"
+                          for item in overview["zones"]]
     if overview["reminders_created"]:
         brief["reminders_set"] = [reminder(item, "created_at") for item in overview["reminders_created"]]
     if overview["reminders_triggered"]:

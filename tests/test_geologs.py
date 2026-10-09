@@ -521,7 +521,7 @@ class StoreTests(unittest.TestCase):
         self.assertEqual([place["name"] for place in day["visited_places"]], ["Campus"])
         self.assertEqual({place["name"] for place in day["places_including_home"]}, {"Home", "Campus"})
         summary = daily_overview(self.store, "2026-09-25", "UTC")
-        self.assertEqual(summary["schema_version"], 6)
+        self.assertEqual(summary["schema_version"], 7)
         self.assertEqual({place["name"] for place in summary["places"]}, {"Home", "Campus"})
         self.assertEqual((summary["totals"]["trips"], summary["trips"][0]["from"], summary["trips"][0]["to"]),
                          (1, "Home", "Campus"))
@@ -902,7 +902,9 @@ class StoreTests(unittest.TestCase):
         place = self.store.save_place({"name": "University", "lat": 41, "lon": -87.9})
         self.assertEqual(self.store.place_visits(place["id"])["total_observed_minutes"], 64)
         ranked = visited_places(self.store)
-        self.assertEqual((ranked[0]["display_name"], ranked[0]["saved"], ranked[0]["visits"]), ("University", True, 4))
+        # A saved place is a zone: with nothing named right there, the place inside is known by the zone's name.
+        self.assertEqual((ranked[0]["display_name"], ranked[0]["zone"], ranked[0]["saved"], ranked[0]["visits"]),
+                         ("University", "University", False, 4))
         self.assertGreater(ranked[0]["observed_minutes"], ranked[1]["observed_minutes"])
         insight = insights(self.store)
         self.assertEqual(insight["unlabeled_places"][0]["visits"], 3)
@@ -1471,10 +1473,73 @@ class StoreTests(unittest.TestCase):
         self.store.save_place_label({"name": "Ottenheimer Library", "lat": CAMPUS[0], "lon": CAMPUS[1]})
         day, _found, _overview = self.campus_day([still(CAMPUS, 60), line(CAMPUS, shifted(LAB, 0, 3000), 8),
                                                    line(shifted(LAB, 0, 3000), LAB, 8), still(LAB, 40)])
-        self.assertEqual([stay["display_name"] for stay in day["stays"]], ["Home Street", "Ottenheimer Library", "Campus", "Home Street"])
+        # The saved Campus is a zone: the lab is named by the provider, and keeps the zone.
+        self.assertEqual([(stay["display_name"], stay["zone"]) for stay in day["stays"]],
+                         [("Home Street", None), ("Ottenheimer Library", "Campus"), ("University", "Campus"), ("Home Street", None)])
         latest = {"source": "phone", "timestamp": datetime.now(timezone.utc).isoformat(), "lat": CAMPUS[0], "lon": CAMPUS[1]}
         self.store.ingest(latest)
         self.assertEqual(current_location(self.store)["place_name"], "Ottenheimer Library")
+
+    def buildings_lookup(self, buildings):
+        """A provider that knows named buildings at their own coordinates, and only addresses elsewhere."""
+        from geologs.core import metres
+        def lookup(_store, lat, lon, _radius=None):
+            name, spot = min(buildings.items(), key=lambda item: metres(lat, lon, *item[1]))
+            return {"name": name, "named": True, "address": f"{name} address", "category": "", "categories": [],
+                    "provider_place_id": name, "place_lat": spot[0], "place_lon": spot[1]}
+        return lookup
+
+    def test_saved_place_is_a_zone_holding_the_buildings_visited_inside_it(self):
+        university = self.store.save_place({"name": "University", "lat": CAMPUS[0], "lon": CAMPUS[1], "radius_m": 600})
+        self.store.ingest(minute_fixes([still(HOME, 30), line(HOME, CAMPUS, 12), still(CAMPUS, 90), line(CAMPUS, LAB, 7),
+                                        still(LAB, 80), line(LAB, HOME, 12), still(HOME, 30)]))
+        lookup = self.buildings_lookup({"Engineering Hall": shifted(CAMPUS, 10, 5), "Library": shifted(LAB, -8, 0),
+                                        "Home Street": HOME})
+        with patch("geologs.analysis.place_for_coordinate", side_effect=lookup):
+            day = day_summary(self.store, "2026-09-27", "UTC")
+            overview = daily_overview(self.store, "2026-09-27", "UTC")
+            places = place_overview(self.store)
+            found = search_visits(self.store, "university", timezone_name="UTC")
+        self.assertEqual([(stay["display_name"], stay["zone"]) for stay in day["stays"]],
+                         [("Home Street", None), ("Engineering Hall", "University"), ("Library", "University"), ("Home Street", None)])
+        self.assertEqual([trip["mode"] for trip in day["trips"] if trip["from_name"] == "Engineering Hall"], ["walking"])
+        # Totals for the saved place cover the whole campus: one visit, both buildings.
+        self.assertEqual(places["saved"][str(university["id"])]["visits"], 1)
+        self.assertEqual(places["saved"][str(university["id"])]["observed_minutes"], 170)
+        self.assertEqual(overview["zones"], [{"name": "University", "observed_minutes": 170.0,
+                                              "places": ["Engineering Hall", "Library"]}])
+        brief = daily_brief(overview)
+        self.assertEqual(brief["timeline"][2:5], ["13:41-15:11 at Engineering Hall (University)",
+                                                  "15:11-15:18 walked 0.4 km from Engineering Hall to Library",
+                                                  "15:18-16:38 at Library (University)"])
+        self.assertEqual(brief["zones"], ["University: 2 h 50 min at Engineering Hall, Library"])
+        self.assertEqual(sorted(place["name"] for place in found["places"]), ["Engineering Hall", "Library"])
+        self.assertEqual({visit["zone"] for visit in found["visits"]}, {"University"})
+        # One visit to the zone, walking between buildings included.
+        self.assertEqual(self.store.place_visits(university["id"])["total_observed_minutes"], 177)
+
+    def test_a_named_place_down_the_street_does_not_name_a_spot_inside_a_zone(self):
+        house = shifted(HOME, 4000, 0)
+        self.store.save_place({"name": "Mom's house", "lat": house[0], "lon": house[1], "radius_m": 150})
+        self.store.ingest(minute_fixes([still(HOME, 30), line(HOME, house, 10), still(house, 60), line(house, HOME, 10), still(HOME, 30)]))
+        # The provider's nearest named place is a shop 120 m away: fine for a stranger's
+        # street, wrong inside a zone you saved, so the zone names it.
+        lookup = self.buildings_lookup({"Corner Shop": shifted(house, 120, 0), "Home Street": HOME})
+        with patch("geologs.analysis.place_for_coordinate", side_effect=lookup):
+            day = day_summary(self.store, "2026-09-27", "UTC")
+        self.assertEqual([stay["display_name"] for stay in day["stays"]], ["Home Street", "Mom's house", "Home Street"])
+
+    def test_home_names_everything_inside_it(self):
+        self.store.save_place({"name": "Home", "lat": HOME[0], "lon": HOME[1]})
+        self.store.ingest(minute_fixes([still(HOME, 60)]))
+        lookup = self.buildings_lookup({"Neighbour's Bakery": shifted(HOME, 15, 0)})
+        with patch("geologs.analysis.place_for_coordinate", side_effect=lookup):
+            day = day_summary(self.store, "2026-09-27", "UTC")
+        self.assertEqual([(stay["display_name"], stay["zone"]) for stay in day["stays"]], [("Home", "Home")])
+        latest = {"source": "phone", "timestamp": datetime.now(timezone.utc).isoformat(), "lat": HOME[0], "lon": HOME[1]}
+        self.store.ingest(latest)
+        current = current_location(self.store)
+        self.assertEqual((current["place_name"], current["zone"]), ("Home", "Home"))
 
     def test_deleting_a_saved_place_keeps_reminders_that_use_it(self):
         unused = self.store.save_place({"name": "Gym", "lat": 41.1, "lon": -87.9})
@@ -1763,6 +1828,134 @@ def process_stays_rebuild(store):
     from geologs.analysis import process_stays
     process_stays(store, rebuild=True)
     store.db.commit()
+
+
+class IngestTests(unittest.TestCase):
+    """Tracking apps posting to a running server, each in its own format."""
+
+    def setUp(self):
+        import threading
+        from http.server import ThreadingHTTPServer
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db = str(Path(self.tmp.name) / "ingest.db")
+        self.env = patch.dict(os.environ, {"GEOLOGS_DB": self.db, "GEOLOGS_TOKEN": "main-token",
+                                           "GEOLOGS_INGEST_TOKEN": "phone-token"})
+        self.env.start()
+        for name in ("GEOLOGS_DATABASE_URL", "GEOLOGS_TOKEN_FILE", "GEOLOGS_WEBHOOK_URL"):
+            os.environ.pop(name, None)
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.env.stop()
+        self.tmp.cleanup()
+
+    def send(self, method, path, body=None, headers=None, form=False):
+        import http.client
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.server_address[1], timeout=10)
+        if isinstance(body, (dict, list)):
+            body = json.dumps(body).encode()
+            headers = {"Content-Type": "application/json", **(headers or {})}
+        elif form:
+            headers = {"Content-Type": "application/x-www-form-urlencoded", **(headers or {})}
+        connection.request(method, path, body=body, headers=headers or {})
+        response = connection.getresponse()
+        data = response.read()
+        connection.close()
+        return response.status, json.loads(data) if data else None, response
+
+    def points(self):
+        store = Store(self.db)
+        try:
+            return store.points(limit=None)
+        finally:
+            store.close()
+
+    def test_owntracks_http_mode_with_basic_auth_and_queued_fixes(self):
+        basic = {"Authorization": "Basic " + __import__("base64").b64encode(b"karun:phone-token").decode(),
+                 "X-Limit-U": "karun", "X-Limit-D": "pixel"}
+        an_hour_ago = int((datetime.now(timezone.utc) - timedelta(hours=1)).timestamp())
+        store = Store(self.db)
+        place = store.save_place({"name": "Market", "lat": 41.0, "lon": -87.9})
+        store.create_reminder({"text": "Buy salt", "place_id": place["id"]})
+        store.close()
+        # A fix queued while the phone was offline arrives an hour late, with its own time.
+        fix = {"_type": "location", "lat": 41.0, "lon": -87.9, "tst": an_hour_ago, "acc": 12, "vel": 36, "tid": "px",
+               "created_at": an_hour_ago + 3600}
+        status, reply, _ = self.send("POST", "/api/ingest/owntracks", fix, basic)
+        self.assertEqual((status, reply), (200, []))
+        self.assertEqual(self.send("POST", "/api/ingest/owntracks", fix, basic)[:2], (200, []))  # a retry
+        [point] = self.points()
+        self.assertEqual((point["source"], point["external_id"], point["accuracy_m"]), ("owntracks:karun/pixel", str(an_hour_ago), 12))
+        self.assertEqual(datetime.fromisoformat(point["timestamp"]).timestamp(), an_hour_ago)
+        store = Store(self.db)
+        self.assertEqual(store.events(), [])  # too late to announce an arrival
+        self.assertAlmostEqual(store.observations()[0]["speed_mps"], 10, places=3)  # 36 km/h
+        store.close()
+        # Other message types, and an empty body, are acknowledged and ignored.
+        self.assertEqual(self.send("POST", "/api/ingest/owntracks", {"_type": "transition", "event": "enter"}, basic)[:2], (200, []))
+        self.assertEqual(self.send("POST", "/api/ingest/owntracks", b"", basic)[:2], (200, []))
+        self.assertEqual(self.send("POST", "/api/ingest/owntracks", {"_type": "encrypted", "data": "x"}, basic)[0], 400)
+        # Without X-Limit headers, the topic names the device.
+        self.send("POST", "/api/ingest/owntracks", {**fix, "tst": an_hour_ago + 60, "topic": "owntracks/karun/ipad"}, {"Authorization": basic["Authorization"]})
+        self.assertIn("owntracks:karun/ipad", {point["source"] for point in self.points()})
+        wrong = {"Authorization": "Basic " + __import__("base64").b64encode(b"karun:nope").decode()}
+        status, _, response = self.send("POST", "/api/ingest/owntracks", fix, wrong)
+        self.assertEqual((status, response.getheader("WWW-Authenticate")), (401, 'Basic realm="GeoLogs"'))
+
+    def test_overland_batch_skips_bad_points_and_answers_ok(self):
+        feature = lambda lon, lat, when, speed=-1: {"type": "Feature", "geometry": {"type": "Point", "coordinates": [lon, lat]},
+                                                      "properties": {"timestamp": when, "horizontal_accuracy": 8, "speed": speed,
+                                                                     "device_id": "iphone"}}
+        batch = {"locations": [feature(-87.9, 41.0, "2026-09-27T13:00:00Z", 1.5), feature(-87.9, 41.001, "2026-09-27T13:01:00Z"),
+                               feature(-87.9, 95.0, "2026-09-27T13:02:00Z"), {"type": "Feature"}]}
+        status, reply, _ = self.send("POST", "/api/ingest/overland?token=phone-token", batch)
+        self.assertEqual((status, reply), (200, {"result": "ok"}))
+        stored = sorted(self.points(), key=lambda point: point["timestamp"])
+        self.assertEqual([(point["source"], point["lat"]) for point in stored], [("overland:iphone", 41.0), ("overland:iphone", 41.001)])
+        self.assertEqual(self.send("POST", "/api/ingest/overland?token=phone-token", {"nope": 1})[0], 400)
+
+    def test_osmand_protocol_from_traccar_client(self):
+        when = int(datetime(2026, 9, 27, 13, tzinfo=timezone.utc).timestamp())
+        status, _, _ = self.send("GET", f"/api/ingest/osmand?id=pixel&lat=41&lon=-87.9&timestamp={when}&speed=10&accuracy=5&token=phone-token")
+        self.assertEqual(status, 200)
+        # Traccar Client 9 posts JSON, speed already in m/s.
+        body = {"device_id": "pixel", "location": {"timestamp": "2026-09-27T13:01:00Z",
+                                                   "coords": {"latitude": 41.001, "longitude": -87.9, "accuracy": 6, "speed": 2}}}
+        self.assertEqual(self.send("POST", "/api/ingest/osmand?token=phone-token", body)[0], 200)
+        store = Store(self.db)
+        speeds = {row["lat"]: row["speed_mps"] for row in store.observations(limit=None)}
+        store.close()
+        self.assertEqual({point["source"] for point in self.points()}, {"osmand:pixel"})
+        self.assertAlmostEqual(speeds[41.0], 5.14444, places=4)  # 10 knots
+
+    def test_generic_form_query_and_json(self):
+        headers = {"Authorization": "Bearer phone-token"}
+        form = b"lat=41&lon=-87.9&timestamp=1790514000000&accuracy=7&speed_kmh=18&device=tasker"
+        status, reply, _ = self.send("POST", "/api/ingest/generic", form, headers, form=True)
+        self.assertEqual((status, reply), (200, {"inserted": 1, "duplicates": 0, "skipped": 0}))
+        status, reply, _ = self.send("POST", "/api/ingest/generic?source=shortcut", [
+            {"latitude": 41.001, "longitude": -87.9, "time": "2026-09-27T13:05:00-05:00"}, {"latitude": "x"}], headers)
+        self.assertEqual(reply, {"inserted": 1, "duplicates": 0, "skipped": 1})
+        stored = {point["source"]: point for point in self.points()}
+        self.assertEqual(set(stored), {"generic:tasker", "shortcut"})
+        self.assertEqual(stored["generic:tasker"]["timestamp"], "2026-09-27T13:00:00+00:00")  # epoch milliseconds
+        self.assertEqual(self.send("POST", "/api/ingest/nmea", {}, headers)[0], 404)
+
+    def test_ingest_token_can_send_locations_but_not_read_them(self):
+        phone = {"Authorization": "Bearer phone-token"}
+        status, reply, _ = self.send("POST", "/api/points", {"source": "phone", "lat": 41, "lon": -87.9,
+                                                             "timestamp": "2026-09-27T13:00:00Z"}, phone)
+        self.assertEqual((status, reply["inserted"]), (200, 1))
+        self.assertEqual(self.send("GET", "/api/points", headers=phone)[0], 401)
+        self.assertEqual(self.send("GET", "/api/current?token=phone-token")[0], 401)
+        self.assertEqual(self.send("POST", "/api/settings", {"timezone": "UTC"}, phone)[0], 401)
+        self.assertEqual(self.send("GET", "/api/points", headers={"Authorization": "Bearer main-token"})[0], 200)
+        # The main token works for senders as well.
+        self.assertEqual(self.send("GET", "/api/ingest/osmand?id=x&lat=41&lon=-87.9&token=main-token")[0], 200)
+        self.assertEqual(self.send("GET", "/api/ingest/osmand?id=x&lat=41&lon=-87.9")[0], 401)
 
 
 if __name__ == "__main__":

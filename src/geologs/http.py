@@ -1,4 +1,6 @@
 """Local dashboard/API and stateless MCP Streamable HTTP transport."""
+import base64
+import binascii
 import json
 import hmac
 import os
@@ -11,6 +13,8 @@ from importlib.resources import files
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from .ingest import FORMATS as INGEST_FORMATS
+
 from .core import PLACES_PROVIDERS, Store, configured_places_providers, current_location, deliver_webhook, geocode, nearby_places, places_provider, reverse_geocode
 from .analysis import daily_briefs, daily_overview, day_summary, finalize_previous_day, insights, place_overview, stored_daily_record, place_patterns, predict_next, resolve_place_patterns, search_visits, stays, transitions, visited_places
 from .mcp import SUPPORTED_VERSIONS, dispatch
@@ -19,23 +23,37 @@ from .postgres import INTEGRITY_ERRORS
 DB_INPUT_ERRORS = (ValueError, KeyError, TypeError, sqlite3.IntegrityError) + INTEGRITY_ERRORS
 
 
+def _token_file_value(path, name):
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        if "=" not in line or line.lstrip().startswith("#"):
+            continue
+        key, value = line.split("=", 1)
+        if key.strip() == name:
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+                value = value[1:-1]
+            return value
+    return None
+
+
 def active_token():
     """Read the mounted local token file so edits take effect without a rebuild."""
     path = os.environ.get("GEOLOGS_TOKEN_FILE")
     if not path:
         return os.environ.get("GEOLOGS_TOKEN", "")
-    for line in Path(path).read_text(encoding="utf-8").splitlines():
-        if "=" not in line or line.lstrip().startswith("#"):
-            continue
-        key, value = line.split("=", 1)
-        if key.strip() == "GEOLOGS_TOKEN":
-            value = value.strip()
-            if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
-                value = value[1:-1]
-            if not value:
-                raise RuntimeError("GEOLOGS_TOKEN_FILE has an empty token")
-            return value
-    raise RuntimeError("GEOLOGS_TOKEN_FILE has no GEOLOGS_TOKEN")
+    value = _token_file_value(path, "GEOLOGS_TOKEN")
+    if value is None:
+        raise RuntimeError("GEOLOGS_TOKEN_FILE has no GEOLOGS_TOKEN")
+    if not value:
+        raise RuntimeError("GEOLOGS_TOKEN_FILE has an empty token")
+    return value
+
+
+def ingest_token():
+    """An optional token that can only send locations: safe to keep on a phone."""
+    path = os.environ.get("GEOLOGS_TOKEN_FILE")
+    value = _token_file_value(path, "GEOLOGS_INGEST_TOKEN") if path else None
+    return value if value is not None else os.environ.get("GEOLOGS_INGEST_TOKEN", "")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -119,6 +137,76 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(origin)
         return parsed.netloc == self.headers.get("Host") and parsed.scheme in ("http", "https")
 
+    def ingest_authorized(self, query):
+        """Tracking apps authenticate however they can: a bearer header, the password
+        of HTTP Basic auth (OwnTracks), or ?token= in the URL (Overland, Traccar Client,
+        GPSLogger). Either the main token or the ingest-only token is accepted."""
+        main, ingest = active_token(), ingest_token()
+        if not main and not ingest:
+            return True
+        if main and self.authorized():
+            return True
+        supplied = []
+        header = self.headers.get("Authorization", "")
+        if header.startswith("Bearer "):
+            supplied.append(header[7:])
+        elif header.startswith("Basic "):
+            try:
+                supplied.append(base64.b64decode(header[6:], validate=True).decode().partition(":")[2])
+            except (binascii.Error, UnicodeDecodeError):
+                pass
+        if query.get("token"):
+            supplied.append(query["token"])
+        return any(secrets.compare_digest(value, token) for value in supplied for token in (main, ingest) if token)
+
+    def receive_locations(self, kind, query):
+        """POST/GET /api/ingest/<format>: points from a tracking app, answered the way it expects."""
+        if not self.ingest_authorized(query):
+            self.close_connection = True
+            self.send_json(401, {"error": "token required"}, {"WWW-Authenticate": 'Basic realm="GeoLogs"'})
+            return
+        if not self.safe_origin():
+            self.close_connection = True
+            self.error_json(403, "cross-origin request denied"); return
+        adapter = INGEST_FORMATS.get(kind)
+        if adapter is None:
+            self.error_json(404, "unknown format; use one of: " + ", ".join(INGEST_FORMATS)); return
+        try:
+            length = int(self.headers.get("Content-Length", 0) or 0)
+        except ValueError:
+            length = -1
+        if not 0 <= length <= 2_000_000:
+            self.close_connection = True
+            self.error_json(413 if length > 0 else 400, "invalid request size"); return
+        body = self.rfile.read(length) if length else b""
+        content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        try:
+            if not body.strip():
+                payload = None
+            elif content_type == "application/x-www-form-urlencoded":
+                payload = {key: value[0] for key, value in parse_qs(body.decode()).items()}
+            else:
+                payload = json.loads(body)
+            points, skipped, reply = adapter(payload, query, self.headers)
+        except (ValueError, UnicodeDecodeError, AttributeError) as exc:
+            self.error_json(400, str(exc) if isinstance(exc, ValueError) else "invalid request body"); return
+        store = Store()
+        try:
+            inserted = duplicates = 0
+            for start in range(0, len(points), 1000):
+                result = store.ingest(points[start:start + 1000])
+                inserted += result["inserted"]
+                duplicates += result["duplicates"]
+                deliver_webhook(store, result["events"])
+        except DB_INPUT_ERRORS as exc:
+            self.error_json(400, str(exc)); return
+        except Exception as exc:
+            self.error_json(502, str(exc)); return
+        finally:
+            store.close()
+        self.send_json(200, reply if reply is not None else
+                       {"inserted": inserted, "duplicates": duplicates, "skipped": skipped})
+
     def guarded(self):
         if not self.authorized():
             if self.command == "POST":
@@ -149,6 +237,9 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/mcp":
             if self.guarded():
                 self.send_empty(405, {"Allow": "POST"})
+            return
+        if url.path.startswith("/api/ingest/"):
+            self.receive_locations(url.path[len("/api/ingest/"):], {key: value[0] for key, value in parse_qs(url.query).items()})
             return
         if not self.guarded():
             return
@@ -205,7 +296,11 @@ class Handler(BaseHTTPRequestHandler):
             store.close()
 
     def do_POST(self):
-        path = urlparse(self.path).path
+        url = urlparse(self.path)
+        path = url.path
+        if path.startswith("/api/ingest/"):
+            self.receive_locations(path[len("/api/ingest/"):], {key: value[0] for key, value in parse_qs(url.query).items()})
+            return
         if path == "/api/session":
             if not self.safe_origin():
                 self.error_json(403, "cross-origin request denied"); return
@@ -225,7 +320,12 @@ class Handler(BaseHTTPRequestHandler):
             cookie = self.session_cookie(self.session_value(configured), 30 * 86400) if configured else self.session_cookie("", 0)
             self.send_json(200, {"ok": True}, {"Set-Cookie": cookie})
             return
-        if not self.guarded():
+        # Location senders may post native points with the ingest-only token too.
+        sender = path == "/api/points" and self.ingest_authorized({key: value[0] for key, value in parse_qs(url.query).items()})
+        if sender and not self.safe_origin():
+            self.close_connection = True
+            self.error_json(403, "cross-origin request denied"); return
+        if not sender and not self.guarded():
             return
         if path == "/mcp" and not self.mcp_headers_valid():
             return

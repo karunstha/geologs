@@ -819,7 +819,7 @@ class Store:
         # stale when the return is recorded after midnight.
         context_start = home_context_start or start
         context_end = home_context_end or end
-        value = ["stay-trips-v9", modes, self.analysis_watermark(start, end, source),
+        value = ["stay-trips-v10", modes, self.analysis_watermark(start, end, source),
                  self.analysis_watermark(context_start, context_end, source),
                  event_row["count"], event_row["max_id"], places, reminders, labels]
         return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
@@ -1391,12 +1391,13 @@ class Store:
             raise ValueError("place not found")
         from .analysis import merge_split_visits, stays
         # Merge over every stay so each went_elsewhere flag meets the stay it refers to.
-        merged = merge_split_visits(list(reversed(stays(self, start, end, limit=None))), lambda s: s["place_id"])
+        # A saved place is a zone: a visit is time anywhere inside it, across its buildings.
+        merged = merge_split_visits(list(reversed(stays(self, start, end, limit=None))), lambda s: s["zone_id"])
         visits = [{"arrival": s["started_at"], "departure": s["ended_at"],
                    "observed_minutes": s["observed_minutes"], "points": s["point_count"],
                    "ongoing": bool(s["ongoing"]), "source": s["source"],
                    "kind": s["kind"], "activity": s["activity"]}
-                  for s in reversed(merged) if s["place_id"] == int(place_id)]
+                  for s in reversed(merged) if s["zone_id"] == int(place_id)]
         return {"place": dict(place), "visits": visits, "total_observed_minutes": round(sum(v["observed_minutes"] for v in visits), 1)}
 
     def near(self, lat, lon, radius_m=250, start=None, end=None, limit=100, source=None):
@@ -1565,6 +1566,8 @@ SKIPPED_PLACE_SUFFIXES = (".atm", ".vending_machine", ".charging_station", ".bic
 # the smallest radius that covers its extent; 150 m covers a big-box store
 # seen from its parking lot. Buckets keep the reverse cache reusable.
 NEAREST_PLACE_RADII_M = (150, 300, 600, 1000)
+# Inside a saved zone, a named place this close (or within the stay's extent) names the stay.
+ZONE_PLACE_REACH_M = 60
 PHOTON_UNNAMED_KEYS = ("highway", "boundary", "place", "railway", "landuse", "waterway", "power")
 
 
@@ -1843,7 +1846,9 @@ def _photon_lookup(lat, lon, radius):
     features, named = _photon_features(lat, lon, radius)
     feature = named[0] if named else (features[0] if features else None)
     value = photon_result(feature) if feature else {"name": "Unknown place", "place_name": "", "address": ""}
-    if not named:
+    if named:
+        value["place_lat"], value["place_lon"] = value["lat"], value["lon"]
+    else:
         value["place_name"] = ""
     kind = "place" if named else (feature or {}).get("properties", {}).get("type")
     return {**value, "name": value.get("place_name") or value.get("address") or "Unknown place",
@@ -2060,9 +2065,49 @@ def place_for_coordinate(store, lat, lon, radius_m=None):
                 "address": str(value.get("address") or "")[:300],
                 "category": str(value.get("category") or "")[:160],
                 "categories": value.get("categories") if isinstance(value.get("categories"), list) else [],
-                "provider_place_id": str(value.get("provider_place_id") or "")[:300]}
+                "provider_place_id": str(value.get("provider_place_id") or "")[:300],
+                "place_lat": value.get("place_lat"), "place_lon": value.get("place_lon")}
     except (ValueError, OSError, KeyError):
         return {"name": "", "named": False, "address": "", "category": "", "categories": [], "provider_place_id": ""}
+
+
+def is_home_place(place):
+    return str(place.get("name") or place.get("display_name") or "").strip().casefold() in ("home", "my home")
+
+
+def zone_at(places, lat, lon):
+    """The saved place whose circle covers a position, nearest centre first."""
+    matches = [(metres(lat, lon, place["lat"], place["lon"]), place) for place in places]
+    matches = [(distance, place) for distance, place in matches if distance <= place["radius_m"]]
+    return min(matches, key=lambda item: item[0])[1] if matches else None
+
+
+def saved_place_as_found(place):
+    return {"name": place["name"], "named": True, "address": place.get("address") or "",
+            "category": place.get("category") or "", "categories": [place["category"]] if place.get("category") else [],
+            "provider_place_id": place.get("provider_place_id") or ""}
+
+
+def place_in_zone(store, lat, lon, zone, radius_m=None, lookup=None):
+    """Name a position that may lie inside a saved place.
+
+    Saved places are zones, not names: a university holds many buildings, and
+    each is a place of its own. Inside a zone, a named place counts only when it
+    is right there (within ZONE_PLACE_REACH_M, or the spot's own extent), so a
+    house is not named after a shop down the street; otherwise the zone's name
+    is used. Home is the one zone that names everything inside it. A name you
+    pinned to the spot still wins.
+    """
+    if zone is not None and is_home_place(zone) and not label_at(store.place_labels(), lat, lon):
+        return saved_place_as_found(zone)
+    found = (lookup or place_for_coordinate)(store, lat, lon, radius_m)
+    if zone is None or found.get("label_id"):
+        return found
+    reach = max(ZONE_PLACE_REACH_M, float(radius_m or 0))
+    if found.get("named", True) and found.get("name") and (found.get("place_lat") is None
+                           or metres(lat, lon, found["place_lat"], found["place_lon"]) <= reach):
+        return found
+    return {**saved_place_as_found(zone), "address": found.get("address") or zone.get("address") or ""}
 
 
 def current_location(store):
@@ -2076,20 +2121,15 @@ def current_location(store):
     labels = store.place_labels()
     label = (labels_by_id(labels).get(ongoing["label_id"]) if ongoing and ongoing.get("label_id") else None) \
         or label_at(labels, point["lat"], point["lon"])
+    zone = zone_at(store.places(), point["lat"], point["lon"])
+    point.update({"zone_id": zone["id"] if zone else None, "zone": zone["name"] if zone else None})
     if label:
         point.update({"place_id": None, **_label_place(label), "place_name": label["name"]})
         return point
-    matches = [(metres(point["lat"], point["lon"], place["lat"], place["lon"]), place)
-               for place in store.places()]
-    matches = [(distance, place) for distance, place in matches if distance <= place["radius_m"]]
-    if matches:
-        place = min(matches, key=lambda item: item[0])[1]
-        point.update({"place_id": place["id"], "place_name": place["name"], "address": place["address"] or "",
-                      "category": place.get("category") or "", "provider_place_id": place.get("provider_place_id") or ""})
-    else:
-        found = place_for_coordinate(store, point["lat"], point["lon"])
-        point.update({"place_id": None, "place_name": found["name"], "address": found["address"],
-                      "category": found["category"], "provider_place_id": found["provider_place_id"]})
+    found = place_in_zone(store, point["lat"], point["lon"], zone)
+    point.update({"place_id": zone["id"] if zone and is_home_place(zone) else None, "place_name": found["name"],
+                  "address": found["address"], "category": found["category"],
+                  "provider_place_id": found["provider_place_id"]})
     return point
 
 
