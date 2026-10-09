@@ -4,6 +4,7 @@ import hmac
 import io
 import math
 import os
+import re
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -1830,8 +1831,8 @@ def process_stays_rebuild(store):
     store.db.commit()
 
 
-class IngestTests(unittest.TestCase):
-    """Tracking apps posting to a running server, each in its own format."""
+class LiveServerCase(unittest.TestCase):
+    """A real server on a free port, with a scratch database and known tokens."""
 
     def setUp(self):
         import threading
@@ -1864,7 +1865,12 @@ class IngestTests(unittest.TestCase):
         response = connection.getresponse()
         data = response.read()
         connection.close()
-        return response.status, json.loads(data) if data else None, response
+        if not data:
+            return response.status, None, response
+        try:
+            return response.status, json.loads(data), response
+        except ValueError:
+            return response.status, data, response
 
     def points(self):
         store = Store(self.db)
@@ -1872,6 +1878,11 @@ class IngestTests(unittest.TestCase):
             return store.points(limit=None)
         finally:
             store.close()
+
+
+
+class IngestTests(LiveServerCase):
+    """Tracking apps posting to a running server, each in its own format."""
 
     def test_owntracks_http_mode_with_basic_auth_and_queued_fixes(self):
         basic = {"Authorization": "Basic " + __import__("base64").b64encode(b"karun:phone-token").decode(),
@@ -1984,6 +1995,59 @@ class IngestTests(unittest.TestCase):
         with patch("geologs.http.Store", side_effect=RuntimeError("password authentication failed for user \"geologs\"")):
             status, value, _ = self.send("GET", "/api/status", headers={"Authorization": "Bearer main-token"})
         self.assertEqual((status, value["error"]), (503, 'Database unavailable: password authentication failed for user "geologs"'))
+
+
+WEB = Path(__file__).resolve().parent.parent / "src" / "geologs" / "web"
+
+
+class WebAppTests(LiveServerCase):
+    """The browser app: its files are served, and its modules fit together."""
+
+    def test_every_file_the_page_loads_is_served_with_its_type(self):
+        status, _, response = self.send("GET", "/")
+        self.assertEqual((status, response.getheader("Content-Type")), (200, "text/html; charset=utf-8"))
+        html = (WEB / "index.html").read_text()
+        local = re.findall(r'(?:href|src)="(/(?:css|js)/[^"]+)"', html)
+        self.assertIn("/js/main.js", local)
+        self.assertGreater(len(local), 10)
+        for path in local:
+            import http.client
+            connection = http.client.HTTPConnection("127.0.0.1", self.server.server_address[1], timeout=10)
+            connection.request("GET", path)
+            response = connection.getresponse()
+            body = response.read()
+            connection.close()
+            kind = "text/css" if path.endswith(".css") else "text/javascript"
+            self.assertEqual((path, response.status, response.getheader("Content-Type")), (path, 200, kind + "; charset=utf-8"))
+            self.assertTrue(body)
+
+    def test_module_imports_resolve_to_exported_names(self):
+        modules = sorted((WEB / "js").rglob("*.js"))
+        self.assertGreater(len(modules), 10)
+        exported = {}
+        for module in modules:
+            text = module.read_text()
+            names = set(re.findall(r"^export (?:async )?function (\w+)", text, re.M))
+            for declaration in re.findall(r"^export (?:const|let) ([^=;]+)", text, re.M):
+                names.update(re.findall(r"(?:^|,)\s*([A-Za-z_$][\w$]*)", declaration))
+            exported[module] = names
+        for module in modules:
+            for names, target in re.findall(r'^import \{([^}]+)\} from "([^"]+)";', module.read_text(), re.M):
+                path = (module.parent / target).resolve()
+                self.assertIn(path, exported, f"{module.name} imports missing {target}")
+                for name in (item.strip() for item in names.split(",") if item.strip()):
+                    self.assertIn(name, exported[path], f"{module.name} imports {name} that {target} does not export")
+
+    def test_only_web_files_are_served(self):
+        for path in ("/js/../http.py", "/css/%2e%2e/tokens.css", "/js/.hidden.js", "/js/main.py", "/css/", "/js/nope.js",
+                     "/css//tokens.css"):
+            self.assertEqual(self.send("GET", path)[0], 404, path)
+
+    def test_unchanged_files_are_not_sent_again(self):
+        status, _, response = self.send("GET", "/css/tokens.css")
+        tag = response.getheader("ETag")
+        self.assertEqual((status, response.getheader("Cache-Control")), (200, "no-cache"))
+        self.assertEqual(self.send("GET", "/css/tokens.css", headers={"If-None-Match": tag})[0], 304)
 
 
 if __name__ == "__main__":

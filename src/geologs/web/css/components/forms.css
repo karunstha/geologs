@@ -1,0 +1,128 @@
+/* Inputs, selects, labelled fields, search rows, and form layouts. */
+.input,
+.form-stack input:not([type="radio"]):not([type="hidden"]),
+.form-stack select,
+.search-row input,
+.auth-card input {
+  height: 38px;
+  min-width: 0;
+  padding: 0 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 14px;
+  outline: none;
+  transition:
+    border-color 0.12s,
+    box-shadow 0.12s;
+}
+.input:hover {
+  border-color: color-mix(in srgb, var(--text-3) 60%, var(--border-strong));
+}
+.input:focus,
+.form-stack input:focus,
+.form-stack select:focus,
+.search-row input:focus,
+.auth-card input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+select.input {
+  padding-right: 30px;
+}
+input[type="date"].input {
+  font-variant-numeric: tabular-nums;
+}
+.input:disabled {
+  opacity: 0.55;
+}
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.field > span:first-child {
+  color: var(--text);
+}
+.form-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.form-pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.form-actions,
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.inline-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: -6px 0 -4px -8px;
+}
+.search-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.search-row > .input,
+.search-row > input {
+  flex: 1;
+}
+.search-field {
+  position: relative;
+  flex: 1;
+  display: flex;
+}
+.search-field svg {
+  position: absolute;
+  left: 12px;
+  top: 50%;
+  width: 17px;
+  height: 17px;
+  transform: translateY(-50%);
+  fill: none;
+  stroke: var(--text-3);
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  pointer-events: none;
+}
+.search-field .input {
+  width: 100%;
+  height: 40px;
+  padding-left: 38px;
+}
+.subpanel {
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+.disabled-field {
+  opacity: 0.55;
+}
+@media (max-width: 760px) {
+  .form-pair {
+    grid-template-columns: 1fr;
+  }
+  .search-row {
+    flex-wrap: wrap;
+  }
+  .search-row .search-field {
+    flex-basis: 100%;
+  }
+  .search-row > .button {
+    flex: 1;
+  }
+}

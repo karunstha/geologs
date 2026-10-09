@@ -1,0 +1,134 @@
+/* Modal dialogs, the sign-in panel, and toasts. */
+.dialog {
+  width: min(640px, calc(100% - 32px));
+  max-height: calc(100vh - 48px);
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-lg);
+}
+.dialog::backdrop {
+  background: rgb(10 14 18/0.45);
+  backdrop-filter: blur(3px);
+}
+.dialog[open] {
+  animation: dialog-in 0.16s ease-out;
+}
+@keyframes dialog-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.dialog-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 20px;
+  padding: 20px 24px 16px;
+}
+.dialog-head h2 {
+  font-size: 18px;
+  font-weight: 650;
+}
+.dialog-head p {
+  margin-top: 4px;
+  color: var(--text-2);
+  font-size: 13.5px;
+}
+.dialog-section {
+  padding: 18px 24px;
+  border-top: 1px solid var(--border);
+}
+.auth-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgb(10 14 18/0.5);
+  backdrop-filter: blur(4px);
+}
+.auth-card {
+  display: flex;
+  flex-direction: column;
+  width: min(400px, 100%);
+  padding: 28px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+}
+.auth-card h2 {
+  font-size: 20px;
+  font-weight: 650;
+}
+.auth-card > p.muted {
+  margin: 6px 0 18px;
+  color: var(--text-2);
+  font-size: 13.5px;
+}
+.auth-card .input {
+  width: 100%;
+}
+.auth-error {
+  min-height: 18px;
+  margin-top: 8px;
+  color: var(--danger);
+  font-size: 13px;
+}
+.auth-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+#toast {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  z-index: 1100;
+  max-width: 360px;
+  padding: 11px 15px;
+  border-radius: 10px;
+  background: #1b2126;
+  color: #f2f4f6;
+  font-size: 13.5px;
+  box-shadow: var(--shadow-lg);
+  opacity: 0;
+  transform: translateY(8px);
+  transition:
+    opacity 0.2s,
+    transform 0.2s;
+  pointer-events: none;
+}
+#toast.show {
+  opacity: 1;
+  transform: none;
+}
+@media (prefers-color-scheme: dark) {
+  #toast {
+    background: #e8ebee;
+    color: #14181d;
+  }
+}
+@media (max-width: 760px) {
+  .dialog-head,
+  .dialog-section {
+    padding-left: 18px;
+    padding-right: 18px;
+  }
+  #toast {
+    left: 16px;
+    right: 16px;
+    bottom: calc(76px + env(safe-area-inset-bottom));
+    max-width: none;
+  }
+}

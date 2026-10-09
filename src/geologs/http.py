@@ -2,6 +2,7 @@
 import base64
 import binascii
 import json
+import hashlib
 import hmac
 import os
 import secrets
@@ -21,6 +22,7 @@ from .analysis import daily_briefs, daily_overview, day_summary, finalize_previo
 from .mcp import SUPPORTED_VERSIONS, dispatch
 from .postgres import INTEGRITY_ERRORS
 
+WEB_TYPES = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8"}
 DB_INPUT_ERRORS = (ValueError, KeyError, TypeError, sqlite3.IntegrityError) + INTEGRITY_ERRORS
 
 
@@ -160,6 +162,30 @@ class Handler(BaseHTTPRequestHandler):
             supplied.append(query["token"])
         return any(secrets.compare_digest(value, token) for value in supplied for token in (main, ingest) if token)
 
+    def send_web_file(self, path):
+        """The browser app: index.html, and stylesheets and modules under /css/ and /js/."""
+        relative = "index.html" if path == "/" else path.lstrip("/")
+        parts = relative.split("/")
+        kind = WEB_TYPES.get(Path(relative).suffix)
+        if kind is None or any(part in ("", ".", "..") or part.startswith(".") for part in parts):
+            self.error_json(404, "not found"); return
+        resource = files("geologs").joinpath("web", *parts)
+        if not resource.is_file():
+            self.error_json(404, "not found"); return
+        body = resource.read_bytes()
+        tag = '"' + hashlib.sha256(body).hexdigest()[:20] + '"'
+        # Revalidate every time: unchanged files cost a 304, and an upgrade is never stale.
+        headers = {"Cache-Control": "no-cache", "ETag": tag, "X-Content-Type-Options": "nosniff"}
+        unchanged = self.headers.get("If-None-Match") == tag
+        self.send_response(304 if unchanged else 200)
+        self.send_header("Content-Type", kind)
+        self.send_header("Content-Length", "0" if unchanged else str(len(body)))
+        for name, value in headers.items():
+            self.send_header(name, value)
+        self.end_headers()
+        if not unchanged:
+            self.wfile.write(body)
+
     def open_store(self):
         """The store, or a 503 the browser can show (instead of a dropped connection) when the database is down."""
         try:
@@ -255,17 +281,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         url = urlparse(self.path)
-        if url.path in ("/", "/app.js", "/style.css"):
-            filename = {"/": "index.html", "/app.js": "app.js", "/style.css": "style.css"}[url.path]
-            body = files("geologs").joinpath("web", filename).read_bytes()
-            content_type = "text/html" if filename.endswith("html") else "text/javascript" if filename.endswith("js") else "text/css"
-            self.send_response(200)
-            self.send_header("Content-Type", content_type + "; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("X-Content-Type-Options", "nosniff")
-            self.end_headers()
-            self.wfile.write(body)
+        if url.path == "/" or url.path.startswith(("/css/", "/js/")):
+            self.send_web_file(url.path)
             return
         if url.path == "/mcp":
             if self.guarded():

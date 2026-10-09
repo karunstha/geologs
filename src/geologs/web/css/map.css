@@ -1,0 +1,100 @@
+/* Leaflet map: controls, popups, visit pins, and the dark-theme map. */
+.visit-pin {
+  display: grid;
+  place-items: center;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--on-accent);
+  font: 700 12px/1 var(--font);
+  box-shadow: 0 2px 8px rgb(0 0 0/0.3);
+}
+.visit-pin.home {
+  background: #5b7286;
+  color: #fff;
+}
+.visit-pin svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.map-popup {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 180px;
+  color: var(--text-2);
+  font: 13px/1.45 var(--font);
+}
+.map-popup strong {
+  color: var(--text);
+  font-size: 14px;
+}
+.popup-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+.popup-action {
+  height: 28px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 7px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.popup-action:hover {
+  background: var(--accent-hover);
+}
+.leaflet-container {
+  font-family: var(--font);
+  background: var(--surface-3);
+}
+.leaflet-popup-content-wrapper {
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-md);
+}
+.leaflet-popup-tip {
+  background: var(--surface);
+}
+.leaflet-popup-content {
+  margin: 12px 14px;
+}
+.leaflet-container a.leaflet-popup-close-button {
+  color: var(--text-3);
+}
+.leaflet-bar {
+  border: 1px solid var(--border) !important;
+  border-radius: var(--radius-sm) !important;
+  box-shadow: var(--shadow-md) !important;
+  overflow: hidden;
+}
+.leaflet-bar a {
+  background: var(--surface);
+  color: var(--text);
+  border-color: var(--border) !important;
+}
+.leaflet-bar a:hover {
+  background: var(--surface-3);
+}
+.leaflet-control-attribution {
+  background: color-mix(in srgb, var(--surface) 80%, transparent) !important;
+  color: var(--text-3) !important;
+}
+.leaflet-control-attribution a {
+  color: var(--text-2) !important;
+}
+@media (prefers-color-scheme: dark) {
+  .leaflet-tile-pane {
+    filter: invert(1) hue-rotate(180deg) brightness(0.92) contrast(0.9) saturate(0.6);
+  }
+}

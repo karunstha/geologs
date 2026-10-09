@@ -1,0 +1,144 @@
+/* Places: visit search, saved and visited place lists, and the name-correction scope picker. */
+.list-item button,
+.result-item button,
+.visit-list button {
+  height: 30px;
+  padding: 0 11px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.list.rows,
+.places-panel .list {
+  max-height: none;
+}
+.page-tabs {
+  margin: 24px 0 12px;
+}
+.visit-search .card-head {
+  margin-bottom: 12px;
+}
+.visit-search .search-row {
+  max-width: 660px;
+}
+.visit-results {
+  margin-top: 16px;
+}
+.visit-results:empty {
+  display: none;
+}
+.result-summary {
+  margin-bottom: 6px;
+  color: var(--text-2);
+  font-size: 13px;
+}
+.result-summary strong {
+  color: var(--text);
+}
+.visit-list {
+  max-height: 440px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  overflow: auto;
+}
+.visit-list li {
+  display: grid;
+  grid-template-columns: 130px minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: center;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--border);
+}
+.visit-list li:last-child {
+  border-bottom: 0;
+}
+.visit-date strong,
+.visit-info strong {
+  display: block;
+  font-size: 14px;
+  font-weight: 600;
+}
+.visit-date span,
+.visit-info small {
+  display: block;
+  margin-top: 1px;
+  color: var(--text-2);
+  font-size: 12.5px;
+}
+.places-panel {
+  display: none;
+}
+.places-panel.active {
+  display: block;
+}
+.page-tabs + .places-panel {
+  margin-top: 0;
+}
+.scope-choice {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.scope-choice legend {
+  margin-bottom: 6px;
+  padding: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+.scope-choice label {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 11px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.scope-choice label:has(input:checked) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.scope-choice input {
+  margin: 3px 0 0;
+  accent-color: var(--accent);
+}
+.scope-choice span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.scope-choice strong {
+  font-size: 14px;
+  font-weight: 600;
+}
+.scope-choice small {
+  color: var(--text-2);
+  font-size: 12.5px;
+}
+@media (max-width: 760px) {
+  .visit-list li {
+    grid-template-columns: minmax(0, 1fr) auto;
+    row-gap: 2px;
+  }
+  .visit-date {
+    grid-column: 1/-1;
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+  }
+  .page-tabs {
+    display: flex;
+    width: 100%;
+  }
+  .page-tabs button {
+    flex: 1;
+    justify-content: center;
+  }
+}

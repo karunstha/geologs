@@ -1,0 +1,54 @@
+/* Travel-mode icons, activity chips, and map legend lines. */
+.mode-icon {
+  flex: 0 0 22px;
+  width: 22px;
+  height: 22px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--mode);
+  color: #fff;
+}
+.mode-icon svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.activity-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.activity-chips:empty {
+  display: none;
+}
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 30px;
+  padding: 0 12px 0 4px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--mode) 10%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--mode) 22%, var(--surface));
+  color: var(--text-2);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+.chip strong {
+  color: color-mix(in srgb, var(--mode) 85%, var(--text));
+  font-weight: 620;
+}
+.legend-line {
+  display: inline-block;
+  width: 16px;
+  height: 4px;
+  margin-right: 6px;
+  border-radius: 2px;
+  background: var(--mode);
+  vertical-align: middle;
+}

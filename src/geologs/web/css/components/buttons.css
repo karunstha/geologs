@@ -1,0 +1,111 @@
+/* Buttons: primary, secondary, ghost, danger, icon, and the compact buttons inside list rows. */
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  height: 36px;
+  padding: 0 14px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  text-decoration: none;
+  transition:
+    background 0.12s,
+    border-color 0.12s,
+    color 0.12s;
+}
+.button svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.9;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.button.primary {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+.button.primary:hover {
+  background: var(--accent-hover);
+}
+.button.secondary {
+  background: var(--surface);
+  border-color: var(--border-strong);
+  color: var(--text);
+  box-shadow: var(--shadow-sm);
+}
+.button.secondary:hover {
+  background: var(--surface-3);
+}
+.button.ghost {
+  background: none;
+  color: var(--text-2);
+  padding: 0 10px;
+}
+.button.ghost:hover {
+  background: var(--surface-3);
+  color: var(--text);
+}
+.button.danger {
+  background: var(--surface);
+  border-color: color-mix(in srgb, var(--danger) 35%, var(--border));
+  color: var(--danger);
+}
+.button.danger:hover {
+  background: var(--danger-soft);
+}
+.button.small {
+  height: 30px;
+  padding: 0 10px;
+  font-size: 12.5px;
+  gap: 6px;
+}
+.button.small svg {
+  width: 14px;
+  height: 14px;
+}
+.button.ghost.small {
+  padding: 0 8px;
+}
+.align-start {
+  align-self: flex-start;
+}
+.icon-button {
+  width: 36px;
+  height: 36px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text-2);
+}
+.icon-button svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.icon-button:hover {
+  background: var(--surface-3);
+  color: var(--text);
+}
+.icon-button.bordered {
+  border-color: var(--border-strong);
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+}
+.list-item button:hover,
+.result-item button:hover {
+  background: var(--surface-3);
+}

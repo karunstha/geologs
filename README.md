@@ -267,9 +267,36 @@ All data `/api/*` routes and `/mcp` require authentication when a token is confi
 
 Good next additions are: PostGIS scale and concurrency testing; semantic Google Timeline and OwnTracks imports; home periods and city/country trip summaries; dwell/leave geofences; smarter activity detection using sensor data; geofence hysteresis and accuracy confidence; provider quotas and bulk enrichment jobs; configurable raw retention and privacy zones; optional offline road-graph map matching; and a background webhook retry queue.
 
+## Browser app structure
+
+The browser app is plain HTML, CSS, and native ES modules served from `src/geologs/web`, with no build step:
+
+```text
+web/
+  index.html            page markup; loads the stylesheets in cascade order and js/main.js
+  css/
+    tokens.css          colours, type, radii, shadows, and sizes for light and dark themes
+    base.css            element defaults and utilities
+    layout.css          app shell: top bar, navigation (a bottom tab bar on phones), page headers
+    components/         buttons, forms, cards, lists, tabs, chips, dialogs
+    map.css             Leaflet styling
+    pages/              history, places, reminders, summaries, settings
+  js/
+    main.js             entry point: wires each view, then loads data and keeps it fresh
+    core/               DOM helpers, shared state, formatting, and the API client
+    ui/icons.js         travel-mode and place icons, source names, status pills
+    map/map.js          everything drawn on the Leaflet map
+    views/              one module per page, plus the timeline, place dialogs, sign-in, and page switching
+    app/refresh.js      loading data for every view and polling for arrival reminders
+```
+
+Each view exports an `init…()` function that `main.js` calls once to attach its event handlers, so modules never act on each other while they load. Responsive rules live in the same file as the component they adjust. The server serves `index.html` and anything under `/css/` and `/js/` (only `.css`, `.js`, and `.html`), with ETags so unchanged files are answered with `304`.
+
 ## Tests
 
 ```bash
 PYTHONPATH=src python3 -m unittest discover -s tests -v
-node --check src/geologs/web/app.js
+for file in $(find src/geologs/web/js -name '*.js'); do node --check "$file"; done
 ```
+
+The Python tests also check that every file `index.html` loads is served, and that every module import names something its target exports.
