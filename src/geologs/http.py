@@ -7,6 +7,7 @@ import os
 import secrets
 import sqlite3
 import threading
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from http.cookies import SimpleCookie
 from importlib.resources import files
@@ -159,16 +160,39 @@ class Handler(BaseHTTPRequestHandler):
             supplied.append(query["token"])
         return any(secrets.compare_digest(value, token) for value in supplied for token in (main, ingest) if token)
 
+    def open_store(self):
+        """The store, or a 503 the browser can show (instead of a dropped connection) when the database is down."""
+        try:
+            return Store()
+        except Exception as exc:
+            print("GeoLogs database unavailable: " + str(exc), flush=True)
+            self.error_json(503, "Database unavailable: " + str(exc).splitlines()[0][:300])
+            return None
+
+    def note_ingest(self, kind, status, message=None, source=None, accepted=0):
+        try:
+            store = Store()
+        except Exception:
+            return
+        try:
+            store.record_ingest(kind, status, message, source, accepted)
+        except Exception:
+            pass
+        finally:
+            store.close()
+
     def receive_locations(self, kind, query):
         """POST/GET /api/ingest/<format>: points from a tracking app, answered the way it expects."""
+        adapter = INGEST_FORMATS.get(kind)
         if not self.ingest_authorized(query):
             self.close_connection = True
+            if adapter:
+                self.note_ingest(kind, 401, "Wrong or missing token")
             self.send_json(401, {"error": "token required"}, {"WWW-Authenticate": 'Basic realm="GeoLogs"'})
             return
         if not self.safe_origin():
             self.close_connection = True
             self.error_json(403, "cross-origin request denied"); return
-        adapter = INGEST_FORMATS.get(kind)
         if adapter is None:
             self.error_json(404, "unknown format; use one of: " + ", ".join(INGEST_FORMATS)); return
         try:
@@ -189,8 +213,13 @@ class Handler(BaseHTTPRequestHandler):
                 payload = json.loads(body)
             points, skipped, reply = adapter(payload, query, self.headers)
         except (ValueError, UnicodeDecodeError, AttributeError) as exc:
-            self.error_json(400, str(exc) if isinstance(exc, ValueError) else "invalid request body"); return
-        store = Store()
+            message = str(exc) if isinstance(exc, ValueError) else "invalid request body"
+            self.note_ingest(kind, 400, message)
+            self.error_json(400, message); return
+        store = self.open_store()
+        if store is None:
+            return
+        source = points[-1]["source"] if points else None
         try:
             inserted = duplicates = 0
             for start in range(0, len(points), 1000):
@@ -198,7 +227,11 @@ class Handler(BaseHTTPRequestHandler):
                 inserted += result["inserted"]
                 duplicates += result["duplicates"]
                 deliver_webhook(store, result["events"])
+            # Retries and acknowledged non-location messages still prove the app gets through.
+            store.record_ingest(kind, 200, f"{skipped} malformed fix{'' if skipped == 1 else 'es'} skipped" if skipped else None,
+                                source, inserted)
         except DB_INPUT_ERRORS as exc:
+            self.note_ingest(kind, 400, str(exc), source)
             self.error_json(400, str(exc)); return
         except Exception as exc:
             self.error_json(502, str(exc)); return
@@ -244,7 +277,9 @@ class Handler(BaseHTTPRequestHandler):
         if not self.guarded():
             return
         q = {key: value[0] for key, value in parse_qs(url.query).items()}
-        store = Store()
+        store = self.open_store()
+        if store is None:
+            return
         try:
             if url.path == "/api/status":
                 active = places_provider(store)
@@ -274,6 +309,9 @@ class Handler(BaseHTTPRequestHandler):
             elif url.path == "/api/daily-summary": value = daily_overview(store, q["date"], q.get("timezone"), q.get("source"))
             elif url.path == "/api/daily-summaries": value = store.daily_overviews(q.get("start"), q.get("end"), q.get("limit", 90))
             elif url.path == "/api/daily-summary/stored": value = stored_daily_record(store, q["date"])
+            elif url.path == "/api/sources":
+                value = {**store.source_activity(), "ingest_token": bool(ingest_token()), "formats": list(INGEST_FORMATS),
+                         "now": datetime.now(timezone.utc).isoformat(timespec="seconds")}
             elif url.path == "/api/daily-brief": value = daily_briefs(store, q["date"], q.get("end_date"))
             elif url.path == "/api/places": value = store.places(enrich=True)
             elif url.path == "/api/place-labels": value = store.place_labels()
@@ -361,7 +399,9 @@ class Handler(BaseHTTPRequestHandler):
             if "method" not in payload and ("result" in payload or "error" in payload):
                 self.send_empty(202)
                 return
-        store = Store()
+        store = self.open_store()
+        if store is None:
+            return
         try:
             if path == "/mcp":
                 result = dispatch(store, payload)
@@ -373,6 +413,8 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/points":
                 result = store.ingest(payload)
                 deliver_webhook(store, result["events"])
+                last = payload[-1] if isinstance(payload, list) and payload else payload
+                store.record_ingest("api", 200, None, str((last or {}).get("source") or "manual")[:80], result["inserted"])
             elif path == "/api/settings": result = store.save_settings(payload)
             elif path == "/api/places": result = store.save_place(payload)
             elif path == "/api/places/delete": result = store.delete_place(payload["id"])

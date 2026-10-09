@@ -7,7 +7,8 @@ let exploreRequest=0;
 function toast(message){const box=$('toast');box.textContent=message;box.classList.add('show');clearTimeout(toast.timer);toast.timer=setTimeout(()=>box.classList.remove('show'),3800)}
 function safe(text){return String(text??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function zoneOptions(){const timeZone=state.settings?.timezone;if(!timeZone)return{};try{new Intl.DateTimeFormat(undefined,{timeZone});return{timeZone}}catch(_error){return{}}}
-function formatTime(value){return value?new Date(value).toLocaleString(undefined,zoneOptions()): '—'}
+function formatTime(value){return value?new Date(value).toLocaleString(undefined,{dateStyle:'medium',timeStyle:'short',...zoneOptions()}): '—'}
+function formatPrecise(value){return value?new Date(value).toLocaleString(undefined,zoneOptions()):'—'}
 function clock(value){return new Date(value).toLocaleTimeString([],{hour:'numeric',minute:'2-digit',...zoneOptions()})}
 function durationText(minutes){const total=Math.round(minutes||0);if(total<1)return'<1 min';const hours=Math.floor(total/60),rest=total%60;return hours?`${hours} h${rest?` ${rest} min`:''}`:`${rest} min`}
 function distanceText(km){return km>=10?`${km.toFixed(0)} km`:km>=.1?`${km.toFixed(1)} km`:`${Math.round(km*1000)} m`}
@@ -59,15 +60,28 @@ function zonedMidnight(dateKey){
 }
 function params(){const date=$('day-date').value;const start=zonedMidnight(date);const end=zonedMidnight(shiftDateKey(date,1));const q=new URLSearchParams({start:start.toISOString(),end:new Date(end.getTime()-1).toISOString()});if($('source').value)q.set('source',$('source').value);return q}
 function openAuth(message=''){if(authDismissed)return;$('auth-error').textContent=message;$('auth-panel').hidden=false;$('auth-token').focus()}
+function setConnection(tone,text,detail=''){const el=$('connection');el.dataset.state=tone;el.textContent=text;el.title=detail||text}
 async function api(path,options={}){
   const previousToken=sessionStorage.getItem('geologs-token');
   const headers={...(options.body?{'Content-Type':'application/json'}:{}),...(previousToken?{'Authorization':'Bearer '+previousToken}:{}),...(options.headers||{})};
-  const response=await fetch(path,{...options,headers,credentials:'same-origin',cache:'no-store'});
-  if(response.status===401){sessionStorage.removeItem('geologs-token');$('connection').textContent='Sign in required';openAuth(previousToken?'The previously saved token was rejected. Enter the token used by the running server.':'Enter the access token to view your location history.');throw Error(previousToken?'Previously saved access token was rejected.':'Sign in required.')}
-  const value=await response.json();if(!response.ok)throw Error(value.error||`HTTP ${response.status}`);return value;
+  let response;
+  try{response=await fetch(path,{...options,headers,credentials:'same-origin',cache:'no-store'})}
+  catch(_error){setConnection('error','Offline','The GeoLogs server cannot be reached.');throw Error('Cannot reach the GeoLogs server. Check your connection.')}
+  if(response.status===401){sessionStorage.removeItem('geologs-token');setConnection('warning','Sign in required');openAuth(previousToken?'The previously saved token was rejected. Enter the token used by the running server.':'');throw Error(previousToken?'Previously saved access token was rejected.':'Sign in required.')}
+  let value={};try{value=await response.json()}catch(_error){}
+  if(!response.ok){if(response.status===503)setConnection('error','Database unavailable',value.error);throw Error(value.error||`HTTP ${response.status}`)}
+  setConnection('ok','Connected');
+  return value;
+}
+function ago(value){
+  if(!value)return'never';
+  const seconds=Math.max(0,(Date.now()-Date.parse(value))/1000);
+  if(seconds<60)return'just now';if(seconds<3600)return`${Math.floor(seconds/60)} min ago`;if(seconds<86400)return`${Math.floor(seconds/3600)} h ago`;
+  if(seconds<86400*14)return`${Math.floor(seconds/86400)} day${seconds<172800?'':'s'} ago`;
+  return new Date(value).toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric',...zoneOptions()});
 }
 async function post(path,body){return api(path,{method:'POST',body:JSON.stringify(body)})}
-function showView(view){document.querySelectorAll('.view').forEach(el=>el.classList.toggle('active',el.id===view+'-view'));document.querySelectorAll('.nav').forEach(el=>{const active=el.dataset.view===view;el.classList.toggle('active',active);if(active)el.setAttribute('aria-current','page');else el.removeAttribute('aria-current')});if(view==='explore'&&map)setTimeout(()=>map.invalidateSize(),20);if(view==='summaries')refreshSummaries().catch(error=>toast(error.message))}
+function showView(view){document.querySelectorAll('.view').forEach(el=>el.classList.toggle('active',el.id===view+'-view'));if(view==='settings')refreshSources().catch(()=>{});document.querySelectorAll('.nav').forEach(el=>{const active=el.dataset.view===view;el.classList.toggle('active',active);if(active)el.setAttribute('aria-current','page');else el.removeAttribute('aria-current')});if(view==='explore'&&map)setTimeout(()=>map.invalidateSize(),20);if(view==='summaries')refreshSummaries().catch(error=>toast(error.message))}
 function initMap(){
   if(!window.L){$('map').innerHTML='<div class="empty" style="padding:30px">Map library could not load. Check your internet connection.</div>';return}
   map=L.map('map',{zoomControl:false}).setView([39.5,-98.35],4);
@@ -163,7 +177,7 @@ const TRIP_MODES=['walking','running','cycling','driving','transit'],AREA_MODES=
 function modeStrip(subject,options,current,corrected,detected){
   // subject: what the correction is for (source, target, start, end).
   const buttons=options.map(mode=>`<button type="button" class="mode-option${mode===current?' active':''}" style="--mode:${modeInfo[mode].color}" data-set-mode="${mode}" aria-pressed="${mode===current}">${modeIcon(mode)}${safe(modeInfo[mode].label)}</button>`).join('');
-  const note=corrected?`<span class="mode-note">Detected: ${safe(modeName(detected))}</span><button type="button" class="text-button" data-set-mode="auto">Automatic</button>`:'<span class="mode-note">Detected from speed</span>';
+  const note=corrected?`<span class="mode-note">Detected: ${safe(modeName(detected))}</span><button type="button" class="button ghost small" data-set-mode="auto">Automatic</button>`:'<span class="mode-note">Detected from speed</span>';
   return `<li class="tl-mode-picker" data-mode-subject='${safe(JSON.stringify(subject))}'><div class="mode-options">${buttons}</div><div class="mode-meta">${note}</div></li>`;
 }
 function renderModePicker(){
@@ -236,7 +250,7 @@ function renderSamples(){
     ?`${state.timeline.length.toLocaleString()} informational fixes from ${state.rawTotal.toLocaleString()} raw samples. Stationary periods keep their edges.`
     :rows.length?`Showing ${(start+1).toLocaleString()}–${(start+rows.length).toLocaleString()} of ${state.rawTotal.toLocaleString()} raw samples.`:`No raw samples on this page.`;
   const visible=state.sampleView==='timeline'?rows.slice(0,100):rows;
-  $('points-table').innerHTML=visible.map((p,index)=>'<tr><td>'+safe(formatTime(p.timestamp))+'</td><td>'+safe(state.sampleView==='timeline'?roleName(p.role):'Raw sample')+'</td><td>'+safe(p.source)+'</td><td><span class="mode-tag '+safe(p.mode)+'">'+safe(modeName(p.mode))+'</span></td><td>'+safe(kmh(p))+(p.speed_origin==='estimated'?' <small>est.</small>':p.speed_origin==='reported_adjusted'?' <small>adjusted</small>':'')+'</td><td>'+p.lat.toFixed(5)+', '+p.lon.toFixed(5)+'</td><td>'+(p.accuracy_m==null?'—':Math.round(p.accuracy_m)+' m')+'</td><td><button class="table-map" data-sample-map="'+index+'">Map</button></td></tr>').join('')||'<tr><td colspan="8" class="empty">No fixes on this day.</td></tr>';
+  $('points-table').innerHTML=visible.map((p,index)=>'<tr><td>'+safe(formatPrecise(p.timestamp))+'</td><td>'+safe(state.sampleView==='timeline'?roleName(p.role):'Raw sample')+'</td><td>'+safe(p.source)+'</td><td><span class="mode-tag '+safe(p.mode)+'">'+safe(modeName(p.mode))+'</span></td><td>'+safe(kmh(p))+(p.speed_origin==='estimated'?' <small>est.</small>':p.speed_origin==='reported_adjusted'?' <small>adjusted</small>':'')+'</td><td>'+p.lat.toFixed(5)+', '+p.lon.toFixed(5)+'</td><td>'+(p.accuracy_m==null?'—':Math.round(p.accuracy_m)+' m')+'</td><td><button class="table-map" data-sample-map="'+index+'">Map</button></td></tr>').join('')||'<tr><td colspan="8" class="empty">No fixes on this day.</td></tr>';
   $('points-table').querySelectorAll('[data-sample-map]').forEach(button=>button.onclick=()=>focusPlaceOnMap({...visible[+button.dataset.sampleMap],display_name:formatTime(visible[+button.dataset.sampleMap].timestamp)}));
   $('raw-pagination').hidden=state.sampleView!=='raw'||state.rawTotal<=state.rawPageSize;
   $('raw-page').textContent=`Page ${state.rawPage+1} of ${Math.max(1,Math.ceil(state.rawTotal/state.rawPageSize))}`;
@@ -364,8 +378,9 @@ function renderCurrent(){
   if(!point)return;
   $('current-location').classList.toggle('stale',!!point.stale);
   $('current-place').innerHTML=placeIcon({...point,name:point.place_name})+'<span>'+safe(point.place_name||point.address||'Unknown place')+'</span>';
-  const age=point.age_seconds<60?'just now':point.age_seconds<3600?`${Math.floor(point.age_seconds/60)} min ago`:`${Math.floor(point.age_seconds/3600)} hr ago`;
-  $('current-updated').textContent=`Updated ${formatTime(point.timestamp)} · ${age}${point.stale?' · stale':''}`;
+  const source=sourceName(point.source);
+  $('current-updated').textContent=[`Updated ${ago(point.timestamp)}`,source.device||source.kind,point.stale?'may be out of date':''].filter(Boolean).join(' · ');
+  $('current-updated').title=formatTime(point.timestamp);
   document.querySelector('.live-badge').textContent=point.stale?'Stale fix':'Latest fix';
   $('current-coordinates').textContent=`${Number(point.lat).toFixed(6)}, ${Number(point.lon).toFixed(6)}`;
 }
@@ -458,7 +473,7 @@ function renderPlaces(){
   const saved=[...state.places].sort((a,b)=>(usage.get(b.id)?.observed_minutes||0)-(usage.get(a.id)?.observed_minutes||0)||a.name.localeCompare(b.name));
   $('saved-place-count').textContent=saved.length.toLocaleString();
   $('saved-place-count').hidden=!saved.length;
-  $('places-list').innerHTML=saved.map(p=>{const seen=usage.get(p.id);const activity=seen?`${seen.visits} visit${seen.visits===1?'':'s'} · ${seen.observed_minutes.toFixed(0)} min observed inside`:'No confirmed visits yet';return `<div class="list-item"><div class="place-main">${placeIcon(p)}<div><strong>${safe(p.name)}</strong><small>${safe(activity)} · ${Math.round(p.radius_m)} m zone${p.address?' · '+safe(p.address):''}</small></div></div><div class="actions"><button data-focus="${p.id}">Map</button><button data-edit="${p.id}">Edit</button><button data-delete-place="${p.id}" class="danger-button">Delete</button></div></div>`}).join('')||'<div class="empty">No saved places yet.</div>';
+  $('places-list').innerHTML=saved.map(p=>{const seen=usage.get(p.id);const activity=seen?`${seen.visits} visit${seen.visits===1?'':'s'} · ${durationText(seen.observed_minutes)} inside`:'No confirmed visits yet';return `<div class="list-item"><div class="place-main">${placeIcon(p)}<div><strong>${safe(p.name)}</strong><small>${safe(activity)} · ${Math.round(p.radius_m)} m zone${p.address?' · '+safe(p.address):''}</small></div></div><div class="actions"><button data-focus="${p.id}">Map</button><button data-edit="${p.id}">Edit</button><button data-delete-place="${p.id}" class="danger-button">Delete</button></div></div>`}).join('')||'<div class="empty">No saved places yet.</div>';
   $('places-list').querySelectorAll('[data-focus]').forEach(button=>button.onclick=()=>focusPlaceOnMap(state.places.find(place=>place.id===+button.dataset.focus)));
   $('places-list').querySelectorAll('[data-edit]').forEach(button=>button.onclick=()=>openPlaceDialog(state.places.find(place=>place.id===+button.dataset.edit)));
   $('places-list').querySelectorAll('[data-delete-place]').forEach(button=>button.onclick=async()=>{
@@ -466,7 +481,7 @@ function renderPlaces(){
     if(!place||!confirm(`Delete “${place.name}”? Visits there will be named automatically again. Reminders that use it keep working.`))return;
     try{await post('/api/places/delete',{id:place.id});await afterPlaceNamesChanged('Place deleted')}catch(error){toast(error.message)}
   });
-  $('all-visited-places').innerHTML=state.visitedPlaces.map((place,index)=>`<div class="list-item"><div class="place-main">${placeIcon(place)}<div><strong>${safe(place.display_name)}</strong><small>${zoneText(place.zone,place.display_name)?safe(zoneText(place.zone,place.display_name))+' · ':''}${place.visits} visit${place.visits===1?'':'s'} · ${place.observed_minutes.toFixed(0)} min observed · Last ${safe(formatTime(place.last_seen))}</small></div></div><div class="actions"><button data-map-visited="${index}">Map</button><button data-edit-visited="${index}">Edit place</button></div></div>`).join('')||'<div class="empty">No confirmed visited places yet.</div>';
+  $('all-visited-places').innerHTML=state.visitedPlaces.map((place,index)=>`<div class="list-item"><div class="place-main">${placeIcon(place)}<div><strong>${safe(place.display_name)}</strong><small>${zoneText(place.zone,place.display_name)?safe(zoneText(place.zone,place.display_name))+' · ':''}${place.visits} visit${place.visits===1?'':'s'} · ${durationText(place.observed_minutes)} · last ${safe(ago(place.last_seen))}</small></div></div><div class="actions"><button data-map-visited="${index}">Map</button><button data-edit-visited="${index}">Edit place</button></div></div>`).join('')||'<div class="empty">No confirmed visited places yet.</div>';
   $('visited-place-count').textContent=state.visitedPlaces.length.toLocaleString();
   $('visited-place-count').hidden=!state.visitedPlaces.length;
   $('all-visited-places').querySelectorAll('[data-map-visited]').forEach(button=>button.onclick=()=>focusPlaceOnMap(state.visitedPlaces[+button.dataset.mapVisited]));
@@ -481,7 +496,7 @@ function renderReminders(){
   $('reminders-list').querySelectorAll('[data-cancel-reminder]').forEach(button=>button.onclick=async()=>{try{await post('/api/reminders/cancel',{id:+button.dataset.cancelReminder});await refreshMeta();toast('Reminder cancelled')}catch(error){toast(error.message)}});
   $('reminder-history').innerHTML=state.reminderHistory.map(item=>`<div class="list-item"><div class="place-main">${placeIcon(item)}<div><strong>${safe(item.text)}</strong><small>${safe(reminderWhere(item))} · ${item.status==='triggered'?'Triggered '+safe(formatTime(item.triggered_at)):'Cancelled '+safe(formatTime(item.cancelled_at||item.created_at))}</small></div></div></div>`).join('')||'<div class="empty">Triggered and cancelled reminders will appear here.</div>';
 }
-function renderInsights(){const data=state.insights;if(!data)return;const prediction=data.prediction;$('prediction').textContent=prediction.prediction?`Likely next from ${prediction.from}: ${prediction.prediction} (${Math.round(prediction.frequency*100)}% of ${prediction.observations} observed departures).${prediction.current_fix_stale?' Latest location is stale; verify before acting.':''}`:`Next place: insufficient evidence (${prediction.reason}).`;$('pattern-places').innerHTML=data.frequent_places.slice(0,8).map((place,index)=>`<div class="list-item"><div class="place-main">${placeIcon(place)}<div><strong>${safe(place.display_name)}</strong><small>${zoneText(place.zone,place.display_name)?safe(zoneText(place.zone,place.display_name))+' · ':''}${place.visits} visit${place.visits===1?'':'s'} · ${place.observed_minutes.toFixed(0)} min observed</small></div></div><button data-pattern-place="${index}">Map</button></div>`).join('')||'<div class="empty">Common places appear after confirmed stays.</div>';$('pattern-places').querySelectorAll('[data-pattern-place]').forEach(button=>button.onclick=()=>focusPlaceOnMap(data.frequent_places[+button.dataset.patternPlace]));$('transitions').innerHTML=data.transitions.slice(0,8).map((t,index)=>`<div class="list-item"><div><strong>${safe(t.from_name)} → ${safe(t.to_name)}</strong><small>${t.count} observed transition${t.count===1?'':'s'}</small></div><button data-transition="${index}">Map arrival</button></div>`).join('')||'<div class="empty">Transitions appear after visits to two or more places.</div>';$('transitions').querySelectorAll('[data-transition]').forEach(button=>button.onclick=()=>{const transition=data.transitions[+button.dataset.transition];focusPlaceOnMap({lat:transition.to_lat,lon:transition.to_lon,display_name:transition.to_name})})}
+function renderInsights(){const data=state.insights;if(!data)return;const prediction=data.prediction;$('prediction').textContent=prediction.prediction?`Likely next from ${prediction.from}: ${prediction.prediction} (${Math.round(prediction.frequency*100)}% of ${prediction.observations} observed departures).${prediction.current_fix_stale?' Latest location is stale; verify before acting.':''}`:`Next place: insufficient evidence (${prediction.reason}).`;$('pattern-places').innerHTML=data.frequent_places.slice(0,8).map((place,index)=>`<div class="list-item"><div class="place-main">${placeIcon(place)}<div><strong>${safe(place.display_name)}</strong><small>${zoneText(place.zone,place.display_name)?safe(zoneText(place.zone,place.display_name))+' · ':''}${place.visits} visit${place.visits===1?'':'s'} · ${durationText(place.observed_minutes)}</small></div></div><button data-pattern-place="${index}">Map</button></div>`).join('')||'<div class="empty">Common places appear after confirmed stays.</div>';$('pattern-places').querySelectorAll('[data-pattern-place]').forEach(button=>button.onclick=()=>focusPlaceOnMap(data.frequent_places[+button.dataset.patternPlace]));$('transitions').innerHTML=data.transitions.slice(0,8).map((t,index)=>`<div class="list-item"><div><strong>${safe(t.from_name)} → ${safe(t.to_name)}</strong><small>${t.count} observed transition${t.count===1?'':'s'}</small></div><button data-transition="${index}">Map arrival</button></div>`).join('')||'<div class="empty">Transitions appear after visits to two or more places.</div>';$('transitions').querySelectorAll('[data-transition]').forEach(button=>button.onclick=()=>{const transition=data.transitions[+button.dataset.transition];focusPlaceOnMap({lat:transition.to_lat,lon:transition.to_lon,display_name:transition.to_name})})}
 async function refreshCoverage(){const data=await api('/api/coverage');$('coverage').innerHTML=data.sources.map(s=>`<div class="list-item"><div><strong>${safe(s.source)} · ${s.points.toLocaleString()} fixes</strong><small>${safe(formatTime(s.first))} → ${safe(formatTime(s.last))}</small></div></div>`).join('')+(data.gaps_over_24h.length?`<p class="muted">${data.gaps_over_24h.length} gaps over 24 hours. Missing coverage cannot establish where you were.</p>`:'')||'<div class="empty">No source data yet.</div>'}
 async function refreshInsights(){state.insights=await api('/api/insights?limit=50');renderInsights()}
 async function refreshMeta(){let overview;[state.places,overview,state.reminders,state.reminderHistory,state.events,state.labels]=await Promise.all([api('/api/places'),api('/api/place-overview?limit=100'),api('/api/reminders'),api('/api/reminder-history?limit=200'),api('/api/events'),api('/api/place-labels')]);state.visitedPlaces=overview.visited;state.savedStats=overview.saved;renderPlaces();renderReminders();drawMap()}
@@ -528,7 +543,7 @@ async function refreshExplore(resetRawPage=true){
   if(location.hash!==hash)history.replaceState(null,'',location.pathname+location.search+hash);
   renderExplore(day,coverage);
 }
-function renderDailySummaries(){$('daily-summaries').innerHTML=state.dailySummaries.slice(0,10).map(item=>`<div class="list-item"><div><strong>${safe(item.date)}</strong><small>${item.trip_count} trips · ${Number(item.distance_km).toFixed(1)} km · ${item.place_count} places · ${item.reminder_count} reminders</small></div><button type="button" data-open-summary="${safe(item.date)}">View</button></div>`).join('')||'<div class="empty">A summary will be saved after the first completed day.</div>';
+function renderDailySummaries(){$('daily-summaries').innerHTML=state.dailySummaries.slice(0,5).map(item=>`<div class="list-item"><div><strong>${safe(longDate(item.date))}</strong><small>${item.points?safe(summaryLine(item)):'No location data'}</small></div><button type="button" data-open-summary="${safe(item.date)}">View</button></div>`).join('')||'<div class="empty">A summary is saved after the first completed day.</div>';
   $('daily-summaries').querySelectorAll('[data-open-summary]').forEach(button=>button.onclick=()=>{showView('summaries');openSummary(button.dataset.openSummary,false,true)})}
 function longDate(value){const [year,month,day]=value.split('-').map(Number);return new Date(year,month-1,day).toLocaleDateString(undefined,{weekday:'short',month:'short',day:'numeric',year:'numeric'})}
 function summaryLine(item){return `${item.trip_count} trip${item.trip_count===1?'':'s'} · ${Number(item.distance_km).toFixed(1)} km · ${item.place_count} place${item.place_count===1?'':'s'}${item.reminder_count?` · ${item.reminder_count} reminder${item.reminder_count===1?'':'s'}`:''}`}
@@ -536,7 +551,7 @@ function summaryDateParts(value){const [year,month,day]=value.split('-').map(Num
 function summaryCatalogMarkup(items){
   const groups=new Map();
   for(const item of items){const parts=summaryDateParts(item.date);if(!groups.has(parts.month))groups.set(parts.month,[]);groups.get(parts.month).push({...item,...parts})}
-  return [...groups.entries()].map(([month,days])=>`<section class="summary-month"><h3>${safe(month)}</h3>${days.map(item=>`<button type="button" class="summary-day${item.date===state.summaryDate?' selected':''}" data-summary="${safe(item.date)}" aria-current="${item.date===state.summaryDate?'date':'false'}" aria-label="${safe(longDate(item.date)+', '+summaryLine(item))}"><span class="summary-day-calendar"><span>${safe(item.weekday)}</span><strong>${item.day}</strong></span><span class="summary-day-copy"><strong>${Number(item.distance_km).toFixed(1)} km</strong><small>${item.trip_count} trip${item.trip_count===1?'':'s'} · ${item.place_count} place${item.place_count===1?'':'s'}${item.reminder_count?` · ${item.reminder_count} reminder${item.reminder_count===1?'':'s'}`:''}</small></span><span class="summary-day-arrow" aria-hidden="true">›</span></button>`).join('')}</section>`).join('');
+  return [...groups.entries()].map(([month,days])=>`<section class="summary-month"><h3>${safe(month)}</h3>${days.map(item=>`<button type="button" class="summary-day${item.date===state.summaryDate?' selected':''}" data-summary="${safe(item.date)}" aria-current="${item.date===state.summaryDate?'date':'false'}" aria-label="${safe(longDate(item.date)+', '+summaryLine(item))}"><span class="summary-day-calendar"><span>${safe(item.weekday)}</span><strong>${item.day}</strong></span><span class="summary-day-copy">${item.points?`<strong>${Number(item.distance_km).toFixed(1)} km</strong><small>${item.trip_count} trip${item.trip_count===1?'':'s'} · ${item.place_count} place${item.place_count===1?'':'s'}${item.reminder_count?` · ${item.reminder_count} reminder${item.reminder_count===1?'':'s'}`:''}</small>`:'<strong class="muted">No data</strong><small>Nothing recorded</small>'}</span><span class="summary-day-arrow" aria-hidden="true">›</span></button>`).join('')}</section>`).join('');
 }
 async function refreshSummaries(){
   state.summaryCatalog=await api('/api/daily-summaries?limit=1000');
@@ -546,7 +561,9 @@ async function refreshSummaries(){
   $('summary-index').innerHTML=summaryCatalogMarkup(state.summaryCatalog)
     ||'<div class="summary-index-empty"><strong>No saved days yet</strong><p>A summary is saved after the first completed day. You can also jump to a past date to build one.</p></div>';
   $('summary-index').querySelectorAll('[data-summary]').forEach(button=>button.onclick=()=>openSummary(button.dataset.summary,false,true));
-  if(!state.summaryDate&&state.summaryCatalog[0])openSummary(state.summaryCatalog[0].date);
+  // Open the newest day that has something to show.
+  const first=state.summaryCatalog.find(item=>item.points)||state.summaryCatalog[0];
+  if(!state.summaryDate&&first)openSummary(first.date);
 }
 async function openSummary(date,build=false,reveal=false){
   state.summaryDate=date;$('summary-date').value=date;
@@ -562,7 +579,7 @@ async function openSummary(date,build=false,reveal=false){
   }catch(error){
     if(state.summaryDate!==date)return;
     box.removeAttribute('aria-busy');
-    box.innerHTML=`<div class="summary-missing"><span class="summary-empty-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M6 3v3M18 3v3M4 9h16M5 5h14a1 1 0 0 1 1 1v13a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a1 1 0 0 1 1-1Z"/><path d="M9 14h6"/></svg></span><div><span class="page-kicker">Not saved yet</span><h2>${safe(longDate(date))}</h2><p>${safe(error.message)}.</p></div><button type="button" class="primary-button" id="build-summary">Build this summary</button></div>`;
+    box.innerHTML=`<div class="summary-missing"><span class="empty-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="15" rx="2"/><path d="M8 3v4M16 3v4M4 10h16M9 15h6"/></svg></span><div><span class="eyebrow">Not saved yet</span><h2>${safe(longDate(date))}</h2><p>${safe(error.message)}.</p></div><button type="button" class="button primary" id="build-summary">Build this summary</button></div>`;
     $('build-summary').onclick=()=>openSummary(date,true);
   }
 }
@@ -575,9 +592,14 @@ const summaryIcons={
   reminders:'<svg viewBox="0 0 24 24"><path d="M6 16h12l-1.5-2.5V10a4.5 4.5 0 0 0-9 0v3.5L6 16Z"/><path d="M10 19h4"/></svg>'
 };
 function summaryMetric(label,value,icon){return `<div><span class="summary-metric-icon" aria-hidden="true">${summaryIcons[icon]}</span><dt>${safe(label)}</dt><dd>${safe(value)}</dd></div>`}
+function summarySpan(start,end,date){
+  // A stay that began the day before reads "Until …", one that runs past midnight "From …".
+  const early=localDateKey(new Date(start))<date,late=localDateKey(new Date(end))>date;
+  return early&&late?'All day':early?`Until ${clock(end)}`:late?`From ${clock(start)}`:`${clock(start)} – ${clock(end)}`;
+}
 function summaryTimeline(value){
   const events=[];
-  for(const visit of value.visits||[])events.push({at:visit.arrival,type:'visit',title:visit.place||'Unnamed place',time:`${clock(visit.arrival)} – ${clock(visit.departure)}`,detail:[zoneText(visit.zone,visit.place),durationText(visit.observed_minutes),visit.activity?`${modeName(visit.activity)}${visit.distance_km?' '+distanceText(visit.distance_km):''}`:'',(visit.moved_within||[]).length?'Moved within: '+visit.moved_within.map(move=>`${modeName(move.mode).toLowerCase()} ${distanceText(move.distance_km)}`).join(', '):'',visit.ongoing?'Ongoing':''].filter(Boolean).join(' · '),icon:placeIcon({name:visit.place})});
+  for(const visit of value.visits||[])events.push({at:visit.arrival,type:'visit',title:visit.place||'Unnamed place',time:summarySpan(visit.arrival,visit.departure,value.date),detail:[zoneText(visit.zone,visit.place),durationText(visit.observed_minutes),visit.activity?`${modeName(visit.activity)}${visit.distance_km?' '+distanceText(visit.distance_km):''}`:'',(visit.moved_within||[]).length?'Moved within: '+visit.moved_within.map(move=>`${modeName(move.mode).toLowerCase()} ${distanceText(move.distance_km)}`).join(', '):'',visit.ongoing&&value.date===localDateKey()?'Still there':''].filter(Boolean).join(' · '),icon:placeIcon({name:visit.place})});
   for(const trip of value.trips||[])events.push({at:trip.start,type:'trip',title:trip.round_trip?`Round trip from ${trip.from||'a stay'}`:`${trip.from||'A stay'} → ${trip.to||'a stay'}`,time:`${clock(trip.start)} – ${clock(trip.end)}`,detail:[`${modeName(trip.mode)} ${distanceText(trip.distance_km)}`,durationText(trip.duration_minutes),trip.coverage_complete?'':'Coverage gap'].filter(Boolean).join(' · '),icon:modeIcon(trip.mode)});
   for(const gap of value.coverage_gaps||[])events.push({at:gap.start,type:'gap',title:'No location data',time:`${clock(gap.start)} – ${clock(gap.end)}`,detail:durationText(gap.minutes),icon:'<span class="summary-gap-icon" aria-hidden="true">···</span>'});
   events.sort((a,b)=>String(a.at).localeCompare(String(b.at)));
@@ -598,7 +620,8 @@ function renderSummaryDetail(record){
   if(state.summaryDate!==record.date)return;
   const value=record.summary,totals=value.totals||{};
   const homeReturn=value.home_return?.summary;
-  const overviewText=value.overview||'No overview was stored for this day.';
+  // The brief's summary is the same facts in plain sentences.
+  const overviewText=record.brief?.summary||value.overview||'No overview was stored for this day.';
   const displayOverview=homeReturn&&overviewText.endsWith(` ${homeReturn}`)?overviewText.slice(0,-homeReturn.length-1):overviewText;
   const facts=[['Distance',`${Number(totals.distance_km||0).toFixed(1)} km`,'distance'],['Time moving',durationText((totals.moving_hours||0)*60),'time'],['Trips',totals.trips??0,'trips'],['Places',totals.places??0,'places']];
   const secondaryFacts=[['Sampled distance',`${Number(totals.sampled_distance_km||0).toFixed(1)} km`],['Location fixes',`${(totals.timeline_fixes??0).toLocaleString()} key / ${(totals.raw_fixes??0).toLocaleString()} raw`],['Reminders',`${totals.reminders_triggered??0} triggered / ${totals.reminders_created??0} created`]];
@@ -607,11 +630,17 @@ function renderSummaryDetail(record){
   const gaps=(value.coverage_gaps||[]).map(gap=>summaryRow('No location data',`${clock(gap.start)} – ${clock(gap.end)} · ${durationText(gap.minutes)}`));
   // Rough token estimate (about 4 characters each) to show what the brief saves an AI tool.
   const tokens=text=>'≈'+Math.round(text.length/4).toLocaleString()+' tokens',brief=record.brief;
-  const briefBlock=`<section class="summary-block summary-brief"><div class="brief-head"><div><h3>Brief for AI tools</h3><p>A compact version for MCP tools and language models.</p></div>${brief?`<small>${tokens(JSON.stringify(brief))} · full record ${tokens(JSON.stringify(value))}</small><button type="button" class="outline-button" id="copy-brief">Copy brief</button>`:''}</div>
+  const briefBlock=`<section class="summary-block summary-brief"><div class="brief-head"><div><h3>Brief for AI tools</h3><p>A compact version for MCP tools and language models.</p></div>${brief?`<small>${tokens(JSON.stringify(brief))} · full record ${tokens(JSON.stringify(value))}</small><button type="button" class="button secondary" id="copy-brief">Copy brief</button>`:''}</div>
     ${brief?`<pre>${safe(JSON.stringify(brief,null,2))}</pre>`:'<p class="empty">No brief is stored with this record yet. Refresh to build it.</p>'}</section>`;
   $('summary-detail').removeAttribute('aria-busy');
+  if(!(totals.raw_fixes>0)){
+    $('summary-detail').innerHTML=`<div class="summary-hero"><div class="summary-head"><div><div class="summary-status-line">${statusPill('neutral','No data')}<span>${safe(record.timezone)}</span></div><h2>${safe(longDate(record.date))}</h2><div class="summary-updated">Updated ${safe(formatTime(record.updated_at))}</div></div><div class="summary-actions"><button type="button" class="button secondary" id="summary-refresh">Refresh</button></div></div></div>
+      <div class="summary-empty-state"><span class="empty-icon" aria-hidden="true">${summaryIcons.places}</span><h2>No location recorded</h2><p>No device sent a location on this day, so there are no visits or trips to summarize.${record.stale?' Newer data has arrived since this was saved; refresh to include it.':''}</p></div>`;
+    $('summary-refresh').onclick=()=>openSummary(record.date,true);
+    return;
+  }
   $('summary-detail').innerHTML=`<div class="summary-hero"><div class="summary-head"><div><div class="summary-status-line"><span class="summary-status ${record.stale?'stale':'current'}">${record.stale?'Needs refresh':'Saved summary'}</span><span>${safe(record.timezone)}</span></div><h2>${safe(longDate(record.date))}</h2><div class="summary-updated">Updated ${safe(formatTime(record.updated_at))}${record.created_at!==record.updated_at?' · First saved '+safe(formatTime(record.created_at)):''}</div></div>
-      <div class="summary-actions"><button type="button" class="primary-button" id="summary-history">Open in History</button><button type="button" class="outline-button" id="summary-refresh">Refresh summary</button></div></div>
+      <div class="summary-actions"><button type="button" class="button primary" id="summary-history">Open in History</button><button type="button" class="button secondary" id="summary-refresh">Refresh summary</button></div></div>
       <p class="summary-overview">${safe(displayOverview)}</p>${homeReturn?`<div class="summary-home-return"><span aria-hidden="true">⌂</span><div><small>Cross-midnight home return</small><strong>${safe(homeReturn)}</strong></div></div>`:''}</div>
     ${record.stale?'<div class="summary-stale-note"><span aria-hidden="true">!</span><div><strong>This day has newer location data</strong><p>Refresh the summary to include the latest changes.</p></div></div>':''}
     <dl class="summary-facts">${facts.map(([label,text,icon])=>summaryMetric(label,text,icon)).join('')}</dl>
@@ -640,18 +669,54 @@ function updateProviderNotice(){
   const value=$('places-provider').value||state.status?.geocoder;
   $('mapbox-terms').hidden=value!=='mapbox';
 }
-// Where each kind of tracker app sends locations, and how it authenticates.
+// Where each kind of tracker app sends locations, how it signs in, and how to set it up.
 const TRACKERS=[
-  ['OwnTracks','owntracks','Mode HTTP. Identification: any username, the ingest token as password, and a device name.'],
-  ['Overland','overland?token=YOUR_INGEST_TOKEN','Receiver endpoint. Batches are acknowledged so its queue clears.'],
-  ['Traccar Client / OsmAnd','osmand?token=YOUR_INGEST_TOKEN','Server URL. The device identifier names the source.'],
-  ['GPSLogger, Tasker, Shortcuts','generic?lat=%LAT&lon=%LON&timestamp=%TIMESTAMP&accuracy=%ACC&speed_mps=%SPD&device=phone&token=YOUR_INGEST_TOKEN','Fields: lat, lon, timestamp, accuracy, speed_mps or speed_kmh, device; query, form, or JSON.']];
-function renderTrackerEndpoints(){const base=location.origin+'/api/ingest/';$('tracker-endpoints').innerHTML=TRACKERS.map(([name,path,help])=>`<div class="list-item"><div><strong>${safe(name)}</strong><small><code>${safe(base+path)}</code><br>${safe(help)}</small></div><div class="actions"><button type="button" data-copy-endpoint="${safe(base+path)}">Copy</button></div></div>`).join('');
-  $('tracker-endpoints').querySelectorAll('[data-copy-endpoint]').forEach(button=>button.onclick=()=>copyText(button.dataset.copyEndpoint,'Address copied'))}
-function renderSettings(){if(!state.settings)return;renderTrackerEndpoints();renderPlacesProvider();populateTimezones(state.settings.timezone);$('speed-strategy').value=state.settings.speed_strategy;$('speed-offset').value=state.settings.reported_speed_offset_kmh;updateSpeedSettingsVisibility();renderDailySummaries()}
+  {kind:'owntracks',name:'OwnTracks',platform:'iOS and Android',path:'/api/ingest/owntracks',steps:['In OwnTracks, open Preferences → Connection and set Mode to HTTP.','Set Host (URL) to the address above.','Under Identification, enter any username, your phone token as the password, and a device name. The device name labels this source.']},
+  {kind:'overland',name:'Overland',platform:'iOS',path:'/api/ingest/overland?token=YOUR_PHONE_TOKEN',steps:['In Overland settings, set Receiver Endpoint to the address above, with your phone token in place of YOUR_PHONE_TOKEN.','Overland sends batches and clears them only once GeoLogs confirms, so nothing is lost offline.']},
+  {kind:'osmand',name:'Traccar Client or OsmAnd',platform:'iOS and Android',path:'/api/ingest/osmand?token=YOUR_PHONE_TOKEN',steps:['Set the server URL to the address above, with your phone token.','The device identifier labels this source.']},
+  {kind:'generic',name:'GPSLogger, Tasker, Shortcuts',platform:'Anything that can send a web request',path:'/api/ingest/generic?lat=%LAT&lon=%LON&timestamp=%TIMESTAMP&accuracy=%ACC&speed_mps=%SPD&device=phone&token=YOUR_PHONE_TOKEN',steps:['Send lat, lon, timestamp, accuracy, speed_mps (or speed_kmh), and device as a query string, a form, or JSON.','The example address uses GPSLogger’s placeholders.']},
+  {kind:'api',name:'Home Assistant poller & API',platform:'POST /api/points',path:'/api/points',steps:['Run ./geologs poll-ha from cron to read a Home Assistant device tracker, or POST JSON points with a Bearer token.']}
+];
+const SOURCE_KINDS={owntracks:'OwnTracks',overland:'Overland',osmand:'Traccar / OsmAnd',generic:'Generic',home_assistant:'Home Assistant',manual:'Manual',import:'Import',takeout:'Google Takeout'};
+function sourceName(source){const [kind,...rest]=String(source||'').split(':');return SOURCE_KINDS[kind]?{kind:SOURCE_KINDS[kind],device:rest.join(':')}:{kind:source,device:''}}
+function trackerStatus(app){
+  if(!app)return{tone:'neutral',label:'Not connected',detail:'No requests from this app yet.'};
+  if(app.last_status>=400&&(!app.last_success_at||app.last_attempt_at>app.last_success_at))
+    return{tone:'error',label:'Failing',detail:`Last request ${ago(app.last_attempt_at)} was rejected: ${app.last_message||'error '+app.last_status}.`};
+  const quiet=Date.now()-Date.parse(app.last_success_at)>6*3600e3,source=sourceName(app.last_success_source);
+  return{tone:quiet?'warning':'success',label:quiet?'Quiet':'Receiving',
+    detail:[`Last data ${ago(app.last_success_at)}`,app.last_success_source?`from ${source.device||source.kind}`:'',`${Number(app.received||0).toLocaleString()} fix${Number(app.received)===1?'':'es'} received`,app.last_message||''].filter(Boolean).join(' · ')};
+}
+function statusPill(tone,label){return `<span class="status-pill ${tone}">${safe(label)}</span>`}
+function renderSources(){
+  const data=state.sources;if(!data)return;
+  const sources=data.sources||[],newest=sources[0];
+  $('sources-summary').textContent=sources.length?`${sources.length} source${sources.length===1?'':'s'} · last location received ${ago(newest.last_received)}`:'No locations received yet. Connect an app below.';
+  $('source-list').innerHTML=sources.map(item=>{
+    // Health follows the newest fix itself: an old backfill that arrived a minute ago is not live.
+    const age=Date.now()-Date.parse(item.last_fix),tone=age<3600e3?'success':age<86400e3?'warning':'neutral';
+    const name=sourceName(item.source);
+    const lag=(Date.parse(item.last_received)-Date.parse(item.last_fix))/60000;
+    const details=[`Received ${ago(item.last_received)}`,lag>15?`newest fix from ${formatTime(item.last_fix)}`:'',`${Number(item.fixes_24h).toLocaleString()} in the last 24 h`,`${Number(item.fixes).toLocaleString()} total since ${new Date(item.first_fix).toLocaleDateString(undefined,{month:'short',year:'numeric',...zoneOptions()})}`].filter(Boolean);
+    return `<div class="list-item"><div class="place-main"><span class="health-dot ${tone}" aria-hidden="true"></span><div><strong>${safe(name.kind)}${name.device?` <span class="muted">· ${safe(name.device)}</span>`:''}</strong><small>${safe(details.join(' · '))}</small></div></div>${statusPill(tone,tone==='success'?'Live':tone==='warning'?'Quiet':'Idle')}</div>`;
+  }).join('')||'<div class="empty">Locations will appear here as soon as a device sends one.</div>';
+  const apps=new Map((data.apps||[]).map(app=>[app.kind,app]));
+  $('ingest-token-note').hidden=!!data.ingest_token;
+  $('ingest-token-note').textContent='Set GEOLOGS_INGEST_TOKEN in .env to give phones a send-only token. Until then, apps need your main access token, which can also read your history.';
+  $('access-ingest-badge').outerHTML=`<span id="access-ingest-badge">${statusPill(data.ingest_token?'success':'warning',data.ingest_token?'Configured':'Not set')}</span>`;
+  const open=new Set([...document.querySelectorAll('#tracker-endpoints details[open]')].map(item=>item.dataset.kind));
+  $('tracker-endpoints').innerHTML=TRACKERS.map(tracker=>{
+    const status=trackerStatus(apps.get(tracker.kind)),url=location.origin+tracker.path;
+    return `<details class="tracker" data-kind="${tracker.kind}"${open.has(tracker.kind)?' open':''}><summary><span class="tracker-title"><strong>${safe(tracker.name)}</strong><small>${safe(tracker.platform)}</small></span>${statusPill(status.tone,status.label)}<svg class="chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary>
+      <div class="tracker-body"><p class="tracker-status ${status.tone}">${safe(status.detail)}</p><div class="copy-field"><input class="input mono" readonly value="${safe(url)}" aria-label="${safe(tracker.name)} address"><button type="button" class="button secondary small" data-copy-endpoint="${safe(url)}">Copy</button></div><ol class="steps">${tracker.steps.map(step=>`<li>${safe(step)}</li>`).join('')}</ol></div></details>`;
+  }).join('');
+  $('tracker-endpoints').querySelectorAll('[data-copy-endpoint]').forEach(button=>button.onclick=()=>copyText(button.dataset.copyEndpoint,'Address copied'));
+}
+async function refreshSources(){state.sources=await api('/api/sources');renderSources()}
+function renderSettings(){if(!state.settings)return;renderPlacesProvider();populateTimezones(state.settings.timezone);$('speed-strategy').value=state.settings.speed_strategy;$('speed-offset').value=state.settings.reported_speed_offset_kmh;updateSpeedSettingsVisibility();renderDailySummaries()}
 function updateSpeedSettingsVisibility(){const reported=$('speed-strategy').value==='reported';$('speed-offset').disabled=!reported;$('speed-offset-field').classList.toggle('disabled-field',!reported)}
 async function refreshCurrent(){state.current=await api('/api/current');renderCurrent();drawMap()}
-async function refreshAll(){try{const [status,current,settings,dailySummaries]=await Promise.all([api('/api/status'),api('/api/current'),api('/api/settings'),api('/api/daily-summaries?limit=10')]);state.status=status;state.current=current;state.settings=settings;state.dailySummaries=dailySummaries;if(state.followToday)$('day-date').value=localDateKey();renderCurrent();renderSettings();$('connection').textContent='Connected';$('geocode-hint').textContent=status.geocoding?(current?'Results favor your last recorded location.':'Searches are worldwide until a location is recorded.'):'Place search needs a geocoding provider.';await refreshMeta();await Promise.all([refreshExplore(),refreshInsights(),refreshCoverage()])}catch(e){toast(e.message)}}
+async function refreshAll(){try{const [status,current,settings,dailySummaries]=await Promise.all([api('/api/status'),api('/api/current'),api('/api/settings'),api('/api/daily-summaries?limit=10')]);state.status=status;state.current=current;state.settings=settings;state.dailySummaries=dailySummaries;if(state.followToday)$('day-date').value=localDateKey();renderCurrent();renderSettings();$('geocode-hint').textContent=status.geocoding?(current?'Results favor your last recorded location.':'Searches are worldwide until a location is recorded.'):'Place search needs a geocoding provider.';await refreshMeta();await Promise.all([refreshExplore(),refreshInsights(),refreshCoverage()])}catch(e){toast(e.message)}}
 async function pollEvents(){try{const events=await api('/api/events?since_id='+state.lastEventId);const newest=events.reduce((max,e)=>Math.max(max,e.id),state.lastEventId);if(state.lastEventId&&events.length){for(const event of events.reverse()){toast(`${event.text} · ${event.place_name}`);if(Notification.permission==='granted')new Notification('Location reminder',{body:`${event.text} · ${event.place_name}`})}}state.lastEventId=newest;if(events.length)await refreshMeta()}catch(e){/* Connection errors are surfaced on explicit actions. */}}
 $('auth-cancel').onclick=()=>{authDismissed=true;$('auth-panel').hidden=true;$('auth-token').value=''};
 $('auth-form').onsubmit=async event=>{event.preventDefault();const token=$('auth-token').value.trim();try{const response=await fetch('/api/session',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({token})});const result=await response.json();if(!response.ok)throw Error(result.error||'Access token rejected');sessionStorage.removeItem('geologs-token');$('auth-token').value='';$('auth-panel').hidden=true;authDismissed=false;await refreshAll()}catch(error){$('auth-error').textContent=error.message}};
@@ -681,6 +746,16 @@ $('place-form').onsubmit=async e=>{e.preventDefault();try{await post('/api/place
 $('reverse').onclick=async()=>{if(!$('place-lat').value||!$('place-lon').value){toast('Enter coordinates first');return}try{const q=new URLSearchParams({lat:$('place-lat').value,lon:$('place-lon').value});const result=await api('/api/reverse?'+q);$('place-address').value=result.address||'';$('place-category').value=result.category||'';$('place-provider-id').value=result.provider_place_id||'';if(!$('place-name').value)$('place-name').value=(result.name||'').slice(0,120);toast(result.approximate?'Nearby cached place found — verify before saving':'Place found')}catch(err){toast(err.message)}};
 $('add-place').onclick=()=>openPlaceDialog();
 $('explore-summaries').onclick=()=>showView('summaries');
+$('connection').onclick=()=>{showView('settings');document.getElementById('settings-sources').scrollIntoView({behavior:'smooth',block:'start'})};
+$('refresh-sources').onclick=()=>refreshSources().then(()=>toast('Sources updated')).catch(error=>toast(error.message));
+$('sign-out').onclick=async()=>{try{await fetch('/api/session',{method:'DELETE',credentials:'same-origin'})}catch(_error){}sessionStorage.removeItem('geologs-token');authDismissed=false;setConnection('warning','Signed out');openAuth('You are signed out. Enter the access token to sign in again.')};
+document.querySelectorAll('.settings-nav a').forEach(link=>link.onclick=event=>{event.preventDefault();document.querySelector(link.getAttribute('href')).scrollIntoView({behavior:window.matchMedia('(prefers-reduced-motion: reduce)').matches?'auto':'smooth',block:'start'})});
+if('IntersectionObserver' in window){
+  // Highlight the section being read in the Settings navigation.
+  const sectionObserver=new IntersectionObserver(entries=>{for(const entry of entries)if(entry.isIntersecting)document.querySelectorAll('.settings-nav a').forEach(link=>link.classList.toggle('active',link.getAttribute('href')==='#'+entry.target.id))},{rootMargin:'-20% 0px -70% 0px'});
+  document.querySelectorAll('.settings-section').forEach(section=>sectionObserver.observe(section));
+}
+setInterval(()=>{if($('settings-view').classList.contains('active')&&!document.hidden)refreshSources().catch(()=>{})},30000);
 $('summary-open-form').onsubmit=event=>{event.preventDefault();const date=$('summary-date').value;if(date)openSummary(date,!state.summaryCatalog?.some(item=>item.date===date),true)};
 $('label-form').onsubmit=async event=>{
   event.preventDefault();
@@ -735,7 +810,7 @@ function renderVisitResults(result){
     const details=[`${clock(visit.started_at)} – ${clock(visit.ended_at)}`,durationText(visit.observed_minutes)];
     if(visit.activity)details.push(modeName(visit.activity));
     if(visit.ongoing)details.push('now');
-    return `<li><div class="visit-date"><strong>${safe(dateLabel(visit.date))}</strong><span>${safe(visit.weekday)}</span></div><div class="visit-info"><strong>${safe(visit.place)}</strong><small>${safe(details.join(' · '))}</small></div><button type="button" class="outline-button" data-visit-day="${index}">Show day</button></li>`}).join('')}</ul>`;
+    return `<li><div class="visit-date"><strong>${safe(dateLabel(visit.date))}</strong><span>${safe(visit.weekday)}</span></div><div class="visit-info"><strong>${safe(visit.place)}</strong><small>${safe(details.join(' · '))}</small></div><button type="button" class="button secondary" data-visit-day="${index}">Show day</button></li>`}).join('')}</ul>`;
   box.querySelectorAll('[data-visit-day]').forEach(button=>button.onclick=()=>openVisitDay(result.visits[+button.dataset.visitDay]));
 }
 function openVisitDay(visit){

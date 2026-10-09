@@ -1957,6 +1957,34 @@ class IngestTests(unittest.TestCase):
         self.assertEqual(self.send("GET", "/api/ingest/osmand?id=x&lat=41&lon=-87.9&token=main-token")[0], 200)
         self.assertEqual(self.send("GET", "/api/ingest/osmand?id=x&lat=41&lon=-87.9")[0], 401)
 
+    def test_settings_can_see_which_trackers_get_through_and_why_not(self):
+        main = {"Authorization": "Bearer main-token"}
+        self.assertEqual(self.send("GET", "/api/sources", headers=main)[1]["apps"], [])
+        self.send("POST", "/api/ingest/owntracks", {"_type": "location", "lat": 41, "lon": -87.9, "tst": 1790514000},
+                  {"Authorization": "Bearer phone-token", "X-Limit-U": "karun", "X-Limit-D": "pixel"})
+        self.send("POST", "/api/ingest/overland?token=wrong", {"locations": []})
+        self.send("POST", "/api/ingest/generic?token=phone-token", [{"lat": 41.001, "lon": -87.9, "device": "tasker"}, {"lat": "x"}])
+        status, value, _ = self.send("GET", "/api/sources", headers=main)
+        self.assertEqual((status, value["ingest_token"]), (200, True))
+        apps = {app["kind"]: app for app in value["apps"]}
+        self.assertEqual((apps["owntracks"]["last_status"], apps["owntracks"]["last_success_source"], apps["owntracks"]["received"]),
+                         (200, "owntracks:karun/pixel", 1))
+        self.assertEqual((apps["overland"]["last_status"], apps["overland"]["last_message"], apps["overland"]["last_success_at"]),
+                         (401, "Wrong or missing token", None))
+        self.assertEqual(apps["generic"]["last_message"], "1 malformed fix skipped")
+        sources = {item["source"]: item for item in value["sources"]}
+        self.assertEqual(set(sources), {"owntracks:karun/pixel", "generic:tasker"})
+        self.assertEqual((sources["owntracks:karun/pixel"]["fixes"], sources["owntracks:karun/pixel"]["last_fix"]),
+                         (1, "2026-09-27T13:00:00+00:00"))
+        self.assertEqual(sources["generic:tasker"]["fixes_24h"], 1)
+        # The sender token cannot read any of this.
+        self.assertEqual(self.send("GET", "/api/sources", headers={"Authorization": "Bearer phone-token"})[0], 401)
+
+    def test_unreachable_database_is_reported_not_a_dropped_connection(self):
+        with patch("geologs.http.Store", side_effect=RuntimeError("password authentication failed for user \"geologs\"")):
+            status, value, _ = self.send("GET", "/api/status", headers={"Authorization": "Bearer main-token"})
+        self.assertEqual((status, value["error"]), (503, 'Database unavailable: password authentication failed for user "geologs"'))
+
 
 if __name__ == "__main__":
     unittest.main()

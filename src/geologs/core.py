@@ -506,6 +506,11 @@ class Store:
             started_at TEXT NOT NULL, ended_at TEXT NOT NULL, mode TEXT NOT NULL,
             created_at TEXT NOT NULL, updated_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS ingest_status (
+            kind TEXT PRIMARY KEY, last_attempt_at TEXT NOT NULL, last_status INTEGER NOT NULL,
+            last_message TEXT, last_source TEXT, last_success_at TEXT, last_success_source TEXT,
+            received INTEGER NOT NULL DEFAULT 0
+        );
         CREATE TABLE IF NOT EXISTS place_labels (
             id INTEGER PRIMARY KEY, name TEXT NOT NULL, lat REAL NOT NULL, lon REAL NOT NULL,
             radius_m REAL NOT NULL, address TEXT, category TEXT, provider_place_id TEXT,
@@ -1176,6 +1181,33 @@ class Store:
         self.db.execute("DELETE FROM analysis_cache")
         self.db.commit()
         return next(label for label in self.place_labels() if label["id"] == target)
+
+    def record_ingest(self, kind, status, message=None, source=None, accepted=0):
+        """Remember the latest request from each kind of tracker, so Settings can say
+        whether a phone is getting through and, when it is not, why."""
+        now = parse_time(None)
+        ok = 200 <= status < 300
+        self.db.execute("""INSERT INTO ingest_status
+            (kind,last_attempt_at,last_status,last_message,last_source,last_success_at,last_success_source,received)
+            VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(kind) DO UPDATE SET
+            last_attempt_at=excluded.last_attempt_at,last_status=excluded.last_status,
+            last_message=excluded.last_message,last_source=COALESCE(excluded.last_source,ingest_status.last_source),
+            last_success_at=COALESCE(excluded.last_success_at,ingest_status.last_success_at),
+            last_success_source=COALESCE(excluded.last_success_source,ingest_status.last_success_source),
+            received=ingest_status.received+excluded.received""",
+            (kind, now, int(status), (message or "")[:300] or None, source,
+             now if ok else None, source if ok else None, int(accepted)))
+        self.db.commit()
+
+    def source_activity(self, now=None):
+        """Every source that has sent locations: how much, the newest fix, and when it last arrived."""
+        day_ago = parse_time((now or datetime.now(timezone.utc)).timestamp() - 86400)
+        sources = self._rows("""SELECT o.source,o.fixes,o.first_fix,o.last_fix,r.received_at AS last_received,
+            (SELECT COUNT(*) FROM point_observations x WHERE x.source=o.source AND x.timestamp>=?) AS fixes_24h
+            FROM (SELECT source,COUNT(*) AS fixes,MIN(timestamp) AS first_fix,MAX(timestamp) AS last_fix,MAX(id) AS last_id
+                  FROM point_observations GROUP BY source) o
+            JOIN point_observations r ON r.id=o.last_id ORDER BY r.received_at DESC""", (day_ago,))
+        return {"sources": sources, "apps": self._rows("SELECT * FROM ingest_status ORDER BY last_attempt_at DESC")}
 
     def mode_overrides(self):
         """Travel mode corrections, each for one trip or area stay identified by source and time."""
