@@ -5,7 +5,9 @@ import { $, safe, toast } from "../core/dom.js";
 import { clock, coordinateText, metresBetween } from "../core/format.js";
 import { state } from "../core/state.js";
 import { map, searchLayer } from "../map/map.js";
+import { onEach } from "../ui/actions.js";
 import { placeIcon } from "../ui/icons.js";
+import { placeResultsMarkup, resolvePlace, searchPlaces } from "../ui/place-search.js";
 import { refreshExplore } from "./history.js";
 import { refreshInsights } from "./patterns.js";
 import { showView } from "./shell.js";
@@ -158,45 +160,40 @@ export async function afterPlaceNamesChanged(message) {
 
 export function initPlaceDialogs() {
   loadNearbyPlaces.request = 0;
-  $("search-form").onsubmit = async (e) => {
-    e.preventDefault();
+  $("search-form").onsubmit = async (event) => {
+    event.preventDefault();
+    const query = $("search").value.trim();
+    if (!query) return;
+    const box = $("search-results");
+    box.innerHTML = '<p class="empty">Searching near you…</p>';
     try {
-      const q = new URLSearchParams({ q: $("search").value });
       state.current = await api("/api/current");
-      if (state.current) {
-        q.set("lat", state.current.lat);
-        q.set("lon", state.current.lon);
-      }
-      const results = await api("/api/geocode?" + q);
-      $("search-results").innerHTML =
-        results
-          .map(
-            (p, i) =>
-              `<div class="result-item"><div class="place-main">${placeIcon(p)}<div><strong>${safe(p.name)}</strong><span>${safe(p.address || "")} · ${Number(p.lat).toFixed(5)}, ${Number(p.lon).toFixed(5)}</span></div></div><button data-search="${i}">Use</button></div>`,
-          )
-          .join("") || '<p class="empty">No matches.</p>';
-      $("search-results")
-        .querySelectorAll("[data-search]")
-        .forEach(
-          (b) =>
-            (b.onclick = () => {
-              const p = results[+b.dataset.search];
-              $("place-id").value = "";
-              $("place-category").value = p.category || "";
-              $("place-provider-id").value = p.provider_place_id || "";
-              $("place-name").value = p.name.slice(0, 120);
-              $("place-lat").value = p.lat;
-              $("place-lon").value = p.lon;
-              $("place-address").value = p.address || "";
-            }),
-        );
-      if (map && results[0]) {
-        searchLayer.clearLayers();
-        L.marker([results[0].lat, results[0].lon]).addTo(searchLayer);
-        map.setView([results[0].lat, results[0].lon], 13);
-      }
-    } catch (err) {
-      toast(err.message);
+      const results = await searchPlaces(query);
+      box.innerHTML = placeResultsMarkup(results, "data-search");
+      onEach(box, "search", async (index) => {
+        try {
+          const place = await resolvePlace(results[+index]);
+          $("place-id").value = "";
+          $("place-category").value = place.category || "";
+          $("place-provider-id").value = place.provider_place_id || "";
+          $("place-name").value = place.name.slice(0, 120);
+          $("place-lat").value = place.lat;
+          $("place-lon").value = place.lon;
+          $("place-address").value = place.address || "";
+          box
+            .querySelectorAll(".result-item")
+            .forEach((item, position) => item.classList.toggle("chosen", position === +index));
+          if (map) {
+            searchLayer.clearLayers();
+            L.marker([place.lat, place.lon]).addTo(searchLayer);
+            map.setView([place.lat, place.lon], 15);
+          }
+        } catch (error) {
+          toast(error.message);
+        }
+      });
+    } catch (error) {
+      box.innerHTML = `<p class="empty">${safe(error.message)}</p>`;
     }
   };
   $("place-form").onsubmit = async (e) => {

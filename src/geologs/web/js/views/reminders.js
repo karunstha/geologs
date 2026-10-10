@@ -5,6 +5,7 @@ import { $, safe, toast } from "../core/dom.js";
 import { ago, formatTime } from "../core/format.js";
 import { state } from "../core/state.js";
 import { onEach, rowActions } from "../ui/actions.js";
+import { placeResultsMarkup, resolvePlace, searchPlaces } from "../ui/place-search.js";
 import { placeIcon, statusPill } from "../ui/icons.js";
 
 function destinationKind() {
@@ -121,22 +122,17 @@ async function searchDestination() {
     return;
   }
   const box = $("reminder-search-results");
-  box.innerHTML = '<p class="empty">Searching…</p>';
+  box.innerHTML = '<p class="empty">Searching near you…</p>';
   try {
-    const params = new URLSearchParams({ q: query });
-    if (state.current) {
-      params.set("lat", state.current.lat);
-      params.set("lon", state.current.lon);
-    }
-    const results = await api("/api/geocode?" + params);
-    box.innerHTML =
-      results
-        .map(
-          (place, index) =>
-            `<div class="result-item"><div class="place-main">${placeIcon(place)}<div><strong>${safe(place.name)}</strong><span>${safe(place.address || `${Number(place.lat).toFixed(5)}, ${Number(place.lon).toFixed(5)}`)}</span></div></div><button type="button" data-reminder-result="${index}">Use</button></div>`,
-        )
-        .join("") || '<p class="empty">No matches. Try another name, or enter coordinates.</p>';
-    onEach(box, "reminder-result", (index) => setReminderDestination(results[+index]));
+    const results = await searchPlaces(query);
+    box.innerHTML = placeResultsMarkup(results, "data-reminder-result");
+    onEach(box, "reminder-result", async (index) => {
+      try {
+        setReminderDestination(await resolvePlace(results[+index]));
+      } catch (error) {
+        toast(error.message);
+      }
+    });
   } catch (error) {
     box.innerHTML = `<p class="empty">${safe(error.message)}</p>`;
   }

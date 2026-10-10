@@ -12,7 +12,7 @@ from email.message import Message
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from geologs.core import Store, classify_motion, database_path, current_location, deliver_webhook, geocode, mode_for, name_matches, nearby_places, places_provider, street_key, places_provider_identity, reverse_cache_radius, reverse_geocode, route_segments_from_points, smooth_route_segment
+from geologs.core import Store, classify_motion, database_path, place_details, current_location, deliver_webhook, geocode, mode_for, name_matches, nearby_places, places_provider, street_key, places_provider_identity, reverse_cache_radius, reverse_geocode, route_segments_from_points, smooth_route_segment
 from geologs.analysis import daily_brief, daily_briefs, daily_overview, day_summary, insights, place_overview, stored_daily_record, place_patterns, predict_next, resolve_place_patterns, search_visits, stays, transitions, visited_places
 
 
@@ -647,11 +647,14 @@ class StoreTests(unittest.TestCase):
         with patch.dict(os.environ, {"GEOAPIFY_API_KEY": "test", "GEOLOGS_PHOTON_URL": ""}), patch("geologs.core.provider_request", return_value=response) as request:
             self.assertEqual(geocode(self.store, "market")[0]["name"], "Neighborhood Market")
             self.assertEqual(geocode(self.store, "market")[0]["address"], "Neighborhood Market, 1200 Main Street")
-            self.assertEqual(request.call_args.args[1]["bias"], "proximity:-87.9,41.0")
+            # Nearby first (a 100 km circle), then anywhere; both favour the latest fix.
+            nearby, anywhere = (call.args[1] for call in request.call_args_list)
+            self.assertEqual((nearby["filter"], nearby["bias"]), ("circle:-87.9,41.0,100000", "proximity:-87.9,41.0"))
+            self.assertEqual((anywhere.get("filter"), anywhere["bias"]), (None, "proximity:-87.9,41.0"))
             geocode(self.store, "market")
-            self.assertEqual(request.call_count, 1)
-            geocode(self.store, "market", 42, -88)
             self.assertEqual(request.call_count, 2)
+            geocode(self.store, "market", 42, -88)
+            self.assertEqual(request.call_count, 4)
 
     def test_saved_places_reverse_geocode_once_per_cached_region(self):
         response = {"results": [{"formatted": "Market Street", "result_type": "building"}]}
@@ -814,25 +817,65 @@ class StoreTests(unittest.TestCase):
             self.assertIn(part, category_url)
 
     def test_mapbox_search_and_cache_are_separate_from_other_providers(self):
-        found = {"features": [{"type": "Feature", "geometry": {"type": "Point", "coordinates": [-92.3, 34.8]},
-                               "properties": {"name": "Costco Wholesale", "feature_type": "poi", "mapbox_id": "costco",
-                                              "full_address": "Costco Wholesale, 1 Warehouse Way",
-                                              "coordinates": {"latitude": 34.8, "longitude": -92.3},
-                                              "poi_category_ids": ["warehouse_store"], "poi_category": ["warehouse store"]}}]}
+        suggested = {"suggestions": [{"name": "Costco Wholesale", "mapbox_id": "costco", "feature_type": "poi",
+                                      "full_address": "Costco Wholesale, 1 Warehouse Way", "distance": 9800,
+                                      "poi_category_ids": ["warehouse_store"]}]}
+        retrieved = {"features": [{"type": "Feature", "geometry": {"type": "Point", "coordinates": [-92.3, 34.8]},
+                                   "properties": {"name": "Costco Wholesale", "feature_type": "poi", "mapbox_id": "costco",
+                                                  "full_address": "Costco Wholesale, 1 Warehouse Way",
+                                                  "coordinates": {"latitude": 34.8, "longitude": -92.3},
+                                                  "poi_category_ids": ["warehouse_store"]}}]}
         env = {"MAPBOX_ACCESS_TOKEN": "token", "GEOAPIFY_API_KEY": "key", "GEOLOGS_PHOTON_URL": ""}
-        with patch.dict(os.environ, env), patch("geologs.core.json_get", return_value=found) as request:
+        respond = lambda url: suggested if "/suggest?" in url else retrieved
+        with patch.dict(os.environ, env), patch("geologs.core.json_get", side_effect=respond) as request:
             self.store.save_settings({"places_provider": "mapbox"})
-            results = geocode(self.store, "costco", 34.85, -92.41)
-            geocode(self.store, "costco", 34.85, -92.41)
-        self.assertEqual(request.call_count, 1)
-        self.assertIn("/search/searchbox/v1/forward?q=costco", request.call_args.args[0])
-        self.assertIn("proximity=-92.41%2C34.85", request.call_args.args[0])
-        self.assertEqual((results[0]["name"], results[0]["lat"], results[0]["provider_place_id"]), ("Costco Wholesale", 34.8, "costco"))
+            listed = geocode(self.store, "costco", 34.85, -92.41, resolve=0)
+            geocode(self.store, "costco", 34.85, -92.41, resolve=0)
+            # The browser lists suggestions, then fetches coordinates for the one picked.
+            self.assertEqual(request.call_count, 1)
+            self.assertIn("/search/searchbox/v1/suggest?q=costco", request.call_args.args[0])
+            self.assertIn("proximity=-92.41%2C34.85", request.call_args.args[0])
+            self.assertEqual((listed[0]["name"], listed[0]["lat"], listed[0]["distance_m"]), ("Costco Wholesale", None, 9800))
+            picked = place_details(self.store, listed[0]["provider_place_id"], listed[0]["session"])
+            self.assertIn(f"/retrieve/costco?session_token={listed[0]['session']}", request.call_args.args[0])
+            self.assertEqual((picked["lat"], picked["lon"]), (34.8, -92.3))
+            # Callers that need coordinates (a reminder by place name, MCP) get them resolved.
+            resolved = geocode(self.store, "costco", 34.85, -92.41, resolve=1)
+            self.assertEqual((resolved[0]["lat"], request.call_count), (34.8, 2))
         # Switching back to Geoapify asks Geoapify instead of reusing Mapbox's cached answer.
         with patch.dict(os.environ, env), patch("geologs.core.provider_request", return_value={"results": []}) as geoapify:
             self.store.save_settings({"places_provider": "geoapify"})
             self.assertEqual(geocode(self.store, "costco", 34.85, -92.41), [])
-        self.assertEqual(geoapify.call_count, 1)
+        self.assertEqual(geoapify.call_count, 2)
+
+    def test_place_search_puts_the_nearby_match_before_distant_ones(self):
+        # Live Mapbox /suggest for "Tea Capital" near Little Rock: the shop across town comes first.
+        here = (34.852116, -92.412809)
+        suggested = {"suggestions": [
+            {"name": "Tea Capital", "mapbox_id": "lr", "feature_type": "poi", "distance": 18000,
+             "full_address": "1501 Main St Ste G, Little Rock, Arkansas 72202, United States"},
+            {"name": "Tea capital", "mapbox_id": "kochi", "feature_type": "poi", "distance": 14892000,
+             "full_address": "Panampilly Nagar Ave, Ernakulam, 682036, India"},
+            {"name": "Capital Tea", "mapbox_id": "denver", "feature_type": "poi", "distance": 1234000,
+             "full_address": "1450 S Broadway, Denver, Colorado 80210, United States"}]}
+        env = {"MAPBOX_ACCESS_TOKEN": "token", "GEOAPIFY_API_KEY": "", "GEOLOGS_PHOTON_URL": ""}
+        with patch.dict(os.environ, env), patch("geologs.core.json_get", return_value=suggested):
+            self.store.save_settings({"places_provider": "mapbox"})
+            found = geocode(self.store, "Tea Capital", *here, resolve=0)
+        self.assertEqual([(place["name"], place["distance_m"]) for place in found],
+                         [("Tea Capital", 18000), ("Capital Tea", 1234000), ("Tea capital", 14892000)])
+        # Geoapify: a nearby search runs first, so a tea shop across town beats an exact name in India.
+        def geoapify(path, params):
+            if "filter" in params:
+                return {"results": [{"name": "Zen Tea", "formatted": "Zen Tea, 5625 Kavanaugh Boulevard, Little Rock", "lat": 34.79, "lon": -92.33}]}
+            return {"results": [{"name": "Tea Capital", "formatted": "Tea Capital, Ernakulam, India", "lat": 9.96, "lon": 76.29},
+                                {"name": "Zen Tea", "formatted": "Zen Tea, 5625 Kavanaugh Boulevard, Little Rock", "lat": 34.79, "lon": -92.33}]}
+        with patch.dict(os.environ, {**env, "GEOAPIFY_API_KEY": "key"}), patch("geologs.core.provider_request", side_effect=geoapify):
+            self.store.save_settings({"places_provider": "geoapify"})
+            found = geocode(self.store, "Tea Capital", *here)
+        self.assertEqual([place["name"] for place in found], ["Zen Tea", "Tea Capital"])
+        self.assertLess(found[0]["distance_m"], 15000)
+        self.assertGreater(found[1]["distance_m"], 14_000_000)
 
     def test_geoapify_reverse_prefers_place_name_and_keeps_address(self):
         response = {"results": [{"name": "War Memorial Park",

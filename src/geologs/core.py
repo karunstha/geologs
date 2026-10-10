@@ -15,6 +15,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1300,7 +1301,7 @@ class Store:
             destination_name = str(raw.get("place_name") or "").strip()
             lat, lon = raw.get("lat"), raw.get("lon")
             if (lat is None or lon is None) and destination_name:
-                matches = geocode(self, destination_name)
+                matches = geocode(self, destination_name, resolve=1)
                 if not matches:
                     raise ValueError("place name was not found; provide coordinates")
                 match = matches[0]
@@ -1802,17 +1803,32 @@ def mapbox_nearest_result(data, lat, lon, radius):
     return {**candidates[0], "lat": lat, "lon": lon, "result_type": "place"} if candidates else None
 
 
-def _geoapify_search(query, bias):
-    params = {"text": query, "limit": 5, "format": "json"}
-    if bias:
-        params["bias"] = f"proximity:{bias[1]},{bias[0]}"
-    data = provider_request("/v1/geocode/search", params)
-    return [{"name": r.get("name") or r.get("formatted") or query,
+# Place search looks near you first: within this distance a match is "nearby".
+SEARCH_NEARBY_M = 100_000
+
+
+def _geoapify_results(params):
+    data = provider_request("/v1/geocode/search", {"limit": 5, "format": "json", **params})
+    return [{"name": r.get("name") or r.get("formatted") or params["text"],
              "place_name": r.get("name") or "", "lat": r["lat"], "lon": r["lon"],
              "address": r.get("formatted", ""),
              "category": r.get("category") or ((r.get("categories") or [None])[0]),
              "categories": r.get("categories") if isinstance(r.get("categories"), list) else [],
              "provider_place_id": r.get("place_id")} for r in data.get("results", [])]
+
+
+def _geoapify_search(query, bias):
+    """Matches near you, then the best matches anywhere.
+
+    A proximity bias alone lets a strong text match on another continent win
+    (an exact "Tea Capital" in India over a tea shop across town), so the
+    nearby area is searched on its own first.
+    """
+    if not bias:
+        return _geoapify_results({"text": query})
+    near = {"bias": f"proximity:{bias[1]},{bias[0]}"}
+    return (_geoapify_results({"text": query, **near, "filter": f"circle:{bias[1]},{bias[0]},{SEARCH_NEARBY_M}"})
+            + _geoapify_results({"text": query, **near}))
 
 
 def _photon_search(query, bias):
@@ -1825,14 +1841,67 @@ def _photon_search(query, bias):
 
 
 def _mapbox_search(query, bias):
-    params = {"q": query[:256], "limit": 5}
+    """Mapbox's /suggest, made for finding places by name near you.
+
+    Its /forward endpoint reads words such as "capital" as a region, so
+    "Tea Capital" returned tea shops in Kuwait City; /suggest returns the shop
+    across town first. Suggestions carry no coordinates: place_details()
+    fetches them, in the same billing session, for the one that is chosen.
+    """
+    session = str(uuid.uuid4())
+    params = {"q": query[:256], "limit": 8, "session_token": session}
     if bias:
         params["proximity"] = f"{bias[1]},{bias[0]}"
-    data = mapbox_request("/search/searchbox/v1/forward", params)
-    return [place for place in (mapbox_place(feature) for feature in data.get("features", [])) if place["lat"] is not None]
+        params["origin"] = f"{bias[1]},{bias[0]}"
+    data = mapbox_request("/search/searchbox/v1/suggest", params)
+    results = []
+    for item in data.get("suggestions", []):
+        if not item.get("mapbox_id"):
+            continue
+        name = str(item.get("name") or "").strip()
+        address = str(item.get("full_address") or "").strip() or ", ".join(
+            part for part in (name, str(item.get("place_formatted") or "").strip()) if part)
+        category_ids = [str(value) for value in item.get("poi_category_ids") or []]
+        results.append({"name": name or address or "Unknown place",
+                        "place_name": name if item.get("feature_type") == "poi" else "",
+                        "lat": None, "lon": None, "address": address,
+                        "category": category_ids[0] if category_ids else item.get("feature_type"),
+                        "categories": category_ids, "provider_place_id": item["mapbox_id"],
+                        "distance_m": round(item["distance"]) if item.get("distance") is not None else None,
+                        "session": session})
+    return results
 
 
-def geocode(store, query, lat=None, lon=None):
+def place_details(store, provider_place_id, session=None):
+    """Coordinates for a search result that arrived without them (Mapbox suggestions)."""
+    if _require_provider(store) != "mapbox":
+        raise ValueError("place details are only needed for Mapbox search results")
+    provider_place_id = str(provider_place_id or "").strip()
+    if not provider_place_id or len(provider_place_id) > 300:
+        raise ValueError("id is required")
+    key = "place:" + provider_place_id
+    cached = store.cached(key, "mapbox:searchbox-v1")
+    if cached is not None:
+        return cached
+    data = mapbox_request("/search/searchbox/v1/retrieve/" + urllib.parse.quote(provider_place_id, safe=""),
+                          {"session_token": session or str(uuid.uuid4())})
+    feature = (data.get("features") or [None])[0]
+    if feature is None:
+        raise ValueError("place not found")
+    place = mapbox_place(feature)
+    if place["lat"] is None:
+        raise ValueError("place has no coordinates")
+    store.cache(key, "mapbox:searchbox-v1", place)
+    return place
+
+
+def geocode(store, query, lat=None, lon=None, resolve=5):
+    """Places matching `query`, nearby ones first, each with its distance from you.
+
+    `resolve` is how many of the leading results must carry coordinates:
+    Mapbox suggestions don't, and each lookup costs, so the browser asks for
+    none and fetches only the place you pick (place_details).
+    """
     query = query.strip()
     if not query or len(query) > 200:
         raise ValueError("query is required (max 200 characters)")
@@ -1847,15 +1916,37 @@ def geocode(store, query, lat=None, lon=None):
         bias = (float(latest["lat"]), float(latest["lon"])) if latest else None
     name = _require_provider(store)
     # Cache by nearby search area; a result from another city must not win later.
-    key = "search:" + query.casefold() + (f":{bias[0]:.2f}:{bias[1]:.2f}" if bias else ":unbiased")
+    key = "search-v2:" + query.casefold() + (f":{bias[0]:.2f}:{bias[1]:.2f}" if bias else ":unbiased")
     provider = {"photon": "photon:" + os.environ.get("GEOLOGS_PHOTON_URL", "").rstrip("/"),
                 "geoapify": "geoapify", "mapbox": "mapbox:searchbox-v1"}[name]
-    cached = store.cached(key, provider)
-    if cached is not None:
-        return cached
-    value = {"photon": _photon_search, "geoapify": _geoapify_search, "mapbox": _mapbox_search}[name](query, bias)
-    store.cache(key, provider, value)
-    return value
+    results = store.cached(key, provider)
+    if results is None:
+        results = {"photon": _photon_search, "geoapify": _geoapify_search, "mapbox": _mapbox_search}[name](query, bias)
+        store.cache(key, provider, results)
+    unique, seen = [], set()
+    for place in results:
+        identity = place.get("provider_place_id") or (place["name"], round(place["lat"] or 0, 4), round(place["lon"] or 0, 4))
+        if identity in seen:
+            continue
+        seen.add(identity)
+        if bias and place.get("lat") is not None:
+            place = {**place, "distance_m": round(metres(bias[0], bias[1], place["lat"], place["lon"]))}
+        unique.append(place)
+    # Nearby matches first, in the provider's order; then the rest, nearest first.
+    def rank(item):
+        index, place = item
+        distance = place.get("distance_m")
+        if distance is None:
+            return (1, 0, index)
+        return (0, 0, index) if distance <= SEARCH_NEARBY_M else (0, 1, distance)
+    ordered = [place for _index, place in sorted(enumerate(unique), key=rank)][:8]
+    for index, place in enumerate(ordered[:resolve]):
+        if place.get("lat") is None:
+            details = place_details(store, place["provider_place_id"], place.get("session"))
+            ordered[index] = {**place, "lat": details["lat"], "lon": details["lon"],
+                              "address": place["address"] or details["address"]}
+    # Callers that need coordinates get only the results that have them.
+    return [place for place in ordered if place.get("lat") is not None] if resolve else ordered
 
 
 def _photon_features(lat, lon, radius, limit=10):

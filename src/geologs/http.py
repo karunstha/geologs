@@ -17,7 +17,7 @@ from urllib.parse import parse_qs, urlparse
 
 from .ingest import FORMATS as INGEST_FORMATS, claimed_source
 
-from .core import PLACES_PROVIDERS, Store, configured_places_providers, current_location, deliver_webhook, geocode, nearby_places, places_provider, reverse_geocode
+from .core import PLACES_PROVIDERS, Store, configured_places_providers, current_location, deliver_webhook, geocode, nearby_places, place_details, places_provider, reverse_geocode
 from .analysis import daily_briefs, daily_overview, day_summary, finalize_previous_day, insights, place_overview, stored_daily_record, place_patterns, predict_next, resolve_place_patterns, search_visits, stays, transitions, visited_places
 from .mcp import SUPPORTED_VERSIONS, dispatch
 from .postgres import INTEGRITY_ERRORS
@@ -337,7 +337,10 @@ class Handler(BaseHTTPRequestHandler):
             elif url.path == "/api/reminders": value = store.reminders()
             elif url.path == "/api/reminder-history": value = store.reminder_history(q.get("limit", 200))
             elif url.path == "/api/events": value = store.events(q.get("since_id", 0), q.get("limit", 100))
-            elif url.path == "/api/geocode": value = geocode(store, q.get("q", ""), q.get("lat"), q.get("lon"))
+            elif url.path == "/api/geocode":
+                # The page fetches coordinates only for the result you pick (/api/geocode/place).
+                value = geocode(store, q.get("q", ""), q.get("lat"), q.get("lon"), resolve=0)
+            elif url.path == "/api/geocode/place": value = place_details(store, q.get("id"), q.get("session"))
             elif url.path == "/api/reverse": value = reverse_geocode(store, q["lat"], q["lon"], q.get("radius_m"))
             elif url.path == "/api/nearby-places": value = nearby_places(store, q["lat"], q["lon"], q.get("radius_m"), q.get("limit", 15))
             elif url.path == "/api/export.geojson": value = store.export_geojson(q.get("start"), q.get("end"))
