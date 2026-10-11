@@ -8,7 +8,9 @@ import { modeInfo, modeName, pinBadge, sourceName, zoneText } from "../ui/icons.
 import { focusPlaceOnMap, params, refreshExplore } from "./history.js";
 import { refreshInsights } from "./patterns.js";
 import { dayVisits, editVisitedPlace } from "./place-dialogs.js";
+import { showSettingsPage } from "./settings.js";
 import { showView } from "./shell.js";
+import { stayEditsSection, undoStayEdit } from "./stay-edits.js";
 
 const ROLES = { arrival: "Arrival", departure: "Departure", latest: "Latest at stop", movement: "Moving" };
 
@@ -311,11 +313,13 @@ export function renderDayData(day) {
         ? `<ul class="gap-list">${gaps}</ul><p class="help">Stays and trips are inferred from samples; where none arrived, GeoLogs can't say where you were.</p>`
         : '<p class="callout success">No gaps longer than 30 minutes on this day.</p>'
     }</section>
+    ${stayEditsSection(day)}
     <div class="data-foot"><button type="button" class="button secondary small" id="open-sources">All devices and sources</button></div>`;
   $("open-sources").onclick = () => {
     showView("settings");
-    document.getElementById("settings-sources").scrollIntoView({ block: "start" });
+    showSettingsPage("settings-sources");
   };
+  onEach($("day-data"), "undo-edit", (id) => undoStayEdit(+id));
 }
 
 export function renderDayDetails(day) {

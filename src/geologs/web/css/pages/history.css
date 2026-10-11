@@ -763,3 +763,25 @@
     display: none;
   }
 }
+/* Quick stops and stops you added are told apart from detected stays. */
+.origin-tag {
+  align-self: flex-start;
+  margin-top: 3px;
+  padding: 1px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  color: var(--text-2);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+.tl-edit-actions {
+  flex-direction: row;
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+.button.danger-text {
+  color: var(--danger);
+}
+.button.danger-text:hover {
+  background: var(--danger-soft);
+}

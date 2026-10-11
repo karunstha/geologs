@@ -20,6 +20,7 @@ TABLES = {
     "stay_observation_state": "source last_observation_id last_timestamp candidate",
     "place_labels": "id name lat lon radius_m address category provider_place_id created_at updated_at source started_at ended_at",
     "mode_overrides": "id source target started_at ended_at mode created_at updated_at",
+    "stay_edits": "id source action started_at ended_at lat lon created_at",
     "app_settings": "key value",
     "analysis_cache": "cache_key watermark value created_at",
     "daily_summaries": "id summary_date timezone source watermark points distance_km trip_count place_count reminder_count summary brief created_at updated_at",
@@ -28,7 +29,7 @@ TABLES = {
 }
 # Columns added after an archive was created take their schema default.
 COLUMN_DEFAULTS = {"kind": "'stationary'"}
-IDENTITY_TABLES = ("points", "point_observations", "places", "place_labels", "mode_overrides", "reminders", "events", "observed_stays", "observed_stays_v2", "daily_summaries", "reverse_regions")
+IDENTITY_TABLES = ("points", "point_observations", "places", "place_labels", "mode_overrides", "stay_edits", "reminders", "events", "observed_stays", "observed_stays_v2", "daily_summaries", "reverse_regions")
 
 
 def migrate_sqlite(sqlite_path, postgres_url):
@@ -47,7 +48,7 @@ def migrate_sqlite(sqlite_path, postgres_url):
             if target.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone():
                 raise ValueError("PostGIS target must be empty before migration")
         for table, names in TABLES.items():
-            if table in ("point_observations", "observed_stays_v2", "stay_observation_state", "app_settings", "analysis_cache", "daily_summaries", "place_labels", "mode_overrides") and table not in source_tables:
+            if table in ("point_observations", "observed_stays_v2", "stay_observation_state", "app_settings", "analysis_cache", "daily_summaries", "place_labels", "mode_overrides", "stay_edits") and table not in source_tables:
                 continue
             columns = names.split()
             source_columns = {row[1] for row in source.execute(f"PRAGMA table_info({table})")}

@@ -29,9 +29,10 @@ _reverse_lock = threading.Lock()
 # stays and makes stored daily summaries stale. Speeds are median km/h: below
 # walking_max is a walk, below running_max a run, below cycling_max a ride, and
 # faster is a drive; stretches at driving_min or more count as driving even
-# when the median is slower (stop-and-go traffic).
-ANALYSIS_DEFAULTS = {"stay_min_minutes": 15, "walking_max_kmh": 6.5, "running_max_kmh": 15.0,
-                     "cycling_max_kmh": 25.0, "driving_min_kmh": 35.0}
+# when the median is slower (stop-and-go traffic). quick_stop_minutes finds
+# shorter stops on the way (a fuel stop); 0 turns that off.
+ANALYSIS_DEFAULTS = {"stay_min_minutes": 15, "quick_stop_minutes": 3, "walking_max_kmh": 6.5,
+                     "running_max_kmh": 15.0, "cycling_max_kmh": 25.0, "driving_min_kmh": 35.0}
 # Completed days are always saved after midnight; "interval" also saves today so far.
 SUMMARY_SCHEDULES = ("nightly", "interval")
 # An empty places_provider means the first configured provider (see places_provider()).
@@ -524,6 +525,11 @@ class Store:
             started_at TEXT NOT NULL, ended_at TEXT NOT NULL, mode TEXT NOT NULL,
             created_at TEXT NOT NULL, updated_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS stay_edits (
+            id INTEGER PRIMARY KEY, source TEXT NOT NULL, action TEXT NOT NULL,
+            started_at TEXT NOT NULL, ended_at TEXT NOT NULL, lat REAL, lon REAL,
+            created_at TEXT NOT NULL
+        );
         DROP TABLE IF EXISTS ingest_status;
         CREATE TABLE IF NOT EXISTS ingest_devices (
             kind TEXT NOT NULL, device TEXT NOT NULL DEFAULT '', last_attempt_at TEXT NOT NULL,
@@ -598,7 +604,7 @@ class Store:
             if "brief" not in {row[1] for row in self.db.execute("PRAGMA table_info(daily_summaries)")}:
                 self.db.execute("ALTER TABLE daily_summaries ADD COLUMN brief TEXT")
             version = self.db.execute("PRAGMA user_version").fetchone()[0]
-            rebuild_analysis = version < 12
+            rebuild_analysis = version < 14
             if version < 1:
                 self.db.execute("UPDATE points SET mode='running_cycling' WHERE mode='cycling'")
             if version < 2:
@@ -680,9 +686,9 @@ class Store:
                 self._keep_canonical_daily_summaries(self.settings()["timezone"])
         # Stay algorithm versions: 5 and 8 changed stationary stays; 12 adds area
         # stays (moving around one place) and stray-fix tolerance; 14 records
-        # whether travel between stays went somewhere else. One rebuild covers every
-        # missing version.
-        rebuild_versions = (5, 8, 12, 14)
+        # whether travel between stays went somewhere else; 17 adds quick stops
+        # on the way (SQLite user_version 14). One rebuild covers every missing version.
+        rebuild_versions = (5, 8, 12, 14, 17)
         if self.postgres and self._missing_migrations(rebuild_versions):
             self.db.execute("SELECT pg_advisory_xact_lock(hashtext('geologs:stays:rebuild'))")
             missing = self._missing_migrations(rebuild_versions)
@@ -706,8 +712,8 @@ class Store:
         if not self.postgres and version < 9:
             self.db.execute("DELETE FROM analysis_cache")
             self.db.execute("PRAGMA user_version=9")
-        if not self.postgres and version < 13:
-            self.db.execute("PRAGMA user_version=13")
+        if not self.postgres and version < 14:
+            self.db.execute("PRAGMA user_version=14")
         if self.postgres and self._missing_migrations((16,)):
             # Keep one stored daily summary per date: the configured timezone, all sources.
             self._keep_canonical_daily_summaries(self.settings()["timezone"])
@@ -780,6 +786,9 @@ class Store:
         stay_minutes = float(raw.get("stay_min_minutes", current["stay_min_minutes"]))
         if not stay_minutes.is_integer() or not 5 <= stay_minutes <= 120:
             raise ValueError("stay_min_minutes must be a whole number from 5 to 120")
+        quick_minutes = float(raw.get("quick_stop_minutes", current["quick_stop_minutes"]))
+        if not quick_minutes.is_integer() or not (quick_minutes == 0 or 2 <= quick_minutes < stay_minutes):
+            raise ValueError("quick_stop_minutes must be 0 (off) or a whole number from 2 to below the minimum stay")
         speeds = {}
         for key in ("walking_max_kmh", "running_max_kmh", "cycling_max_kmh", "driving_min_kmh"):
             speeds[key] = float(raw.get(key, current[key]))
@@ -795,6 +804,7 @@ class Store:
             raise ValueError("summary_interval_hours must be a whole number from 1 to 12")
         values = {"speed_strategy": strategy, "reported_speed_offset_kmh": round(offset, 2),
                   "timezone": timezone_name, "places_provider": provider, "stay_min_minutes": int(stay_minutes),
+                  "quick_stop_minutes": int(quick_minutes),
                   **{key: round(value, 1) for key, value in speeds.items()},
                   "summary_schedule": schedule, "summary_interval_hours": int(interval)}
         for key, value in values.items():
@@ -861,6 +871,7 @@ class Store:
              parse_time(start), parse_time(end), parse_time(end), parse_time(end), parse_time(end)))
         labels = self._rows("SELECT id,name,lat,lon,radius_m,source,started_at,ended_at,updated_at FROM place_labels ORDER BY id")
         modes = self._rows("SELECT id,source,target,started_at,ended_at,mode FROM mode_overrides ORDER BY id")
+        stay_edits = self._rows("SELECT id,source,action,started_at,ended_at FROM stay_edits ORDER BY id")
         # A daily record can also report an early-morning return Home. Include
         # that small cross-midnight context so a prior day's stored record goes
         # stale when the return is recorded after midnight.
@@ -869,7 +880,7 @@ class Store:
         settings = self.settings()
         # Stay length and mode speeds change what a day contains.
         analysis = {key: settings[key] for key in ANALYSIS_DEFAULTS}
-        value = ["stay-trips-v10", modes, analysis, self.analysis_watermark(start, end, source),
+        value = ["stay-trips-v11", modes, stay_edits, analysis, self.analysis_watermark(start, end, source),
                  self.analysis_watermark(context_start, context_end, source),
                  event_row["count"], event_row["max_id"], places, reminders, labels]
         return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
@@ -1354,6 +1365,65 @@ class Store:
         self.db.execute("DELETE FROM analysis_cache")
         self.db.commit()
         return next((item for item in self.mode_overrides() if item["id"] == result), {"source": source, "target": target, "mode": "auto"})
+
+    def stay_edits(self, start=None, end=None, source=None):
+        """Stays you added or removed, each kept by source and time window.
+
+        Detected stays are rebuilt from raw samples, so an edit names a window
+        rather than a stay id and is applied whenever stays are read.
+        """
+        clauses, args = [], []
+        if start:
+            clauses.append("ended_at>=?"); args.append(parse_time(start))
+        if end:
+            clauses.append("started_at<=?"); args.append(parse_time(end))
+        if source:
+            clauses.append("source=?"); args.append(source)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        return self._rows("SELECT id,source,action,started_at,ended_at,lat,lon,created_at FROM stay_edits"
+                          + where + " ORDER BY started_at,id", args)
+
+    def save_stay_edit(self, raw):
+        """Add a stop the detector missed, or remove a stay it should not have found.
+
+        An added stop sits at the median position of its source's accurate
+        samples in the window. Editing the same window again replaces the edit.
+        """
+        source = str(raw.get("source") or "").strip()[:80]
+        action = str(raw.get("action") or "")
+        if not source:
+            raise ValueError("source is required")
+        if action not in ("add", "remove"):
+            raise ValueError("action must be add or remove")
+        started_at, ended_at = parse_time(raw.get("started_at")), parse_time(raw.get("ended_at"))
+        seconds = (datetime.fromisoformat(ended_at) - datetime.fromisoformat(started_at)).total_seconds()
+        if not 0 < seconds <= 86400:
+            raise ValueError("a stop must end after it starts, within a day")
+        lat = lon = None
+        if action == "add":
+            fixes = self._rows("""SELECT lat,lon FROM point_observations WHERE source=? AND timestamp>=? AND timestamp<=?
+                AND (accuracy_m IS NULL OR accuracy_m<=100)""", (source, started_at, ended_at))
+            if not fixes:
+                raise ValueError("no accurate samples from that device in that time; pick a window with samples")
+            lat = sorted(fix["lat"] for fix in fixes)[len(fixes) // 2]
+            lon = sorted(fix["lon"] for fix in fixes)[len(fixes) // 2]
+        for edit in self.stay_edits(started_at, ended_at, source):
+            if edit["action"] == action and windows_overlap(edit, started_at, ended_at):
+                self.db.execute("DELETE FROM stay_edits WHERE id=?", (edit["id"],))
+        result = self.db.execute("""INSERT INTO stay_edits(source,action,started_at,ended_at,lat,lon,created_at)
+            VALUES (?,?,?,?,?,?,?) RETURNING id""", (source, action, started_at, ended_at, lat, lon, parse_time(None))).fetchone()["id"]
+        self.db.execute("DELETE FROM analysis_cache")
+        self.db.commit()
+        return next(edit for edit in self.stay_edits(source=source) if edit["id"] == result)
+
+    def delete_stay_edit(self, id_):
+        """Undo an added or removed stop."""
+        result = self.db.execute("DELETE FROM stay_edits WHERE id=?", (int(id_),))
+        if not result.rowcount:
+            raise ValueError("that change was already undone")
+        self.db.execute("DELETE FROM analysis_cache")
+        self.db.commit()
+        return {"deleted": int(id_)}
 
     def delete_place_label(self, id_):
         result = self.db.execute("DELETE FROM place_labels WHERE id=?", (int(id_),))
@@ -2251,6 +2321,15 @@ def label_at(labels, lat, lon, source=None, started_at=None, ended_at=None):
                 continue
         covering.append((not label.get("started_at"), distance, label))
     return min(covering, key=lambda item: item[:2])[2] if covering else None
+
+
+def windows_overlap(item, started_at, ended_at, share=MODE_OVERRIDE_MIN_OVERLAP):
+    """Whether item's started_at..ended_at covers `share` of the shorter of it and the window."""
+    start, end = datetime.fromisoformat(started_at), datetime.fromisoformat(ended_at)
+    item_start, item_end = datetime.fromisoformat(item["started_at"]), datetime.fromisoformat(item["ended_at"])
+    overlap = (min(end, item_end) - max(start, item_start)).total_seconds()
+    shorter = max(1.0, min((end - start).total_seconds(), (item_end - item_start).total_seconds()))
+    return overlap >= share * shorter
 
 
 def mode_override_for(overrides, source, target, started_at, ended_at):

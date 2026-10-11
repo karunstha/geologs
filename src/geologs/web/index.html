@@ -183,17 +183,17 @@
     <section id="settings-view" class="view" aria-labelledby="settings-title">
       <div class="page-head"><div class="page-title"><h1 id="settings-title">Settings</h1><p class="page-subtitle">Connect your devices and tune how GeoLogs reads and names your history.</p></div></div>
       <div class="settings-layout">
-        <nav class="settings-nav" aria-label="Settings sections">
-          <a href="#settings-sources" class="active">Sources</a>
-          <a href="#settings-analysis">Time &amp; movement</a>
-          <a href="#settings-detection">Stays &amp; activities</a>
-          <a href="#settings-places">Place names</a>
-          <a href="#settings-summaries">Daily summaries</a>
-          <a href="#settings-access">Access</a>
+        <nav class="settings-nav" aria-label="Settings pages">
+          <button type="button" class="settings-tab" data-settings-page="settings-sources"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="2.5" width="10" height="19" rx="2.5"/><path d="M11 18.5h2"/></svg><span>Devices</span></button>
+          <button type="button" class="settings-tab" data-settings-page="settings-stays"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21s-6.5-5.4-6.5-11a6.5 6.5 0 0 1 13 0c0 5.6-6.5 11-6.5 11Z"/><circle cx="12" cy="10" r="2.3"/></svg><span>Stays &amp; stops</span></button>
+          <button type="button" class="settings-tab" data-settings-page="settings-movement"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 16a8 8 0 1 1 16 0"/><path d="m12 16 4-5"/><path d="M4 19.5h16"/></svg><span>Movement</span></button>
+          <button type="button" class="settings-tab" data-settings-page="settings-places"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6.5 9 4l6 2.5L20 4v13.5L15 20l-6-2.5L4 20Z"/><path d="M9 4v13.5M15 6.5V20"/></svg><span>Place names</span></button>
+          <button type="button" class="settings-tab" data-settings-page="settings-summaries"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="15.5" rx="2"/><path d="M3.5 9.5h17M8 3v4M16 3v4M8 13.5h4M8 16.5h7"/></svg><span>Days &amp; summaries</span></button>
+          <button type="button" class="settings-tab" data-settings-page="settings-access"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/></svg><span>Access</span></button>
         </nav>
         <div class="settings-sections">
           <section id="settings-sources" class="settings-section" aria-labelledby="sources-title">
-            <div class="section-intro"><h2 id="sources-title">Sources</h2><p>Devices and apps sending locations, and whether they are getting through.</p></div>
+            <div class="section-intro"><h2 id="sources-title">Devices</h2><p>The phones and apps sending locations, whether they are getting through, and how to connect another.</p></div>
             <div class="card">
               <div class="card-head"><div><h3>Location sources</h3><p id="sources-summary">Checking…</p></div><button id="refresh-sources" class="button secondary small" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12a7 7 0 1 1-2.1-5M19 4v4h-4"/></svg><span>Refresh</span></button></div>
               <div id="source-list" class="list rows source-list" aria-live="polite"></div>
@@ -205,20 +205,23 @@
             </div>
           </section>
 
-          <section id="settings-analysis" class="settings-section" aria-labelledby="analysis-title">
-            <div class="section-intro"><h2 id="analysis-title">Time &amp; movement</h2><p>Day boundaries, and how travel speed is read.</p></div>
-            <form id="settings-form" class="card settings-form">
-              <label class="setting-row"><span class="setting-label"><strong>Timezone</strong><small>Defines calendar days and when each day's summary is saved.</small></span><select id="summary-timezone" class="input" required></select></label>
-              <label class="setting-row"><span class="setting-label"><strong>Speed source</strong><small>Applies to newly received samples.</small></span><select id="speed-strategy" class="input"><option value="reported">Device speed, else calculated</option><option value="calculated">Always calculate</option></select></label>
-              <label id="speed-offset-field" class="setting-row"><span class="setting-label"><strong>Device speed adjustment</strong><small>km/h. Use a negative value if the device reads high.</small></span><input id="speed-offset" class="input" type="number" min="-100" max="100" step="0.1" value="0"></label>
-              <div class="card-foot"><button class="button primary">Save changes</button></div>
+          <section id="settings-stays" class="settings-section" aria-labelledby="stays-title" hidden>
+            <div class="section-intro"><h2 id="stays-title">Stays &amp; stops</h2><p>When time in one place counts as a visit, and when a short stop on the way is worth keeping.</p></div>
+            <form id="stays-form" class="card settings-form" novalidate>
+              <label class="setting-row"><span class="setting-label"><strong>Minimum stay</strong><small>Time in one place or area before it counts as a visit. Shorter catches quick errands; longer ignores traffic and short waits.</small></span><span class="input-unit"><input id="stay-min" class="input" type="number" min="5" max="120" step="1" required><span>min</span></span></label>
+              <label class="setting-row"><span class="setting-label"><strong>Quick stops</strong><small>A shorter stop between two stretches of travel, like filling up or a pickup, is kept when you are still this long. Red lights, creeping traffic, and pauses inside a run around one place don't count.</small></span><select id="quick-stop" class="input"><option value="0">Off</option><option value="2">2 min or more</option><option value="3">3 min or more</option><option value="4">4 min or more</option><option value="5">5 min or more</option><option value="7">7 min or more</option><option value="10">10 min or more</option></select></label>
+              <p id="stays-error" class="field-error" role="alert" hidden></p>
+              <p class="callout setting-note"><strong>Missed a stop, or found one that wasn't real?</strong><span>In History, select a trip to add a stop on it, or a stay to remove it. Your changes are kept when stays are recalculated.</span></p>
+              <p class="help setting-note">Saving recalculates stays and trips across your whole history, which can take a moment.</p>
+              <div class="card-foot"><button id="stays-defaults" class="button secondary" type="button">Restore defaults</button><button class="button primary">Save changes</button></div>
             </form>
           </section>
 
-          <section id="settings-detection" class="settings-section" aria-labelledby="detection-title">
-            <div class="section-intro"><h2 id="detection-title">Stays &amp; activities</h2><p>When a stop counts as a visit, and which speeds mean walking, running, cycling, or driving.</p></div>
-            <form id="detection-form" class="card settings-form" novalidate>
-              <label class="setting-row"><span class="setting-label"><strong>Minimum stay</strong><small>Time in one place or area before it counts as a visit. Shorter catches quick errands; longer ignores traffic and short waits.</small></span><span class="input-unit"><input id="stay-min" class="input" type="number" min="5" max="120" step="1" required><span>min</span></span></label>
+          <section id="settings-movement" class="settings-section" aria-labelledby="movement-title" hidden>
+            <div class="section-intro"><h2 id="movement-title">Movement</h2><p>How speed is read from your devices, and which speeds mean walking, running, cycling, or driving.</p></div>
+            <form id="movement-form" class="card settings-form" novalidate>
+              <label class="setting-row"><span class="setting-label"><strong>Speed source</strong><small>Applies to newly received samples.</small></span><select id="speed-strategy" class="input"><option value="reported">Device speed, else calculated</option><option value="calculated">Always calculate</option></select></label>
+              <label id="speed-offset-field" class="setting-row"><span class="setting-label"><strong>Device speed adjustment</strong><small>km/h. Use a negative value if the device reads high.</small></span><input id="speed-offset" class="input" type="number" min="-100" max="100" step="0.1" value="0"></label>
               <fieldset class="setting-group"><legend class="setting-label"><strong>Activity speeds</strong><small>A trip is labelled by its typical (median) speed, in km/h.</small></legend>
                 <div id="speed-bands" class="speed-bands" aria-hidden="true"></div>
                 <div class="speed-rows">
@@ -229,12 +232,12 @@
                 </div>
                 <p id="speed-error" class="field-error" role="alert" hidden></p>
               </fieldset>
-              <p class="help setting-note">Saving recalculates stays and trips across your whole history, which can take a moment. Travel modes you set by hand are kept.</p>
-              <div class="card-foot"><button id="detection-defaults" class="button secondary" type="button">Restore defaults</button><button class="button primary">Save changes</button></div>
+              <p class="help setting-note">Changing activity speeds recalculates trips across your whole history. Travel modes you set by hand are kept.</p>
+              <div class="card-foot"><button id="movement-defaults" class="button secondary" type="button">Restore defaults</button><button class="button primary">Save changes</button></div>
             </form>
           </section>
 
-          <section id="settings-places" class="settings-section" aria-labelledby="place-names-title">
+          <section id="settings-places" class="settings-section" aria-labelledby="place-names-title" hidden>
             <div class="section-intro"><h2 id="place-names-title">Place names</h2><p>The service that turns coordinates into names for stays, places, and search.</p></div>
             <form id="places-form" class="card settings-form">
               <fieldset class="setting-group"><legend class="setting-label"><strong>Provider</strong><small id="places-provider-help"></small></legend><div id="places-provider-options" class="choice-cards"></div></fieldset>
@@ -244,9 +247,10 @@
             </form>
           </section>
 
-          <section id="settings-summaries" class="settings-section" aria-labelledby="summaries-settings-title">
-            <div class="section-intro"><h2 id="summaries-settings-title">Daily summaries</h2><p>When each day's summary, and its brief for AI tools over MCP, is saved.</p></div>
+          <section id="settings-summaries" class="settings-section" aria-labelledby="summaries-settings-title" hidden>
+            <div class="section-intro"><h2 id="summaries-settings-title">Days &amp; summaries</h2><p>Where each day starts and ends, and when its summary and brief for AI tools over MCP are saved.</p></div>
             <form id="summary-form" class="card settings-form">
+              <label class="setting-row"><span class="setting-label"><strong>Timezone</strong><small>Defines calendar days and when each day's summary is saved.</small></span><select id="summary-timezone" class="input" required></select></label>
               <fieldset class="setting-group"><legend class="setting-label"><strong>Save summaries</strong><small>Opening a day always brings its summary up to date.</small></legend>
                 <div class="choice-cards">
                   <label class="choice-card"><input type="radio" name="summary-schedule" value="nightly"><span class="choice-body"><strong>Overnight</strong><small>Just after midnight, for the day that ended.</small></span></label>
@@ -257,7 +261,7 @@
             </form>
           </section>
 
-          <section id="settings-access" class="settings-section" aria-labelledby="access-title">
+          <section id="settings-access" class="settings-section" aria-labelledby="access-title" hidden>
             <div class="section-intro"><h2 id="access-title">Access</h2><p>How this browser and your devices sign in.</p></div>
             <div class="card">
               <div class="setting-row static"><span class="setting-label"><strong>This browser</strong><small id="access-browser">Signed in with the access token for 30 days.</small></span><button id="sign-out" class="button secondary" type="button">Sign out</button></div>
@@ -292,6 +296,17 @@
       <fieldset id="label-scope" class="scope-choice"><legend>Apply to</legend><label id="scope-visit-option"><input type="radio" name="label-scope" value="visit" checked><span><strong id="scope-visit-title">Only this visit</strong><small id="scope-visit-detail"></small></span></label><label><input type="radio" name="label-scope" value="spot"><span><strong>Every visit to this spot</strong><small id="scope-spot-detail"></small></span></label></fieldset>
       <p id="label-where" class="help"></p>
       <div class="dialog-actions"><button type="button" id="reset-label" class="button ghost" hidden>Use automatic name</button><button type="button" id="cancel-label" class="button secondary">Cancel</button><button class="button primary">Save name</button></div>
+    </form></section>
+  </dialog>
+
+  <dialog id="stop-dialog" class="dialog narrow" aria-labelledby="stop-dialog-title" aria-describedby="stop-dialog-note">
+    <div class="dialog-head"><div><h2 id="stop-dialog-title">Add a stop</h2><p id="stop-dialog-note"></p></div><button id="close-stop-dialog" class="icon-button" type="button" aria-label="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
+    <section class="dialog-section"><form id="stop-form" class="form-stack">
+      <p id="stop-suggestion" class="callout" hidden></p>
+      <div class="form-pair"><label class="field"><span>Arrived</span><select id="stop-from" class="input"></select></label><label class="field"><span>Left</span><select id="stop-to" class="input"></select></label></div>
+      <p id="stop-detail" class="help"></p>
+      <p id="stop-error" class="field-error" role="alert" hidden></p>
+      <div class="dialog-actions"><button type="button" id="cancel-stop" class="button secondary">Cancel</button><button class="button primary">Add stop</button></div>
     </form></section>
   </dialog>
 

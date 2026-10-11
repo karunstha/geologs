@@ -6,6 +6,7 @@ import { state } from "../core/state.js";
 import { selectItem, selectedItem, stayColor, tripKey } from "../map/map.js";
 import { modeIcon, modeInfo, modeName, pinBadge, zoneText } from "../ui/icons.js";
 import { refreshExplore } from "./history.js";
+import { openStopDialog, removeStay } from "./stay-edits.js";
 
 export function stayActivityText(stay) {
   if (stay.kind !== "area") return "";
@@ -72,8 +73,17 @@ export function renderModePicker() {
         `Moved ${distanceText(move.distance_km)} within, at ${clock(move.start)}`,
       );
   }
-  if (!html) return;
+  // Add a stop the detector missed, or remove a stay it should not have found.
+  const action =
+    item.type === "trip"
+      ? '<button type="button" class="button secondary small" data-stay-edit="add">Add a stop on this trip…</button>'
+      : `<button type="button" class="button ghost small danger-text" data-stay-edit="remove">${
+          item.stay.kind === "manual" ? "Remove this added stop" : item.stay.kind === "stop" ? "Not a stop? Remove it" : "Not a stay? Remove it"
+        }</button>`;
+  html += `<li class="tl-mode-picker tl-edit-actions">${action}</li>`;
   row.insertAdjacentHTML("afterend", html);
+  document.querySelector('#day-timeline [data-stay-edit]').onclick = () =>
+    item.type === "trip" ? openStopDialog(item.trip) : removeStay(item.stay);
   document.querySelectorAll("#day-timeline .tl-mode-picker [data-set-mode]").forEach(
     (button) =>
       (button.onclick = async () => {
@@ -102,6 +112,13 @@ export function stayWhen(stay, day) {
   if (late) return `From ${clock(stay.started_at)}`;
   if (stay.ongoing) return `Since ${clock(stay.started_at)}`;
   return `${clock(stay.started_at)} – ${clock(stay.ended_at)}`;
+}
+
+// How a stay came about, when it is not a plain detected stay.
+function originTag(stay) {
+  if (stay.kind === "stop") return '<span class="origin-tag">Quick stop</span>';
+  if (stay.kind === "manual") return '<span class="origin-tag">Added by you</span>';
+  return "";
 }
 
 export function activityTag(stay) {
@@ -154,7 +171,7 @@ export function renderTimeline(day) {
           return `<li class="tl-gap"><span>No location data</span><small>${safe(clock(item.gap.start))} – ${safe(clock(item.gap.end))} · ${safe(durationText(item.gap.minutes))}</small></li>`;
         if (item.type === "stay") {
           const stay = item.stay;
-          return `<li><button type="button" class="tl-stay" data-item="stay:${stay.id}" aria-pressed="false">${pinBadge(numbers.get(stay.cluster_id))}<span class="tl-body"><strong>${safe(stay.display_name || stay.place_name || "Observed stay")}</strong><small>${safe([zoneText(stay.zone, stay.display_name), stayWhen(stay, day), durationText(stay.observed_minutes)].filter(Boolean).join(" · "))}</small>${activityTag(stay)}${movedWithin(stay)}</span></button></li>`;
+          return `<li><button type="button" class="tl-stay" data-item="stay:${stay.id}" aria-pressed="false">${pinBadge(numbers.get(stay.cluster_id))}<span class="tl-body"><strong>${safe(stay.display_name || stay.place_name || "Observed stay")}</strong><small>${safe([zoneText(stay.zone, stay.display_name), stayWhen(stay, day), durationText(stay.observed_minutes)].filter(Boolean).join(" · "))}</small>${originTag(stay)}${activityTag(stay)}${movedWithin(stay)}</span></button></li>`;
         }
         const trip = item.trip,
           info = modeInfo[trip.mode] || { label: "Trip", color: "#6f7b76" };

@@ -18,6 +18,7 @@ import { state } from "../core/state.js";
 import { drawMap, drawSelection, fitDay, map, revealMap, selectedItem } from "../map/map.js";
 import { modeIcon, modeInfo, placeIcon, sourceName } from "../ui/icons.js";
 import { initDayDetails, renderDayDetails } from "./day-details.js";
+import { showSettingsPage } from "./settings.js";
 import { showView } from "./shell.js";
 import { renderTimeline } from "./timeline.js";
 
@@ -113,7 +114,7 @@ function renderEmptyDay(day, coverage) {
         const action = button.dataset.emptyAction;
         if (action === "setup") {
           showView("settings");
-          document.getElementById("settings-sources").scrollIntoView({ block: "start" });
+          showSettingsPage("settings-sources");
         } else goToDate(action === "today" ? today : button.dataset.date);
       };
     });

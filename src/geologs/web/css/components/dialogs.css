@@ -113,6 +113,21 @@
   opacity: 1;
   transform: none;
 }
+#toast.show:has(.toast-action) {
+  pointer-events: auto;
+}
+.toast-action {
+  margin-left: 12px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-weight: 650;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
 @media (prefers-color-scheme: dark) {
   #toast {
     background: #e8ebee;

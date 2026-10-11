@@ -10,6 +10,7 @@ import { placeIcon } from "../ui/icons.js";
 import { placeResultsMarkup, resolvePlace, searchPlaces } from "../ui/place-search.js";
 import { refreshExplore } from "./history.js";
 import { refreshInsights } from "./patterns.js";
+import { showSettingsPage } from "./settings.js";
 import { showView } from "./shell.js";
 
 export function openPlaceDialog(place = {}) {
@@ -147,7 +148,7 @@ export async function loadNearbyPlaces(target) {
       $("nearby-settings").onclick = () => {
         $("label-dialog").close();
         showView("settings");
-        document.getElementById("settings-places").scrollIntoView({ block: "start" });
+        showSettingsPage("settings-places");
       };
   }
 }

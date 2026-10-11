@@ -477,7 +477,7 @@ class StoreTests(unittest.TestCase):
         self.store.ingest({**fix, "accuracy_m": 5})
         self.assertEqual(len(self.store.observations()), 2)
 
-    def test_short_stop_does_not_split_stay_anchored_trip(self):
+    def test_short_stop_after_a_drive_is_a_quick_stop(self):
         base = datetime(2026, 9, 25, 10, tzinfo=timezone.utc)
         self.store.ingest([
             {"source": "phone", "timestamp": (base + timedelta(minutes=minute)).isoformat(),
@@ -489,6 +489,11 @@ class StoreTests(unittest.TestCase):
                                        (23, 41.0025, 1.5), (24, 41.003, 1.5),
                                        (25, 41.004, 0), (40, 41.004, 0)]
         ])
+        trips = list(reversed(day_summary(self.store, "2026-09-25", "UTC")["trips"]))
+        # Five minutes still after a drive is a quick stop (a fuel stop) that splits the trip.
+        self.assertEqual([trip["mode"] for trip in trips], ["driving", "walking"])
+        self.assertEqual([stay["kind"] for stay in reversed(stays(self.store, limit=None))], ["stationary", "stop", "stationary"])
+        self.store.save_settings({"quick_stop_minutes": 0})
         trips = list(reversed(day_summary(self.store, "2026-09-25", "UTC")["trips"]))
         self.assertEqual([trip["mode"] for trip in trips], ["driving"])
 
@@ -1088,7 +1093,7 @@ class StoreTests(unittest.TestCase):
         migrated = Store(path)
         try:
             self.assertEqual(stays(migrated), [])
-            self.assertEqual(migrated.db.execute("PRAGMA user_version").fetchone()[0], 13)
+            self.assertEqual(migrated.db.execute("PRAGMA user_version").fetchone()[0], 14)
         finally:
             migrated.close()
 
@@ -1146,6 +1151,7 @@ class StoreTests(unittest.TestCase):
         self.assertGreater(trips[0]["distance_km"], 1)
 
     def test_errands_driven_with_short_stops_are_not_an_area_stay(self):
+        self.store.save_settings({"quick_stop_minutes": 0})  # stops this long would otherwise be quick stops
         a, b, c = shifted(HOME, 3000, 0), shifted(HOME, 3000, 1500), shifted(HOME, 1500, 1500)
         self.store.ingest(minute_fixes([still(HOME, 30), line(HOME, a, 6), still(a, 8), line(a, b, 4), still(b, 6),
                                         line(b, c, 4), still(c, 9), line(c, HOME, 5), still(HOME, 30)]))
@@ -1249,6 +1255,7 @@ class StoreTests(unittest.TestCase):
         self.assertEqual([stay["display_name"] for stay in day["stays"]].count("University"), 1)
 
     def test_lunch_off_campus_is_a_round_trip(self):
+        self.store.save_settings({"quick_stop_minutes": 0})  # stops this long would otherwise be quick stops
         taco = shifted(CAMPUS, 2500, 0)
         day, found, _overview = self.campus_day([still(CAMPUS, 60), line(CAMPUS, taco, 5), still(taco, 10),
                                                  line(taco, CAMPUS, 5), still(CAMPUS, 60)])
@@ -1282,7 +1289,9 @@ class StoreTests(unittest.TestCase):
             self.store.ingest(fix)
         live = [(row["started_at"], row["went_elsewhere"]) for row in stays(self.store, limit=None)]
         # Home -> campus and campus -> lab go straight; lab -> taco place -> lab went elsewhere.
-        self.assertEqual([flag for _, flag in reversed(live)], [None, 0, 0, 1])
+        # The taco place is a quick stop; flags still compare stays, as a rebuild does.
+        self.assertEqual([(row["kind"], row["went_elsewhere"]) for row in reversed(stays(self.store, limit=None))],
+                         [("stationary", None), ("stationary", 0), ("stationary", 0), ("stop", None), ("stationary", 1)])
         process_stays_rebuild(self.store)
         self.assertEqual([(row["started_at"], row["went_elsewhere"]) for row in stays(self.store, limit=None)], live)
 
@@ -1304,6 +1313,7 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(radius, 45)
 
     def test_round_trip_names_where_it_stopped(self):
+        self.store.save_settings({"quick_stop_minutes": 0})  # stops this long would otherwise be quick stops
         store = shifted(HOME, 4000, 0)
         self.store.ingest(minute_fixes([still(HOME, 30), line(HOME, store, 8), still(store, 8), line(store, HOME, 8), still(HOME, 30)]))
         with patch("geologs.analysis.place_for_coordinate", side_effect=campus_label):
@@ -1859,6 +1869,7 @@ class StoreTests(unittest.TestCase):
 
     def test_minimum_stay_length_from_settings(self):
         from geologs.core import metres
+        self.store.save_settings({"quick_stop_minutes": 0})
         cafe = shifted(HOME, 3000, 0)
         self.store.ingest(minute_fixes([still(HOME, 30), line(HOME, cafe, 6), still(cafe, 9),
                                         line(cafe, HOME, 6), still(HOME, 30)]))
@@ -1938,6 +1949,77 @@ class StoreTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 delete_samples(self.store, bad)
 
+    def test_quick_stop_needs_stillness_and_travel_on_both_sides(self):
+        fuel = shifted(HOME, 4000, 0)
+        work = shifted(HOME, 9000, 0)
+        jitter = [shifted(fuel, 4 * math.sin(i), 4 * math.cos(i)) for i in range(5)]
+        self.store.ingest(minute_fixes([still(HOME, 30), line(HOME, fuel, 5), jitter, line(fuel, work, 6), still(work, 30)]))
+        kinds = lambda: [stay["kind"] for stay in reversed(stays(self.store, limit=None))]
+        self.assertEqual(kinds(), ["stationary", "stop", "stationary"])
+        trips = day_summary(self.store, "2026-09-27", "UTC")["trips"]
+        self.assertEqual([trip["mode"] for trip in reversed(trips)], ["driving", "driving"])
+
+    def test_creeping_traffic_and_short_waits_are_not_quick_stops(self):
+        queue = shifted(HOME, 4000, 0)
+        crawl = line(queue, shifted(queue, 0, 60), 6)  # 60 m in six minutes: stop-and-go traffic
+        light = still(shifted(HOME, 6000, 0), 2)  # a red light
+        self.store.ingest(minute_fixes([still(HOME, 30), line(HOME, queue, 5), crawl,
+                                        line(crawl[-1], light[0], 3), light, line(light[0], shifted(HOME, 9000, 0), 4),
+                                        still(shifted(HOME, 9000, 0), 30)]))
+        self.assertEqual([stay["kind"] for stay in stays(self.store, limit=None)], ["stationary", "stationary"])
+
+    def test_still_fixes_after_a_coverage_gap_are_not_a_quick_stop(self):
+        fuel = shifted(HOME, 4000, 0)
+        before = minute_fixes([still(HOME, 30), line(HOME, fuel, 5)])
+        # Nothing for 20 minutes, then five still minutes and on to work.
+        after = minute_fixes([still(fuel, 5), line(fuel, shifted(HOME, 9000, 0), 6), still(shifted(HOME, 9000, 0), 30)],
+                             start=datetime(2026, 9, 27, 14, 0, tzinfo=timezone.utc))
+        self.store.ingest(before + after)
+        self.assertNotIn("stop", [stay["kind"] for stay in stays(self.store, limit=None)])
+
+    def test_a_pause_on_a_lake_loop_is_not_a_quick_stop(self):
+        shore = shifted(LAKE, -500, 0)
+        # 30 minutes at 9 km/h covers 4.5 km, 9 radians of a 500 m circle.
+        first, second = laps(LAKE, 500, 30, 9), laps(LAKE, 500, 30, 9, start_angle=math.pi + 9)
+        pause = [shifted(first[-1], 3 * math.sin(i), 3 * math.cos(i)) for i in range(5)]
+        self.store.ingest(minute_fixes([still(HOME, 31), line(HOME, shore, 12), first, pause, second,
+                                        line(second[-1], HOME, 12), still(HOME, 30)]))
+        self.assertEqual([stay["kind"] for stay in reversed(stays(self.store, limit=None))],
+                         ["stationary", "area", "stationary"])
+
+    def test_adding_and_removing_stops_by_hand(self):
+        fuel, work = shifted(HOME, 4000, 0), shifted(HOME, 9000, 0)
+        self.store.save_settings({"quick_stop_minutes": 0})
+        # Two minutes at the pump: too short for any detector.
+        self.store.ingest(minute_fixes([still(HOME, 30), line(HOME, fuel, 5), still(fuel, 2), line(fuel, work, 6), still(work, 30)]))
+        trips = lambda: day_summary(self.store, "2026-09-27", "UTC")["trips"]
+        self.assertEqual(len(trips()), 1)
+        overview = daily_overview(self.store, "2026-09-27", "UTC")
+        added = self.store.save_stay_edit({"action": "add", "source": "phone",
+                                           "started_at": "2026-09-27T13:35:00+00:00", "ended_at": "2026-09-27T13:36:00+00:00"})
+        self.assertLess(metres_between(fuel, added), 5)
+        rows = list(reversed(stays(self.store, limit=None)))
+        self.assertEqual([(row["kind"], row["id"]) for row in rows][1], ("manual", -added["id"]))
+        self.assertEqual(len(trips()), 2)
+        self.assertTrue(stored_daily_record(self.store, "2026-09-27")["stale"])
+        self.assertNotEqual(daily_overview(self.store, "2026-09-27", "UTC")["totals"], overview["totals"])
+        # Removing the work stay; undoing both edits restores what was detected.
+        work_stay = rows[2]
+        removed = self.store.save_stay_edit({"action": "remove", "source": "phone",
+                                             "started_at": work_stay["started_at"], "ended_at": work_stay["ended_at"]})
+        self.assertEqual([row["kind"] for row in reversed(stays(self.store, limit=None))], ["stationary", "manual"])
+        self.assertEqual(len(self.store.stay_edits(source="phone")), 2)
+        for edit in (added, removed):
+            self.store.delete_stay_edit(edit["id"])
+        self.assertEqual(len(stays(self.store, limit=None)), 2)
+        with self.assertRaises(ValueError):
+            self.store.delete_stay_edit(added["id"])
+        with self.assertRaises(ValueError):  # no samples in that window
+            self.store.save_stay_edit({"action": "add", "source": "phone",
+                                       "started_at": "2026-09-28T13:00:00+00:00", "ended_at": "2026-09-28T13:05:00+00:00"})
+        with self.assertRaises(ValueError):
+            self.store.save_settings({"quick_stop_minutes": 15})
+
     def test_search_visits_finds_named_places_by_word(self):
         costco, club = shifted(HOME, 5000, 0), shifted(HOME, -5000, 0)
         for day, place in ((25, costco), (26, club), (27, costco)):
@@ -1975,7 +2057,7 @@ class StoreTests(unittest.TestCase):
         migrated = Store(path)
         try:
             self.assertEqual([row["kind"] for row in reversed(stays(migrated, limit=None))], ["stationary", "area", "stationary"])
-            self.assertEqual(migrated.db.execute("PRAGMA user_version").fetchone()[0], 13)
+            self.assertEqual(migrated.db.execute("PRAGMA user_version").fetchone()[0], 14)
         finally:
             migrated.close()
 

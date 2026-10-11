@@ -54,13 +54,8 @@ export function populateTimezones(selected) {
 }
 
 // Matches ANALYSIS_DEFAULTS in core.py.
-const DETECTION_DEFAULTS = {
-  stay_min_minutes: 15,
-  walking_max_kmh: 6.5,
-  running_max_kmh: 15,
-  cycling_max_kmh: 25,
-  driving_min_kmh: 35,
-};
+const STAY_DEFAULTS = { stay_min_minutes: 15, quick_stop_minutes: 3 };
+const SPEED_DEFAULTS = { walking_max_kmh: 6.5, running_max_kmh: 15, cycling_max_kmh: 25, driving_min_kmh: 35 };
 // Each mode's input, and the setting it edits.
 const SPEED_FIELDS = [
   ["walking", "walking_max_kmh"],
@@ -69,51 +64,74 @@ const SPEED_FIELDS = [
   ["driving", "driving_min_kmh"],
 ];
 
-function fillDetection(values) {
+function fillStays(values) {
   $("stay-min").value = values.stay_min_minutes;
+  // A value saved outside the list (say 6 min) still shows as itself.
+  const quick = String(values.quick_stop_minutes ?? 0);
+  if (![...$("quick-stop").options].some((option) => option.value === quick))
+    $("quick-stop").add(new Option(`${quick} min or more`, quick));
+  $("quick-stop").value = quick;
+  readStays();
+}
+
+function fillSpeeds(values) {
   for (const [mode, key] of SPEED_FIELDS) $(`speed-${mode}`).value = values[key];
-  updateDetectionPreview();
+  readSpeeds();
+}
+
+function showError(id, error, invalid, fields) {
+  for (const field of fields) $(field).setAttribute("aria-invalid", invalid.has(field) ? "true" : "false");
+  $(id).textContent = error;
+  $(id).hidden = !error;
+}
+
+// Reads the stays form and returns its values, or an error it also shows.
+function readStays() {
+  const stay = +$("stay-min").value;
+  const quick = +$("quick-stop").value;
+  const invalid = new Set();
+  let error = "";
+  if (!Number.isInteger(stay) || stay < 5 || stay > 120) {
+    invalid.add("stay-min");
+    error = "Minimum stay must be a whole number of minutes from 5 to 120.";
+  } else if (quick && quick >= stay) {
+    invalid.add("quick-stop");
+    error = "Quick stops must be shorter than the minimum stay.";
+  }
+  showError("stays-error", error, invalid, ["stay-min", "quick-stop"]);
+  return error ? { error } : { stay_min_minutes: stay, quick_stop_minutes: quick };
 }
 
 function speedText(kmh) {
   return Number.isFinite(kmh) ? kmh.toLocaleString(undefined, { maximumFractionDigits: 1 }) : "…";
 }
 
-// Reads the form, shows each mode's range and the speed bar, and returns the values or an error.
-export function updateDetectionPreview() {
-  const stay = +$("stay-min").value;
+// Reads the speeds, shows each mode's range and the speed bar, and returns the values or an error.
+function readSpeeds() {
   const speeds = Object.fromEntries(SPEED_FIELDS.map(([mode, key]) => [key, parseFloat($(`speed-${mode}`).value)]));
   const { walking_max_kmh: walk, running_max_kmh: run, cycling_max_kmh: ride, driving_min_kmh: drive } = speeds;
   $("speed-running-from").textContent = `Above ${speedText(walk)}, up to`;
   $("speed-cycling-from").textContent = `Above ${speedText(run)}, up to`;
   $("speed-driving-from").textContent = `Above ${speedText(ride)}, or stretches from`;
-  const invalid = new Set();
-  let error = "";
-  if (!Number.isInteger(stay) || stay < 5 || stay > 120) {
-    invalid.add("stay-min");
-    error = "Minimum stay must be a whole number of minutes from 5 to 120.";
-  }
-  for (const [mode, key] of SPEED_FIELDS)
-    if (!Number.isFinite(speeds[key]) || speeds[key] < 1 || speeds[key] > 200) invalid.add(`speed-${mode}`);
-  // The modes must rise in order; flag the first one that doesn't.
-  const order = [
-    ["speed-running", walk < run, "Running must start above the walking speed."],
-    ["speed-cycling", run < ride, "Cycling must start above the running speed."],
-    ["speed-driving", ride <= drive, "Driving can't start below the cycling limit."],
-  ];
-  if (SPEED_FIELDS.some(([mode]) => invalid.has(`speed-${mode}`))) {
-    error ||= "Speeds must be between 1 and 200 km/h.";
-  } else {
-    const broken = order.find(([, ok]) => !ok);
+  const fields = SPEED_FIELDS.map(([mode]) => `speed-${mode}`);
+  const invalid = new Set(fields.filter((id, index) => {
+    const value = speeds[SPEED_FIELDS[index][1]];
+    return !Number.isFinite(value) || value < 1 || value > 200;
+  }));
+  let error = invalid.size ? "Speeds must be between 1 and 200 km/h." : "";
+  if (!error) {
+    // The modes must rise in order; flag the first one that doesn't.
+    const broken = [
+      ["speed-running", walk < run, "Running must start above the walking speed."],
+      ["speed-cycling", run < ride, "Cycling must start above the running speed."],
+      ["speed-driving", ride <= drive, "Driving can't start below the cycling limit."],
+    ].find(([, ok]) => !ok);
     if (broken) {
       invalid.add(broken[0]);
-      error ||= broken[2];
+      error = broken[2];
     }
   }
-  for (const id of ["stay-min", ...SPEED_FIELDS.map(([mode]) => `speed-${mode}`)])
-    $(id).setAttribute("aria-invalid", invalid.has(id) ? "true" : "false");
-  $("speed-error").textContent = error;
-  $("speed-error").hidden = !error;
+  showError("speed-error", error, invalid, fields);
   if (!error) {
     // Driving gets a share past its own speed so it never shrinks to nothing.
     const widths = [walk, run - walk, ride - run, Math.max(drive, ride) * 1.25 - ride];
@@ -121,7 +139,45 @@ export function updateDetectionPreview() {
       ([mode], index) => `<span style="--mode:${modeInfo[mode].color};flex-grow:${widths[index]}"></span>`,
     ).join("");
   }
-  return error ? { error } : { stay_min_minutes: stay, ...speeds };
+  return error ? { error } : speeds;
+}
+
+// Saves analysis settings; when they changed, stays and trips are recalculated before the reply.
+async function saveAnalysis(form, values, extra = {}) {
+  const button = form.querySelector(".button.primary");
+  const changed = Object.keys(values).some((key) => values[key] !== state.settings[key]);
+  button.disabled = true;
+  button.textContent = changed ? "Recalculating…" : "Saving…";
+  try {
+    state.settings = await post("/api/settings", { ...values, ...extra });
+    renderSettings();
+    if (changed) await Promise.all([refreshExplore(false), refreshInsights()]);
+    toast(changed ? "Saved. Stays and trips were recalculated." : "Settings saved");
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = "Save changes";
+  }
+}
+
+const SETTINGS_PAGE_KEY = "geologs-settings-page";
+
+// Settings is a set of pages; the one last opened comes back for this browser.
+export function showSettingsPage(id) {
+  const pages = [...document.querySelectorAll(".settings-section")];
+  if (!pages.some((page) => page.id === id)) id = pages[0].id;
+  for (const page of pages) page.hidden = page.id !== id;
+  document.querySelectorAll(".settings-tab").forEach((tab) => {
+    const active = tab.dataset.settingsPage === id;
+    tab.classList.toggle("active", active);
+    if (active) tab.setAttribute("aria-current", "page");
+    else tab.removeAttribute("aria-current");
+  });
+  try {
+    sessionStorage.setItem(SETTINGS_PAGE_KEY, id);
+  } catch (_error) {}
+  document.querySelector(".settings-tab.active")?.scrollIntoView({ block: "nearest", inline: "nearest" });
 }
 
 function renderSummarySchedule() {
@@ -349,7 +405,8 @@ export function renderSettings() {
   $("speed-strategy").value = state.settings.speed_strategy;
   $("speed-offset").value = state.settings.reported_speed_offset_kmh;
   updateSpeedSettingsVisibility();
-  fillDetection(state.settings);
+  fillStays(state.settings);
+  fillSpeeds(state.settings);
   renderSummarySchedule();
 }
 
@@ -362,27 +419,36 @@ export function updateSpeedSettingsVisibility() {
 export function initSettings() {
   for (const [mode] of SPEED_FIELDS)
     $(`speed-${mode}-name`).innerHTML = `${modeIcon(mode)}${safe(modeInfo[mode].noun)}`;
-  $("detection-form").oninput = updateDetectionPreview;
-  $("detection-defaults").onclick = () => fillDetection(DETECTION_DEFAULTS);
-  $("detection-form").onsubmit = async (event) => {
+  document.querySelectorAll(".settings-tab").forEach((tab) => (tab.onclick = () => showSettingsPage(tab.dataset.settingsPage)));
+  let page = "";
+  try {
+    page = sessionStorage.getItem(SETTINGS_PAGE_KEY) || "";
+  } catch (_error) {}
+  showSettingsPage(page);
+  $("stays-form").oninput = readStays;
+  $("stays-defaults").onclick = () => fillStays(STAY_DEFAULTS);
+  $("stays-form").onsubmit = (event) => {
     event.preventDefault();
-    const values = updateDetectionPreview();
+    const values = readStays();
+    if (!values.error) saveAnalysis($("stays-form"), values);
+  };
+  $("movement-form").oninput = readSpeeds;
+  $("speed-strategy").onchange = updateSpeedSettingsVisibility;
+  $("movement-defaults").onclick = () => {
+    fillSpeeds(SPEED_DEFAULTS);
+    $("speed-strategy").value = "reported";
+    $("speed-offset").value = 0;
+    updateSpeedSettingsVisibility();
+  };
+  $("movement-form").onsubmit = (event) => {
+    event.preventDefault();
+    const values = readSpeeds();
     if (values.error) return;
-    const button = event.submitter || $("detection-form").querySelector(".button.primary");
-    const changed = Object.keys(values).some((key) => values[key] !== state.settings[key]);
-    button.disabled = true;
-    button.textContent = changed ? "Recalculating…" : "Saving…";
-    try {
-      state.settings = await post("/api/settings", values);
-      renderSettings();
-      if (changed) await Promise.all([refreshExplore(false), refreshInsights()]);
-      toast(changed ? "Saved. Stays and trips were recalculated." : "Settings saved");
-    } catch (error) {
-      toast(error.message);
-    } finally {
-      button.disabled = false;
-      button.textContent = "Save changes";
-    }
+    // Speed source and adjustment apply to new samples only, so they never recalculate.
+    saveAnalysis($("movement-form"), values, {
+      speed_strategy: $("speed-strategy").value,
+      reported_speed_offset_kmh: +$("speed-offset").value,
+    });
   };
   // Choosing an interval implies saving throughout the day.
   $("summary-interval").onchange = () => {
@@ -390,20 +456,26 @@ export function initSettings() {
   };
   $("summary-form").onsubmit = async (event) => {
     event.preventDefault();
+    const timezoneChanged = $("summary-timezone").value !== state.settings.timezone;
     try {
       state.settings = await post("/api/settings", {
+        timezone: $("summary-timezone").value.trim(),
         summary_schedule: document.querySelector('input[name="summary-schedule"]:checked')?.value || "nightly",
         summary_interval_hours: +$("summary-interval").value,
       });
       renderSettings();
-      toast("Summary schedule saved");
+      if (timezoneChanged) {
+        if (state.followToday) $("day-date").value = localDateKey();
+        await refreshExplore();
+      }
+      toast("Settings saved");
     } catch (error) {
       toast(error.message);
     }
   };
   $("connection").onclick = () => {
     showView("settings");
-    document.getElementById("settings-sources").scrollIntoView({ behavior: "smooth", block: "start" });
+    showSettingsPage("settings-sources");
   };
   $("refresh-sources").onclick = () =>
     refreshSources()
@@ -418,36 +490,9 @@ export function initSettings() {
     setConnection("warning", "Signed out");
     openAuth("You are signed out. Enter the access token to sign in again.");
   };
-  document.querySelectorAll(".settings-nav a").forEach(
-    (link) =>
-      (link.onclick = (event) => {
-        event.preventDefault();
-        document.querySelector(link.getAttribute("href")).scrollIntoView({
-          behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
-          block: "start",
-        });
-      }),
-  );
-  if ("IntersectionObserver" in window) {
-    // Highlight the section being read in the Settings navigation.
-    const sectionObserver = new IntersectionObserver(
-      (entries) => {
-        for (const entry of entries)
-          if (entry.isIntersecting)
-            document
-              .querySelectorAll(".settings-nav a")
-              .forEach((link) =>
-                link.classList.toggle("active", link.getAttribute("href") === "#" + entry.target.id),
-              );
-      },
-      { rootMargin: "-20% 0px -70% 0px" },
-    );
-    document.querySelectorAll(".settings-section").forEach((section) => sectionObserver.observe(section));
-  }
   setInterval(() => {
     if ($("settings-view").classList.contains("active") && !document.hidden) refreshSources().catch(() => {});
   }, 30000);
-  $("speed-strategy").onchange = updateSpeedSettingsVisibility;
   $("places-form").onsubmit = async (event) => {
     event.preventDefault();
     try {
@@ -458,22 +503,6 @@ export function initSettings() {
       // Names can change with the provider; refresh what shows them.
       await refreshMeta();
       await Promise.all([refreshExplore(false), refreshInsights()]);
-    } catch (error) {
-      toast(error.message);
-    }
-  };
-  $("settings-form").onsubmit = async (event) => {
-    event.preventDefault();
-    try {
-      state.settings = await post("/api/settings", {
-        timezone: $("summary-timezone").value.trim(),
-        speed_strategy: $("speed-strategy").value,
-        reported_speed_offset_kmh: +$("speed-offset").value,
-      });
-      if (state.followToday) $("day-date").value = localDateKey();
-      renderSettings();
-      await refreshExplore();
-      toast("Settings saved");
     } catch (error) {
       toast(error.message);
     }

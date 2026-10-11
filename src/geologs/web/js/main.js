@@ -12,6 +12,7 @@ import { initPlaces } from "./views/places.js";
 import { initReminders } from "./views/reminders.js";
 import { initSettings } from "./views/settings.js";
 import { initShell } from "./views/shell.js";
+import { initStayEdits } from "./views/stay-edits.js";
 import { initSummaries } from "./views/summaries.js";
 
 initShell();
@@ -22,6 +23,7 @@ initPlaceDialogs();
 initReminders();
 initSummaries();
 initSettings();
+initStayEdits();
 initMap();
 
 refreshAll().then(() => {
