@@ -2198,6 +2198,29 @@ def place_for_coordinate(store, lat, lon, radius_m=None):
         return {"name": "", "named": False, "address": "", "category": "", "categories": [], "provider_place_id": ""}
 
 
+def save_place_label(store, raw):
+    """Save a name correction, looking up its address when none is given.
+
+    A label's address is the only one its visits get, so a rename without one
+    (an MCP call that passes just a name) would leave visit search with only
+    coordinates. A named place's address is used only when that place lies
+    inside the label: a friend's house must not take the café down the street's.
+    """
+    if not str(raw.get("address") or "").strip():
+        try:
+            lat, lon = float(raw["lat"]), float(raw["lon"])
+            value = reverse_geocode(store, lat, lon)
+            place_lat, place_lon = value.get("place_lat"), value.get("place_lon")
+            inside = not value.get("place_name") or (
+                place_lat is not None and place_lon is not None
+                and metres(lat, lon, place_lat, place_lon) <= float(raw.get("radius_m") or 50))
+            if inside and value.get("address"):
+                raw = {**raw, "address": str(value["address"])[:300]}
+        except (ValueError, OSError, KeyError, TypeError):
+            pass
+    return store.save_place_label(raw)
+
+
 def is_home_place(place):
     return str(place.get("name") or place.get("display_name") or "").strip().casefold() in ("home", "my home")
 

@@ -1499,6 +1499,25 @@ class StoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "together"):
             self.store.save_place_label({"name": "X", "lat": 41, "lon": -87.9, "started_at": first["started_at"]})
 
+    def test_rename_without_an_address_looks_up_the_spot_s_own_address(self):
+        from geologs.core import save_place_label
+        house = {"name": "742 Evergreen Terrace", "place_name": "", "address": "742 Evergreen Terrace"}
+        cafe_nearby = {"name": "Corner Cafe", "place_name": "Corner Cafe", "address": "10 Main St",
+                       "place_lat": 41.0010, "place_lon": -87.9}
+        with patch("geologs.core.reverse_geocode", return_value=house):
+            friend = save_place_label(self.store, {"name": "Alex", "lat": 41, "lon": -87.9})
+        with patch("geologs.core.reverse_geocode", return_value=cafe_nearby):
+            other = save_place_label(self.store, {"name": "Sam", "lat": 41, "lon": -87.8})
+        with patch("geologs.core.reverse_geocode", side_effect=AssertionError("looked up a given address")):
+            typed = save_place_label(self.store, {"name": "Kim", "lat": 41, "lon": -87.7, "address": "1 Typed Rd"})
+        with patch("geologs.core.reverse_geocode", side_effect=ValueError("no places provider")):
+            offline = save_place_label(self.store, {"name": "Lee", "lat": 41, "lon": -87.6})
+        self.assertEqual(friend["address"], "742 Evergreen Terrace")
+        # A named place 110 m away is a neighbour, not this spot: its address is not borrowed.
+        self.assertEqual(other["address"], "")
+        self.assertEqual(typed["address"], "1 Typed Rd")
+        self.assertEqual(offline["address"], "")
+
     def test_current_location_keeps_a_visit_only_correction_while_you_are_there(self):
         cafe = shifted(HOME, 5000, 0)
         start = datetime.now(timezone.utc) - timedelta(minutes=40)

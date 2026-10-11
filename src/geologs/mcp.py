@@ -2,7 +2,7 @@
 import json
 import sqlite3
 
-from .core import current_location, deliver_webhook, geocode, nearby_places, reverse_geocode
+from .core import current_location, deliver_webhook, geocode, nearby_places, reverse_geocode, save_place_label
 from .analysis import daily_briefs, daily_overview, day_summary, place_patterns, predict_next, resolve_place_patterns, search_visits, stays, transitions, visited_places
 from .postgres import INTEGRITY_ERRORS
 
@@ -44,7 +44,7 @@ TOOLS = [
     {"name": "save_place", "description": "Create or edit a saved place: a named zone (such as a university campus) and arrival geofence. It groups and totals the places visited inside it; it does not rename them. To fix what one visit or spot is called, use set_place_label.", "inputSchema": schema({"id": INTEGER, "name": STRING, "lat": NUMBER, "lon": NUMBER, "radius_m": NUMBER, "address": STRING, "category": STRING, "provider_place_id": STRING}, ["name", "lat", "lon"])},
     {"name": "delete_place", "description": "Delete a saved place (zone). A place that a reminder uses is hidden instead so the reminder keeps working.", "inputSchema": schema({"id": INTEGER}, ["id"])},
     {"name": "list_place_labels", "description": "Name corrections pinned to locations. Each one names every visit whose position falls inside its radius, ahead of saved places and provider lookups.", "inputSchema": schema({})},
-    {"name": "set_place_label", "description": "Correct the name of a visited place: pin a name to the visit's coordinates (radius_m 20-1000, default 50; use the area's extent for an area stay). History, summaries, and visit search use it instead of the provider's guess. Re-labelling within 25 m replaces the earlier label. Use list_nearby_places to find the right name.", "inputSchema": schema({"name": STRING, "lat": NUMBER, "lon": NUMBER, "radius_m": NUMBER, "address": STRING, "category": STRING, "provider_place_id": STRING}, ["name", "lat", "lon"])},
+    {"name": "set_place_label", "description": "Correct the name of a visited place: pin a name to the visit's coordinates (radius_m 20-1000, default 50; use the area's extent for an area stay). History, summaries, and visit search use it instead of the provider's guess. Re-labelling within 25 m replaces the earlier label. Without an address, the street address of the spot is looked up and stored. Use list_nearby_places to find the right name.", "inputSchema": schema({"name": STRING, "lat": NUMBER, "lon": NUMBER, "radius_m": NUMBER, "address": STRING, "category": STRING, "provider_place_id": STRING}, ["name", "lat", "lon"])},
     {"name": "set_travel_mode", "description": "Correct how a trip (target 'trip') or an area stay such as a lake loop (target 'stay') was travelled: walking, running, cycling, driving, or transit; 'auto' restores the speed-based guess. Identify it by source and its start/end times from get_day_summary or get_trips; the correction applies to the trip that overlaps most of that window, so small recalculations do not lose it.", "inputSchema": schema({"source": STRING, "target": STRING, "started_at": STRING, "ended_at": STRING, "mode": STRING}, ["source", "started_at", "ended_at", "mode"])},
     {"name": "remove_place_label", "description": "Remove a name correction so visits there are named automatically again.", "inputSchema": schema({"id": INTEGER}, ["id"])},
     {"name": "list_reminders", "description": "Active one-shot location reminders waiting for arrival.", "inputSchema": schema({})},
@@ -114,7 +114,7 @@ def call_tool(store, name, args):
     if name == "list_place_labels":
         return store.place_labels()
     if name == "set_place_label":
-        return store.save_place_label(args)
+        return save_place_label(store, args)
     if name == "set_travel_mode":
         return store.save_mode_override(args)
     if name == "remove_place_label":

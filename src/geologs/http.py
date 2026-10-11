@@ -17,7 +17,7 @@ from urllib.parse import parse_qs, urlparse
 
 from .ingest import FORMATS as INGEST_FORMATS, claimed_source
 
-from .core import PLACES_PROVIDERS, Store, configured_places_providers, current_location, deliver_webhook, geocode, nearby_places, place_details, places_provider, reverse_geocode
+from .core import PLACES_PROVIDERS, Store, configured_places_providers, current_location, deliver_webhook, geocode, nearby_places, place_details, places_provider, reverse_geocode, save_place_label
 from .analysis import daily_briefs, daily_overview, day_summary, finalize_previous_day, insights, place_overview, stored_daily_record, place_patterns, predict_next, resolve_place_patterns, search_visits, stays, transitions, visited_places
 from .mcp import SUPPORTED_VERSIONS, dispatch
 from .postgres import INTEGRITY_ERRORS
@@ -439,7 +439,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/settings": result = store.save_settings(payload)
             elif path == "/api/places": result = store.save_place(payload)
             elif path == "/api/places/delete": result = store.delete_place(payload["id"])
-            elif path == "/api/place-labels": result = store.save_place_label(payload)
+            elif path == "/api/place-labels": result = save_place_label(store, payload)
             elif path == "/api/mode-overrides": result = store.save_mode_override(payload)
             elif path == "/api/place-labels/delete": result = store.delete_place_label(payload["id"])
             elif path == "/api/reminders": result = store.create_reminder(payload)
