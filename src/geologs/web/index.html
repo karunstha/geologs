@@ -186,6 +186,7 @@
         <nav class="settings-nav" aria-label="Settings sections">
           <a href="#settings-sources" class="active">Sources</a>
           <a href="#settings-analysis">Time &amp; movement</a>
+          <a href="#settings-detection">Stays &amp; activities</a>
           <a href="#settings-places">Place names</a>
           <a href="#settings-summaries">Daily summaries</a>
           <a href="#settings-access">Access</a>
@@ -214,6 +215,25 @@
             </form>
           </section>
 
+          <section id="settings-detection" class="settings-section" aria-labelledby="detection-title">
+            <div class="section-intro"><h2 id="detection-title">Stays &amp; activities</h2><p>When a stop counts as a visit, and which speeds mean walking, running, cycling, or driving.</p></div>
+            <form id="detection-form" class="card settings-form" novalidate>
+              <label class="setting-row"><span class="setting-label"><strong>Minimum stay</strong><small>Time in one place or area before it counts as a visit. Shorter catches quick errands; longer ignores traffic and short waits.</small></span><span class="input-unit"><input id="stay-min" class="input" type="number" min="5" max="120" step="1" required><span>min</span></span></label>
+              <fieldset class="setting-group"><legend class="setting-label"><strong>Activity speeds</strong><small>A trip is labelled by its typical (median) speed, in km/h.</small></legend>
+                <div id="speed-bands" class="speed-bands" aria-hidden="true"></div>
+                <div class="speed-rows">
+                  <label class="speed-row"><span id="speed-walking-name" class="speed-name"></span><span class="speed-range">Up to</span><span class="input-unit"><input id="speed-walking" class="input" type="number" min="1" max="200" step="0.5" required><span>km/h</span></span></label>
+                  <label class="speed-row"><span id="speed-running-name" class="speed-name"></span><span id="speed-running-from" class="speed-range"></span><span class="input-unit"><input id="speed-running" class="input" type="number" min="1" max="200" step="0.5" required><span>km/h</span></span></label>
+                  <label class="speed-row"><span id="speed-cycling-name" class="speed-name"></span><span id="speed-cycling-from" class="speed-range"></span><span class="input-unit"><input id="speed-cycling" class="input" type="number" min="1" max="200" step="0.5" required><span>km/h</span></span></label>
+                  <label class="speed-row"><span id="speed-driving-name" class="speed-name"></span><span id="speed-driving-from" class="speed-range"></span><span class="input-unit"><input id="speed-driving" class="input" type="number" min="1" max="200" step="0.5" required><span>km/h</span></span></label>
+                </div>
+                <p id="speed-error" class="field-error" role="alert" hidden></p>
+              </fieldset>
+              <p class="help setting-note">Saving recalculates stays and trips across your whole history, which can take a moment. Travel modes you set by hand are kept.</p>
+              <div class="card-foot"><button id="detection-defaults" class="button secondary" type="button">Restore defaults</button><button class="button primary">Save changes</button></div>
+            </form>
+          </section>
+
           <section id="settings-places" class="settings-section" aria-labelledby="place-names-title">
             <div class="section-intro"><h2 id="place-names-title">Place names</h2><p>The service that turns coordinates into names for stays, places, and search.</p></div>
             <form id="places-form" class="card settings-form">
@@ -225,8 +245,16 @@
           </section>
 
           <section id="settings-summaries" class="settings-section" aria-labelledby="summaries-settings-title">
-            <div class="section-intro"><h2 id="summaries-settings-title">Daily summaries</h2><p>Each completed day is saved after midnight in your timezone, with a compact brief for AI tools over MCP.</p></div>
-            <div class="card"><div class="card-head"><div><h3>Recently saved</h3></div><button id="explore-summaries" class="button secondary small" type="button">All summaries</button></div><div id="daily-summaries" class="list rows link-rows"></div></div>
+            <div class="section-intro"><h2 id="summaries-settings-title">Daily summaries</h2><p>When each day's summary, and its brief for AI tools over MCP, is saved.</p></div>
+            <form id="summary-form" class="card settings-form">
+              <fieldset class="setting-group"><legend class="setting-label"><strong>Save summaries</strong><small>Opening a day always brings its summary up to date.</small></legend>
+                <div class="choice-cards">
+                  <label class="choice-card"><input type="radio" name="summary-schedule" value="nightly"><span class="choice-body"><strong>Overnight</strong><small>Just after midnight, for the day that ended.</small></span></label>
+                  <label class="choice-card"><input type="radio" name="summary-schedule" value="interval"><span class="choice-body"><strong>Throughout the day</strong><small>Also saves today so far, so AI tools can read it before the day ends.</small></span><select id="summary-interval" class="input compact" aria-label="How often to save today's summary"><option value="1">Every hour</option><option value="2">Every 2 hours</option><option value="3">Every 3 hours</option><option value="4">Every 4 hours</option><option value="6">Every 6 hours</option><option value="8">Every 8 hours</option><option value="12">Every 12 hours</option></select></label>
+                </div>
+              </fieldset>
+              <div class="card-foot"><button class="button primary">Save changes</button></div>
+            </form>
           </section>
 
           <section id="settings-access" class="settings-section" aria-labelledby="access-title">

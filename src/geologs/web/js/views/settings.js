@@ -1,15 +1,14 @@
-// Settings: sources and tracker setup, analysis, place names, summaries, and access.
+// Settings: sources and tracker setup, time and speed, stays and activities, place names, summaries, and access.
 import { refreshMeta } from "../app/refresh.js";
 import { api, openAuth, post, setConnection } from "../core/api.js";
 import { $, copyText, safe, toast } from "../core/dom.js";
-import { ago, formatTime, localDateKey, longDate, plural, zoneOptions } from "../core/format.js";
+import { ago, formatTime, localDateKey, plural, zoneOptions } from "../core/format.js";
 import { state } from "../core/state.js";
 import { actionIcon, onEach } from "../ui/actions.js";
-import { sourceName, statusPill } from "../ui/icons.js";
+import { modeIcon, modeInfo, sourceName, statusPill } from "../ui/icons.js";
 import { refreshExplore } from "./history.js";
 import { refreshInsights } from "./patterns.js";
 import { showView } from "./shell.js";
-import { openSummary, summaryLine } from "./summaries.js";
 
 export function populateTimezones(selected) {
   const select = $("summary-timezone");
@@ -54,22 +53,83 @@ export function populateTimezones(selected) {
   select.value = selected || "UTC";
 }
 
-export function renderDailySummaries() {
-  const box = $("daily-summaries");
-  box.innerHTML =
-    state.dailySummaries
-      .filter((item) => item.points)
-      .slice(0, 5)
-      .map(
-        (item) =>
-          `<button type="button" class="list-item row-link" data-open-summary="${safe(item.date)}"><span><strong>${safe(longDate(item.date))}</strong><small>${safe(summaryLine(item))}</small></span><span class="row-chevron" aria-hidden="true">${actionIcon("open")}</span></button>`,
-      )
-      .join("") ||
-    '<div class="empty-block"><strong>No saved days yet</strong><span>The first summary is saved after midnight following your first recorded day.</span></div>';
-  onEach(box, "open-summary", (date) => {
-    showView("summaries");
-    openSummary(date, true);
+// Matches ANALYSIS_DEFAULTS in core.py.
+const DETECTION_DEFAULTS = {
+  stay_min_minutes: 15,
+  walking_max_kmh: 6.5,
+  running_max_kmh: 15,
+  cycling_max_kmh: 25,
+  driving_min_kmh: 35,
+};
+// Each mode's input, and the setting it edits.
+const SPEED_FIELDS = [
+  ["walking", "walking_max_kmh"],
+  ["running", "running_max_kmh"],
+  ["cycling", "cycling_max_kmh"],
+  ["driving", "driving_min_kmh"],
+];
+
+function fillDetection(values) {
+  $("stay-min").value = values.stay_min_minutes;
+  for (const [mode, key] of SPEED_FIELDS) $(`speed-${mode}`).value = values[key];
+  updateDetectionPreview();
+}
+
+function speedText(kmh) {
+  return Number.isFinite(kmh) ? kmh.toLocaleString(undefined, { maximumFractionDigits: 1 }) : "…";
+}
+
+// Reads the form, shows each mode's range and the speed bar, and returns the values or an error.
+export function updateDetectionPreview() {
+  const stay = +$("stay-min").value;
+  const speeds = Object.fromEntries(SPEED_FIELDS.map(([mode, key]) => [key, parseFloat($(`speed-${mode}`).value)]));
+  const { walking_max_kmh: walk, running_max_kmh: run, cycling_max_kmh: ride, driving_min_kmh: drive } = speeds;
+  $("speed-running-from").textContent = `Above ${speedText(walk)}, up to`;
+  $("speed-cycling-from").textContent = `Above ${speedText(run)}, up to`;
+  $("speed-driving-from").textContent = `Above ${speedText(ride)}, or stretches from`;
+  const invalid = new Set();
+  let error = "";
+  if (!Number.isInteger(stay) || stay < 5 || stay > 120) {
+    invalid.add("stay-min");
+    error = "Minimum stay must be a whole number of minutes from 5 to 120.";
+  }
+  for (const [mode, key] of SPEED_FIELDS)
+    if (!Number.isFinite(speeds[key]) || speeds[key] < 1 || speeds[key] > 200) invalid.add(`speed-${mode}`);
+  // The modes must rise in order; flag the first one that doesn't.
+  const order = [
+    ["speed-running", walk < run, "Running must start above the walking speed."],
+    ["speed-cycling", run < ride, "Cycling must start above the running speed."],
+    ["speed-driving", ride <= drive, "Driving can't start below the cycling limit."],
+  ];
+  if (SPEED_FIELDS.some(([mode]) => invalid.has(`speed-${mode}`))) {
+    error ||= "Speeds must be between 1 and 200 km/h.";
+  } else {
+    const broken = order.find(([, ok]) => !ok);
+    if (broken) {
+      invalid.add(broken[0]);
+      error ||= broken[2];
+    }
+  }
+  for (const id of ["stay-min", ...SPEED_FIELDS.map(([mode]) => `speed-${mode}`)])
+    $(id).setAttribute("aria-invalid", invalid.has(id) ? "true" : "false");
+  $("speed-error").textContent = error;
+  $("speed-error").hidden = !error;
+  if (!error) {
+    // Driving gets a share past its own speed so it never shrinks to nothing.
+    const widths = [walk, run - walk, ride - run, Math.max(drive, ride) * 1.25 - ride];
+    $("speed-bands").innerHTML = SPEED_FIELDS.map(
+      ([mode], index) => `<span style="--mode:${modeInfo[mode].color};flex-grow:${widths[index]}"></span>`,
+    ).join("");
+  }
+  return error ? { error } : { stay_min_minutes: stay, ...speeds };
+}
+
+function renderSummarySchedule() {
+  const schedule = state.settings.summary_schedule || "nightly";
+  document.querySelectorAll('input[name="summary-schedule"]').forEach((input) => {
+    input.checked = input.value === schedule;
   });
+  $("summary-interval").value = String(state.settings.summary_interval_hours || 3);
 }
 
 const PROVIDER_NOTES = {
@@ -289,7 +349,8 @@ export function renderSettings() {
   $("speed-strategy").value = state.settings.speed_strategy;
   $("speed-offset").value = state.settings.reported_speed_offset_kmh;
   updateSpeedSettingsVisibility();
-  renderDailySummaries();
+  fillDetection(state.settings);
+  renderSummarySchedule();
 }
 
 export function updateSpeedSettingsVisibility() {
@@ -299,7 +360,47 @@ export function updateSpeedSettingsVisibility() {
 }
 
 export function initSettings() {
-  $("explore-summaries").onclick = () => showView("summaries");
+  for (const [mode] of SPEED_FIELDS)
+    $(`speed-${mode}-name`).innerHTML = `${modeIcon(mode)}${safe(modeInfo[mode].noun)}`;
+  $("detection-form").oninput = updateDetectionPreview;
+  $("detection-defaults").onclick = () => fillDetection(DETECTION_DEFAULTS);
+  $("detection-form").onsubmit = async (event) => {
+    event.preventDefault();
+    const values = updateDetectionPreview();
+    if (values.error) return;
+    const button = event.submitter || $("detection-form").querySelector(".button.primary");
+    const changed = Object.keys(values).some((key) => values[key] !== state.settings[key]);
+    button.disabled = true;
+    button.textContent = changed ? "Recalculating…" : "Saving…";
+    try {
+      state.settings = await post("/api/settings", values);
+      renderSettings();
+      if (changed) await Promise.all([refreshExplore(false), refreshInsights()]);
+      toast(changed ? "Saved. Stays and trips were recalculated." : "Settings saved");
+    } catch (error) {
+      toast(error.message);
+    } finally {
+      button.disabled = false;
+      button.textContent = "Save changes";
+    }
+  };
+  // Choosing an interval implies saving throughout the day.
+  $("summary-interval").onchange = () => {
+    document.querySelector('input[name="summary-schedule"][value="interval"]').checked = true;
+  };
+  $("summary-form").onsubmit = async (event) => {
+    event.preventDefault();
+    try {
+      state.settings = await post("/api/settings", {
+        summary_schedule: document.querySelector('input[name="summary-schedule"]:checked')?.value || "nightly",
+        summary_interval_hours: +$("summary-interval").value,
+      });
+      renderSettings();
+      toast("Summary schedule saved");
+    } catch (error) {
+      toast(error.message);
+    }
+  };
   $("connection").onclick = () => {
     showView("settings");
     document.getElementById("settings-sources").scrollIntoView({ behavior: "smooth", block: "start" });

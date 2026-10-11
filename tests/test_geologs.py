@@ -13,7 +13,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from geologs.core import Store, classify_motion, database_path, place_details, current_location, deliver_webhook, geocode, mode_for, name_matches, nearby_places, places_provider, street_key, places_provider_identity, reverse_cache_radius, reverse_geocode, route_segments_from_points, smooth_route_segment
-from geologs.analysis import daily_brief, daily_briefs, daily_overview, day_summary, insights, place_overview, stored_daily_record, place_patterns, predict_next, resolve_place_patterns, search_visits, stays, transitions, visited_places
+from geologs.analysis import daily_brief, daily_briefs, daily_overview, day_summary, insights, place_overview, stored_daily_record, place_patterns, predict_next, resolve_place_patterns, save_scheduled_summaries, search_visits, stays, transitions, visited_places
 
 
 HOME = (41.0, -87.9)
@@ -1830,6 +1830,62 @@ class StoreTests(unittest.TestCase):
         # One implausible jump inside a walk does not make it a drive.
         self.assertEqual(classify_motion([(80, minute, None)] * 10 + [(300, 20, None)])["mode"], "walking")
         self.assertIsNone(classify_motion([(3, minute, None)]))
+
+    def test_activity_speeds_from_settings(self):
+        minute = 60
+        brisk = {**self.store.settings(), "walking_max_kmh": 10}
+        self.assertEqual(classify_motion([(150, minute, None)] * 10, brisk)["mode"], "walking")
+        self.assertEqual(mode_for(2.5, None, brisk), "walking")
+        # A slow drive through traffic still counts once stretches reach the driving speed.
+        slow_traffic = [(300, minute, None)] * 8 + [(700, minute, None)] * 2
+        self.assertEqual(classify_motion(slow_traffic)["mode"], "driving")
+        self.assertEqual(classify_motion(slow_traffic, {**brisk, "driving_min_kmh": 50})["mode"], "cycling")
+
+    def test_changing_activity_speeds_recalculates_stored_stays(self):
+        self.store.ingest(lake_run_day())
+        area = lambda: [stay for stay in stays(self.store, limit=None) if stay["kind"] == "area"]
+        self.assertEqual(area()[0]["activity"], "running")
+        before = daily_overview(self.store, "2026-09-27", "UTC")
+        self.store.save_settings({"walking_max_kmh": 10})
+        self.assertEqual(area()[0]["activity"], "walking")
+        record = stored_daily_record(self.store, "2026-09-27")
+        self.assertTrue(record["stale"])
+        self.assertNotEqual(daily_overview(self.store, "2026-09-27", "UTC")["activity_totals"], before["activity_totals"])
+
+    def test_minimum_stay_length_from_settings(self):
+        from geologs.core import metres
+        cafe = shifted(HOME, 3000, 0)
+        self.store.ingest(minute_fixes([still(HOME, 30), line(HOME, cafe, 6), still(cafe, 9),
+                                        line(cafe, HOME, 6), still(HOME, 30)]))
+        near_cafe = lambda: [stay for stay in stays(self.store, limit=None) if metres(*cafe, stay["lat"], stay["lon"]) < 100]
+        self.assertEqual(near_cafe(), [])
+        self.store.save_settings({"stay_min_minutes": 5})
+        self.assertEqual(len(near_cafe()), 1)
+        self.assertIn("at least 5 minutes", search_visits(self.store, "anything", timezone_name="UTC")["note"])
+
+    def test_analysis_settings_are_validated(self):
+        for bad in ({"stay_min_minutes": 2}, {"stay_min_minutes": 7.5}, {"walking_max_kmh": 20},
+                    {"cycling_max_kmh": 40}, {"driving_min_kmh": 0}, {"summary_schedule": "weekly"},
+                    {"summary_interval_hours": 24}):
+            with self.assertRaises(ValueError, msg=bad):
+                self.store.save_settings(bad)
+        saved = self.store.save_settings({"summary_schedule": "interval", "summary_interval_hours": 2})
+        self.assertEqual((saved["summary_schedule"], saved["summary_interval_hours"], saved["stay_min_minutes"]),
+                         ("interval", 2, 15))
+
+    def test_summary_schedule_saves_today_only_on_an_interval(self):
+        start = datetime(2026, 9, 27, 13, tzinfo=timezone.utc)
+        self.store.ingest(minute_fixes([still(HOME, 60)], start=start))
+        saved_today = lambda: any(item["date"] == "2026-09-27" for item in self.store.daily_overviews())
+        save_scheduled_summaries(self.store, now=start + timedelta(hours=2))
+        self.assertFalse(saved_today())
+        self.store.save_settings({"summary_schedule": "interval", "summary_interval_hours": 3})
+        save_scheduled_summaries(self.store, now=start + timedelta(hours=2))
+        self.assertTrue(saved_today())
+        # Not due again until the interval has passed.
+        with patch("geologs.analysis.daily_overview") as rebuild:
+            save_scheduled_summaries(self.store, now=start + timedelta(hours=3))
+        self.assertNotIn("2026-09-27", [call.args[1] for call in rebuild.call_args_list])
 
     def test_search_visits_finds_named_places_by_word(self):
         costco, club = shifted(HOME, 5000, 0), shifted(HOME, -5000, 0)

@@ -7,7 +7,7 @@ import math
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from .core import (MAX_CONNECTED_GAP_SECONDS, MAX_PLAUSIBLE_SPEED_MPS, MAX_SAMPLE_GAP_SECONDS, MOVEMENT_MODES,
+from .core import (ANALYSIS_DEFAULTS, MAX_CONNECTED_GAP_SECONDS, MAX_PLAUSIBLE_SPEED_MPS, MAX_SAMPLE_GAP_SECONDS, MOVEMENT_MODES,
                    _label_place, classify_motion, is_excursion, is_home_place, label_at, place_in_zone, zone_at, mode_override_for, went_elsewhere_between, metres, name_matches,
                    nearby_places,
                    parse_time, place_for_coordinate,
@@ -16,7 +16,6 @@ from .core import (MAX_CONNECTED_GAP_SECONDS, MAX_PLAUSIBLE_SPEED_MPS, MAX_SAMPL
 
 
 STOP_RADIUS_M = 50
-STOP_MIN_SECONDS = 900
 # A stay survives this many consecutive stray fixes when the next fix is back
 # inside it; indoor GPS often jumps 60-100 m for a sample or two.
 STRAY_MAX_POINTS = 2
@@ -29,9 +28,8 @@ STRAY_MAX_SECONDS = 300
 AREA_SCALES_M = (250, 500, 1000, 1500, 2000, 3000)
 AREA_MIN_CIRCULATION = 1.8
 AREA_SAMPLE_SECONDS = 30
-# Moves at or above this speed split areas; errands driven at 30 km/h between
-# short stops would otherwise look like one circulating area.
-AREA_DRIVING_KMH = 25
+# Moves at or above the cycling limit (Settings) split areas; errands driven
+# at 30 km/h between short stops would otherwise look like one circulating area.
 AREA_MIN_ACTIVITY_EXTENT_M = 150
 # Everything between parking and driving away is one visit (an out-and-back
 # trail run) when it circulates as a whole and stays within this extent.
@@ -60,6 +58,7 @@ def sync_timeline(store, sources=None, rebuild=False, since_ids=None):
     if sources is None:
         sources = [row["source"] for row in store._rows("SELECT DISTINCT source FROM point_observations")]
     since_ids = since_ids or {}
+    stay_seconds = _stay_seconds(store.settings())
     for source in sources:
         since_id = 0 if rebuild else since_ids.get(source, 0)
         if rebuild:
@@ -99,7 +98,7 @@ def sync_timeline(store, sources=None, rebuild=False, since_ids=None):
                 (stay["end_observation_id"], source, "latest" if stay["ongoing"] else "departure", stay["id"]))
         state = store.db.execute("SELECT candidate FROM stay_observation_state WHERE source=?", (source,)).fetchone()
         candidate = json.loads(state["candidate"]) if state and state["candidate"] else None
-        if candidate and candidate["count"] >= 2 and _duration(candidate) < STOP_MIN_SECONDS:
+        if candidate and candidate["count"] >= 2 and _duration(candidate) < stay_seconds:
             store.db.execute("""DELETE FROM timeline_fixes WHERE observation_id IN (
                 SELECT id FROM point_observations WHERE source=? AND timestamp>=? AND timestamp<=?
                 AND id<>? AND id<>?)""",
@@ -116,6 +115,11 @@ def _duration(candidate):
     return (datetime.fromisoformat(candidate["end"]) - datetime.fromisoformat(candidate["start"])).total_seconds()
 
 
+def _stay_seconds(rules):
+    """How long a stay must last, from the Settings in `rules`."""
+    return (rules or ANALYSIS_DEFAULTS)["stay_min_minutes"] * 60
+
+
 def _eligible(point):
     return (point["accuracy_m"] is None or point["accuracy_m"] <= 100)
 
@@ -125,8 +129,8 @@ def _new_candidate(point):
             "first_lat": point["lat"], "first_lon": point["lon"], "lat": point["lat"], "lon": point["lon"], "count": 1}
 
 
-def _save_candidate(store, source, candidate, ongoing):
-    if candidate is None or candidate["count"] < 2 or _duration(candidate) < STOP_MIN_SECONDS:
+def _save_candidate(store, source, candidate, ongoing, rules=None):
+    if candidate is None or candidate["count"] < 2 or _duration(candidate) < _stay_seconds(rules):
         return
     store.db.execute("""INSERT INTO observed_stays_v2
         (source,start_observation_id,end_observation_id,started_at,ended_at,lat,lon,point_count,ongoing,kind)
@@ -143,7 +147,7 @@ def _stray_fix(point):
     return {key: point[key] for key in ("id", "timestamp", "lat", "lon", "accuracy_m", "speed_mps", "speed_origin")}
 
 
-def _advance_stay(store, source, candidate, point):
+def _advance_stay(store, source, candidate, point, rules=None):
     """Feed one accurate fix to the stationary-stay candidate and return the new candidate."""
     if candidate is None:
         return _new_candidate(point)
@@ -163,17 +167,17 @@ def _advance_stay(store, source, candidate, point):
             candidate["count"] = count
             candidate["end"] = point["timestamp"]
             candidate["end_id"] = point["id"]
-            _save_candidate(store, source, candidate, True)
+            _save_candidate(store, source, candidate, True, rules)
             return candidate
         if candidate["count"] >= 2 and len(strays) < STRAY_MAX_POINTS and elapsed <= STRAY_MAX_SECONDS:
             candidate["strays"] = strays + [_stray_fix(point)]
             return candidate
     # A real departure (or gap) ends the stay at its last inside fix. The
     # held-back fixes belong to whatever comes next, so replay them.
-    _save_candidate(store, source, candidate, False)
+    _save_candidate(store, source, candidate, False, rules)
     candidate = None
     for item in strays + [point]:
-        candidate = _advance_stay(store, source, candidate, item)
+        candidate = _advance_stay(store, source, candidate, item, rules)
     return candidate
 
 
@@ -207,12 +211,13 @@ def _state_move(previous, state):
             (state["first_at"] - previous["first_at"]).total_seconds())
 
 
-def _area_runs(states):
+def _area_runs(states, rules=None):
     """Split states at coverage gaps, implausible jumps, and driving-speed moves.
 
     Each run records whether a drive leads into it and out of it: a run
     between two drives is the time from parking to driving away.
     """
+    rules = rules or ANALYSIS_DEFAULTS
     runs, current, after_drive = [], [], False
     for state in states:
         if current:
@@ -220,7 +225,7 @@ def _area_runs(states):
             distance, seconds = _state_move(previous, state)
             gap = (state["first_at"] - previous["last_at"]).total_seconds()
             speed = distance / seconds if seconds > 0 else float("inf")
-            driving = max(speed, state["reported"] or 0) * 3.6 >= AREA_DRIVING_KMH and distance >= 150
+            driving = max(speed, state["reported"] or 0) * 3.6 >= rules["cycling_max_kmh"] and distance >= 150
             if gap > MAX_CONNECTED_GAP_SECONDS or speed > MAX_PLAUSIBLE_SPEED_MPS or driving:
                 runs.append((current, after_drive and driving))
                 current, after_drive = [], driving
@@ -230,10 +235,11 @@ def _area_runs(states):
     return runs
 
 
-def _run_windows(states, parked=False):
+def _run_windows(states, parked=False, rules=None):
     """Find maximal circulating windows in one connected run, tightest area first."""
     n = len(states)
-    if n < 3 or (states[-1]["last_at"] - states[0]["first_at"]).total_seconds() < STOP_MIN_SECONDS:
+    stay_seconds = _stay_seconds(rules)
+    if n < 3 or (states[-1]["last_at"] - states[0]["first_at"]).total_seconds() < stay_seconds:
         return []
     lat0, lon0 = states[0]["lat"], states[0]["lon"]
     x_scale = 111320 * math.cos(math.radians(lat0))
@@ -249,7 +255,7 @@ def _run_windows(states, parked=False):
 
     def valid(i, j):
         return (j - i >= 2
-                and (states[j]["last_at"] - states[i]["first_at"]).total_seconds() >= STOP_MIN_SECONDS
+                and (states[j]["last_at"] - states[i]["first_at"]).total_seconds() >= stay_seconds
                 and path[j] - path[i] >= AREA_MIN_CIRCULATION * max(extent(i, j), STOP_RADIUS_M))
 
     def trim(i, j):
@@ -296,7 +302,7 @@ def _run_windows(states, parked=False):
                 taken[index] = True
             i = j + 1
     spans.sort()
-    windows = [_area_window(states, path, i, j) for i, j in spans]
+    windows = [_area_window(states, path, i, j, rules) for i, j in spans]
     # Adjacent windows over overlapping ground are one visit found at two scales.
     merged = []
     for (i, j), window in zip(spans, windows):
@@ -305,27 +311,28 @@ def _run_windows(states, parked=False):
             touching = i - last - 1 <= STRAY_MAX_POINTS
             overlapping = metres(previous["lat"], previous["lon"], window["lat"], window["lon"]) <= previous["radius_m"] + window["radius_m"]
             if touching and overlapping:
-                merged[-1] = ((first, j), _area_window(states, path, first, j))
+                merged[-1] = ((first, j), _area_window(states, path, first, j, rules))
                 continue
         merged.append(((i, j), window))
     # Between parking and driving away, one circulating visit is the whole
     # outing: an out-and-back trail run circulates only as a whole. Several
     # windows mean several places (two stores), so they stay separate.
     if parked and len(merged) == 1 and valid(0, n - 1) and extent(0, n - 1) <= AREA_PARKED_MAX_EXTENT_M:
-        return [_area_window(states, path, 0, n - 1)]
+        return [_area_window(states, path, 0, n - 1, rules)]
     return [window for _, window in merged]
 
 
-def _area_window(states, path, i, j):
+def _area_window(states, path, i, j, rules=None):
     chosen = states[i:j + 1]
     lat = sum(state["lat"] for state in chosen) / len(chosen)
     lon = sum(state["lon"] for state in chosen) / len(chosen)
     radius = max(metres(lat, lon, state["lat"], state["lon"]) for state in chosen)
     moves = [(*_state_move(previous, state), state["reported"]) for previous, state in zip(chosen, chosen[1:])]
-    motion = classify_motion(moves)
+    rules = rules or ANALYSIS_DEFAULTS
+    motion = classify_motion(moves, rules)
     activity = motion["mode"] if motion else None
     # Pottering inside a small area (or GPS jitter indoors) is a visit, not exercise.
-    if motion and radius * 2 < AREA_MIN_ACTIVITY_EXTENT_M and motion["median_kmh"] < 6.5:
+    if motion and radius * 2 < AREA_MIN_ACTIVITY_EXTENT_M and motion["median_kmh"] < rules["walking_max_kmh"]:
         activity = None
     return {"start_id": chosen[0]["start_id"], "end_id": chosen[-1]["end_id"],
             "started_at": chosen[0]["started_at"], "ended_at": chosen[-1]["ended_at"],
@@ -333,11 +340,11 @@ def _area_window(states, path, i, j):
             "point_count": sum(state["count"] for state in chosen), "activity": activity}
 
 
-def area_windows(points):
+def area_windows(points, rules=None):
     """Area stays in chronological fixes that contain no stationary stay."""
     windows = []
-    for run, parked in _area_runs(_area_states(points)):
-        windows.extend(window for window in _run_windows(run, parked) if window["activity"] != "driving")
+    for run, parked in _area_runs(_area_states(points), rules):
+        windows.extend(window for window in _run_windows(run, parked, rules) if window["activity"] != "driving")
     return windows
 
 
@@ -366,7 +373,7 @@ def _flag(value):
     return None if value is None else int(bool(value))
 
 
-def _refresh_area_stays(store, source, since=None):
+def _refresh_area_stays(store, source, since=None, rules=None):
     """Detect area stays in travel after `since` (all history when None).
 
     Travel intervals lie before the first stationary stay, between stationary
@@ -406,10 +413,10 @@ def _refresh_area_stays(store, source, since=None):
             FROM point_observations o WHERE """ + " AND ".join(clauses) + """) ranked
             WHERE observation_rank=1 ORDER BY timestamp,id""", args)
         windows = []
-        long_enough = not (after and before) or (datetime.fromisoformat(before) - datetime.fromisoformat(after)).total_seconds() >= STOP_MIN_SECONDS
+        long_enough = not (after and before) or (datetime.fromisoformat(before) - datetime.fromisoformat(after)).total_seconds() >= _stay_seconds(rules)
         if long_enough:
             last_id = next((point["id"] for point in reversed(points) if _eligible(point)), None)
-            for window in area_windows(points):
+            for window in area_windows(points, rules):
                 if not _returns_to_origin(window, previous, following):
                     window["ongoing"] = following is None and window["end_id"] == last_id
                     windows.append(window)
@@ -485,6 +492,7 @@ def process_stays(store, sources=None, rebuild=False):
     """Process raw observations; a late import rebuilds that source safely."""
     if rebuild:
         store.clear_analysis_cache(commit=False)
+    rules = store.settings()
     if sources is None:
         sources = [r["source"] for r in store._rows("SELECT DISTINCT source FROM point_observations")]
     processed = 0
@@ -533,7 +541,7 @@ def process_stays(store, sources=None, rebuild=False):
                 last_time = point["timestamp"]
                 # A low-accuracy fix neither confirms nor ends a stay.
                 if _eligible(point):
-                    candidate = _advance_stay(store, source, candidate, dict(point))
+                    candidate = _advance_stay(store, source, candidate, dict(point), rules)
         if max_id == last_id:
             continue
         processed_sources.add(source)
@@ -541,7 +549,7 @@ def process_stays(store, sources=None, rebuild=False):
             VALUES (?,?,?,?) ON CONFLICT(source) DO UPDATE SET
             last_observation_id=excluded.last_observation_id,last_timestamp=excluded.last_timestamp,candidate=excluded.candidate""",
             (source, max_id, last_time, json.dumps(candidate)))
-        _refresh_area_stays(store, source, area_since)
+        _refresh_area_stays(store, source, area_since, rules)
     incremental_sources = processed_sources - rebuilt_sources
     if incremental_sources:
         sync_timeline(store, incremental_sources, since_ids=since_ids)
@@ -647,12 +655,12 @@ def stays(store, start=None, end=None, source=None, limit=500):
 
 
 def anchored_trips(store, start=None, end=None, source=None):
-    """Return travel intervals bounded by consecutive stays lasting at least 15 minutes."""
+    """Return travel intervals bounded by consecutive stays (of the length set in Settings)."""
     context_start = (datetime.fromisoformat(parse_time(start)) - timedelta(days=1)).isoformat() if start else None
     context_end = (datetime.fromisoformat(parse_time(end)) + timedelta(days=1)).isoformat() if end else None
     anchors = stays(store, context_start, context_end, source=source, limit=None)
     points = list(reversed(store.observations(context_start, context_end, source=source, limit=None)))
-    trips = trips_between_stays(points, anchors, start, end)
+    trips = trips_between_stays(points, anchors, start, end, store.settings())
     overrides = store.mode_overrides()
     for trip in trips:
         override = mode_override_for(overrides, trip["source"], "trip", trip["start"], trip["end"])
@@ -965,7 +973,7 @@ def search_visits(store, query, start=None, end=None, limit=50, timezone_name=No
               for place in sorted(matched.values(), key=lambda item: item.get("last_seen") or "", reverse=True)]
     return {"query": query, "timezone": timezone_name, "total_visits": len(visits), "places": places,
             "visits": visits[:min(max(int(limit), 1), 1000)],
-            "note": "Visits are observed stays of at least 15 minutes; sparse GPS can miss short stops"}
+            "note": f"Visits are observed stays of at least {store.settings()['stay_min_minutes']} minutes; sparse GPS can miss short stops"}
 
 
 def transitions(store, limit=50, patterns=None, rows=None):
@@ -1558,3 +1566,29 @@ def finalize_previous_day(store, now=None):
     local_now = (now or datetime.now(timezone.utc)).astimezone(zone)
     date = (local_now.date() - timedelta(days=1)).isoformat()
     return daily_overview(store, date, timezone_name)
+
+
+def save_scheduled_summaries(store, now=None):
+    """Save the day that ended and, on an interval schedule, today so far.
+
+    Runs every minute. The completed day is always kept current; with the
+    interval schedule today's record is rebuilt once it is that many hours old
+    (a record nobody has asked for yet counts as old).
+    """
+    finalize_previous_day(store, now)
+    settings = store.settings()
+    if settings["summary_schedule"] != "interval":
+        return
+    now = now or datetime.now(timezone.utc)
+    local_now = now.astimezone(ZoneInfo(settings["timezone"]))
+    today = local_now.date().isoformat()
+    row = store.db.execute("""SELECT updated_at FROM daily_summaries
+        WHERE summary_date=? AND timezone=? AND source=''""", (today, settings["timezone"])).fetchone()
+    if row is None:
+        # Nothing recorded yet today: there is no record to save, so skip the work.
+        midnight = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+        due = store.observation_count(midnight.astimezone(timezone.utc).isoformat(), now.isoformat()) > 0
+    else:
+        due = now - datetime.fromisoformat(row["updated_at"]) >= timedelta(hours=settings["summary_interval_hours"])
+    if due:
+        daily_overview(store, today, settings["timezone"])

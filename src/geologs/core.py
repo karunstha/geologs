@@ -25,9 +25,19 @@ from .postgres import PostgresConnection
 
 
 _reverse_lock = threading.Lock()
+# How stays and travel modes are read from samples. Changing one rebuilds
+# stays and makes stored daily summaries stale. Speeds are median km/h: below
+# walking_max is a walk, below running_max a run, below cycling_max a ride, and
+# faster is a drive; stretches at driving_min or more count as driving even
+# when the median is slower (stop-and-go traffic).
+ANALYSIS_DEFAULTS = {"stay_min_minutes": 15, "walking_max_kmh": 6.5, "running_max_kmh": 15.0,
+                     "cycling_max_kmh": 25.0, "driving_min_kmh": 35.0}
+# Completed days are always saved after midnight; "interval" also saves today so far.
+SUMMARY_SCHEDULES = ("nightly", "interval")
 # An empty places_provider means the first configured provider (see places_provider()).
 DEFAULT_SETTINGS = {"speed_strategy": "reported", "reported_speed_offset_kmh": 0.0, "timezone": "UTC",
-                    "places_provider": ""}
+                    "places_provider": "", **ANALYSIS_DEFAULTS,
+                    "summary_schedule": "nightly", "summary_interval_hours": 3}
 MAX_CONNECTED_GAP_SECONDS = 900
 MAX_PLAUSIBLE_SPEED_MPS = 55.6
 # Transit (bus, train) is never guessed from speed; it only comes from a correction.
@@ -77,15 +87,17 @@ def metres(a_lat, a_lon, b_lat, b_lon):
     return 12742000 * math.asin(min(1, math.sqrt(h)))
 
 
-def mode_for(speed_mps, accuracy_m=None):
+def mode_for(speed_mps, accuracy_m=None, speeds=None):
+    """One fix's mode from its own speed; `speeds` holds the Settings thresholds."""
     if speed_mps is None or (accuracy_m is not None and accuracy_m > 150):
         return "unknown"
+    speeds = speeds or ANALYSIS_DEFAULTS
     kmh = speed_mps * 3.6
     if kmh < 1.5:
         return "idle"
-    if kmh < 7:
+    if kmh < speeds["walking_max_kmh"]:
         return "walking"
-    if kmh < 22:
+    if kmh < speeds["cycling_max_kmh"]:
         return "running_cycling"
     return "driving" if kmh < 200 else "unknown"
 
@@ -158,7 +170,7 @@ def move_uncertainty(previous, point):
     return min((previous.get("accuracy_m") or 0) + (point.get("accuracy_m") or 0), 200) / 2
 
 
-def classify_motion(moves):
+def classify_motion(moves, speeds=None):
     """Estimate walking, running, cycling, or driving from connected moves.
 
     `moves` holds (distance_m, seconds, reported_speed_mps or None) with an
@@ -170,28 +182,31 @@ def classify_motion(moves):
     treated as driving: city traffic sampled once a minute averages about
     that, while few riders sustain it. Speeds computed from positions need
     DRIVING_MIN_DISTANCE_M before they can mean a drive; a device-reported
-    speed is trusted over any distance.
+    speed is trusted over any distance. `speeds` holds the Settings
+    thresholds; the figures above are their defaults.
     """
+    speeds = speeds or ANALYSIS_DEFAULTS
+    fast_kmh = speeds["driving_min_kmh"]
     samples, reported_fast, reported_any = [], 0.0, False
     for distance, seconds, reported, *uncertainty in moves:
         if seconds <= 0 or distance < 10:
             continue
         speed = max(max(0.0, distance - (uncertainty[0] if uncertainty else 0)) / seconds, reported or 0)
         samples.append((speed * 3.6, distance))
-        if (reported or 0) * 3.6 >= 35:
+        if (reported or 0) * 3.6 >= fast_kmh:
             reported_fast += distance
         reported_any = reported_any or reported is not None
     if not samples:
         return None
     total = sum(distance for _, distance in samples)
-    fast = sum(distance for kmh, distance in samples if kmh >= 35)
+    fast = sum(distance for kmh, distance in samples if kmh >= fast_kmh)
     median = _weighted_percentile(samples, .5)
     credible = total >= DRIVING_MIN_DISTANCE_M or reported_fast >= .35 * total
-    if credible and (fast >= 1000 or fast >= .35 * total or median >= 25):
+    if credible and (fast >= 1000 or fast >= .35 * total or median >= speeds["cycling_max_kmh"]):
         mode = "driving"
-    elif median >= 15:
+    elif median >= speeds["running_max_kmh"]:
         mode = "cycling"
-    elif median >= 6.5:
+    elif median >= speeds["walking_max_kmh"]:
         mode = "running"
     else:
         mode = "walking"
@@ -295,7 +310,7 @@ def stats_from_points(points):
             "first": points[0]["timestamp"] if points else None, "last": points[-1]["timestamp"] if points else None}
 
 
-def trips_between_stays(points, stay_rows, start=None, end=None):
+def trips_between_stays(points, stay_rows, start=None, end=None, speeds=None):
     """Build one trip between each pair of consecutive confirmed stays."""
     points_by_source, stays_by_source = {}, {}
     for point in select_best_timed_fixes(points):
@@ -329,7 +344,7 @@ def trips_between_stays(points, stay_rows, start=None, end=None):
                     moves.append((distance, seconds, reported_speed(point), move_uncertainty(previous, point)))
                 if not _same_source_state(previous, point):
                     held_since = point
-            motion = classify_motion(moves)
+            motion = classify_motion(moves, speeds)
             if motion is None:
                 continue
             # Stays carry this flag from analysis; compute it for hand-built rows.
@@ -760,14 +775,37 @@ class Store:
             raise ValueError("places_provider must be one of: " + ", ".join(PLACES_PROVIDERS))
         if provider and provider != current["places_provider"] and not configured_places_providers()[provider]:
             raise ValueError(f"Set {PLACES_PROVIDERS[provider]['env']} to use {PLACES_PROVIDERS[provider]['label']}")
+        stay_minutes = float(raw.get("stay_min_minutes", current["stay_min_minutes"]))
+        if not stay_minutes.is_integer() or not 5 <= stay_minutes <= 120:
+            raise ValueError("stay_min_minutes must be a whole number from 5 to 120")
+        speeds = {}
+        for key in ("walking_max_kmh", "running_max_kmh", "cycling_max_kmh", "driving_min_kmh"):
+            speeds[key] = float(raw.get(key, current[key]))
+            if not math.isfinite(speeds[key]) or not 1 <= speeds[key] <= 200:
+                raise ValueError(f"{key} must be between 1 and 200 km/h")
+        if not speeds["walking_max_kmh"] < speeds["running_max_kmh"] < speeds["cycling_max_kmh"] <= speeds["driving_min_kmh"]:
+            raise ValueError("speeds must rise from walking to running to cycling, and driving must be at least the cycling limit")
+        schedule = str(raw.get("summary_schedule", current["summary_schedule"]))
+        if schedule not in SUMMARY_SCHEDULES:
+            raise ValueError("summary_schedule must be nightly or interval")
+        interval = float(raw.get("summary_interval_hours", current["summary_interval_hours"]))
+        if not interval.is_integer() or not 1 <= interval <= 12:
+            raise ValueError("summary_interval_hours must be a whole number from 1 to 12")
         values = {"speed_strategy": strategy, "reported_speed_offset_kmh": round(offset, 2),
-                  "timezone": timezone_name, "places_provider": provider}
+                  "timezone": timezone_name, "places_provider": provider, "stay_min_minutes": int(stay_minutes),
+                  **{key: round(value, 1) for key, value in speeds.items()},
+                  "summary_schedule": schedule, "summary_interval_hours": int(interval)}
         for key, value in values.items():
             self.db.execute("""INSERT INTO app_settings(key,value) VALUES (?,?)
                 ON CONFLICT(key) DO UPDATE SET value=excluded.value""", (key, json.dumps(value)))
         if timezone_name != current["timezone"]:
             # Summaries are derived; days are rebuilt in the new zone when requested.
             self._keep_canonical_daily_summaries(timezone_name)
+        if any(values[key] != current[key] for key in ANALYSIS_DEFAULTS):
+            # Stays and their activities are stored; recalculate them under the new rules.
+            # Stored summaries go stale through their watermark and are rebuilt when requested.
+            from .analysis import process_stays
+            process_stays(self, rebuild=True)
         self.db.commit()
         return values
 
@@ -826,7 +864,10 @@ class Store:
         # stale when the return is recorded after midnight.
         context_start = home_context_start or start
         context_end = home_context_end or end
-        value = ["stay-trips-v10", modes, self.analysis_watermark(start, end, source),
+        settings = self.settings()
+        # Stay length and mode speeds change what a day contains.
+        analysis = {key: settings[key] for key in ANALYSIS_DEFAULTS}
+        value = ["stay-trips-v10", modes, analysis, self.analysis_watermark(start, end, source),
                  self.analysis_watermark(context_start, context_end, source),
                  event_row["count"], event_row["max_id"], places, reminders, labels]
         return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
@@ -916,7 +957,7 @@ class Store:
                             speed, origin = 0.0, "estimated"
                         elif elapsed >= 5 and distance / elapsed <= 55.6:
                             speed, origin = distance / elapsed, "estimated"
-            mode = mode_for(speed, accuracy)
+            mode = mode_for(speed, accuracy, speed_settings)
             external_id = raw.get("external_id")
             cursor = self.db.execute("""INSERT INTO points
                 (source, external_id, timestamp, lat, lon, accuracy_m, speed_mps, speed_origin, mode)
@@ -1014,8 +1055,9 @@ class Store:
         rows = self._rows("""SELECT o.id,o.point_id,p.external_id,o.source,o.timestamp,o.lat,o.lon,o.accuracy_m,
             o.speed_mps,o.speed_origin,
             o.received_at FROM point_observations o JOIN points p ON p.id=o.point_id""" + where + " ORDER BY o.timestamp DESC,COALESCE(o.accuracy_m,1000000000) ASC,o.id DESC" + suffix, args)
+        speeds = self.settings()
         for row in rows:
-            row["mode"] = mode_for(row["speed_mps"], row["accuracy_m"])
+            row["mode"] = mode_for(row["speed_mps"], row["accuracy_m"], speeds)
         return rows
 
     def timeline(self, start=None, end=None, source=None, limit=5000):
@@ -1036,8 +1078,9 @@ class Store:
             o.accuracy_m,o.speed_mps,o.speed_origin,o.received_at,t.role,t.stay_id
             FROM timeline_fixes t JOIN point_observations o ON o.id=t.observation_id
             JOIN points p ON p.id=o.point_id""" + where + " ORDER BY o.timestamp DESC,o.id DESC" + suffix, args)
+        speeds = self.settings()
         for row in rows:
-            row["mode"] = mode_for(row["speed_mps"], row["accuracy_m"])
+            row["mode"] = mode_for(row["speed_mps"], row["accuracy_m"], speeds)
         return rows
 
     def observation_count(self, start=None, end=None, source=None):

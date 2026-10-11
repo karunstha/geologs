@@ -30,16 +30,14 @@ export async function refreshMeta() {
 
 export async function refreshAll() {
   try {
-    const [status, current, settings, dailySummaries] = await Promise.all([
+    const [status, current, settings] = await Promise.all([
       api("/api/status"),
       api("/api/current"),
       api("/api/settings"),
-      api("/api/daily-summaries?limit=10"),
     ]);
     state.status = status;
     state.current = current;
     state.settings = settings;
-    state.dailySummaries = dailySummaries;
     if (state.followToday) $("day-date").value = localDateKey();
     renderCurrent();
     renderSettings();

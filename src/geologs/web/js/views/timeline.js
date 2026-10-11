@@ -169,7 +169,7 @@ export function renderTimeline(day) {
         return `<li><button type="button" class="tl-trip" data-item="trip:${tripKey(trip)}" aria-pressed="false" style="--mode:${info.color}">${modeIcon(trip.mode)}<span class="tl-body"><strong>${safe(title)}</strong><small>${safe(notes.join(" · "))}</small>${from}</span></button></li>`;
       })
       .join("") ||
-    '<li class="empty">No stays yet on this day. A stay needs 15 minutes of accurate samples in one place or area.</li>';
+    `<li class="empty">No stays yet on this day. A stay needs ${state.settings?.stay_min_minutes ?? 15} minutes of accurate samples in one place or area.</li>`;
   $("day-timeline")
     .querySelectorAll("[data-item]")
     .forEach(

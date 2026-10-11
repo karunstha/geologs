@@ -276,6 +276,7 @@
   }
 }
 .setting-group {
+  min-width: 0; /* a fieldset otherwise refuses to shrink below its content */
   margin: 0;
   padding: 16px 0;
   border: 0;
@@ -327,4 +328,100 @@
 }
 .link-rows .row-link {
   padding: 12px 0;
+}
+/* A number input with its unit beside it. */
+.input-unit {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-2);
+  font-size: 13px;
+}
+.setting-row .input-unit .input,
+.speed-row .input-unit .input {
+  width: 96px;
+  font-variant-numeric: tabular-nums;
+}
+.input.compact {
+  width: auto;
+  height: 32px;
+  font-size: 13px;
+}
+/* Activity speeds: one row per mode, and a bar showing each mode's share of 0 to the driving speed. */
+.speed-bands {
+  display: flex;
+  clear: both;
+  height: 8px;
+  margin-bottom: 14px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--surface-3);
+}
+.speed-bands span {
+  background: var(--mode);
+  transition: flex-grow 0.15s;
+}
+.speed-bands span + span {
+  border-left: 2px solid var(--surface);
+}
+.speed-rows {
+  display: grid;
+  gap: 4px;
+}
+.speed-row {
+  display: grid;
+  grid-template-columns: minmax(110px, 160px) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 0;
+}
+.speed-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 560;
+}
+.speed-range {
+  color: var(--text-2);
+  font-size: 12.5px;
+  text-align: right;
+}
+.field-error {
+  margin-top: 10px;
+  color: var(--danger);
+  font-size: 12.5px;
+}
+.speed-row .input[aria-invalid="true"],
+.setting-row .input[aria-invalid="true"] {
+  border-color: var(--danger);
+}
+.choice-card .input.compact {
+  flex: none;
+}
+@media (max-width: 760px) {
+  .speed-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .speed-range {
+    grid-column: 1;
+    grid-row: 2;
+    margin-top: -6px;
+    text-align: left;
+  }
+  .speed-row .input-unit {
+    grid-row: 1 / span 2;
+    grid-column: 2;
+  }
+  /* A long status pill or the interval picker moves under the text. */
+  .choice-card {
+    flex-wrap: wrap;
+  }
+  .choice-card .choice-body {
+    flex-basis: 200px;
+  }
+  .choice-card > .input.compact,
+  .choice-card > .status-pill {
+    margin-left: 25px;
+  }
 }

@@ -18,7 +18,7 @@ from urllib.parse import parse_qs, urlparse
 from .ingest import FORMATS as INGEST_FORMATS, claimed_source
 
 from .core import PLACES_PROVIDERS, Store, configured_places_providers, current_location, deliver_webhook, geocode, nearby_places, place_details, places_provider, reverse_geocode, save_place_label
-from .analysis import daily_briefs, daily_overview, day_summary, finalize_previous_day, insights, place_overview, stored_daily_record, place_patterns, predict_next, resolve_place_patterns, search_visits, stays, transitions, visited_places
+from .analysis import daily_briefs, daily_overview, day_summary, insights, place_overview, stored_daily_record, place_patterns, predict_next, resolve_place_patterns, save_scheduled_summaries, search_visits, stays, transitions, visited_places
 from .mcp import SUPPORTED_VERSIONS, dispatch
 from .postgres import INTEGRITY_ERRORS
 
@@ -471,7 +471,7 @@ def _daily_summary_worker(stop):
         store = None
         try:
             store = Store()
-            finalize_previous_day(store)
+            save_scheduled_summaries(store)
         except Exception as exc:
             print("GeoLogs daily summary: " + str(exc), flush=True)
         finally:

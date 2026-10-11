@@ -89,7 +89,7 @@ function renderVisitedPlaces() {
         )}</div>`;
       })
       .join("") ||
-    '<div class="empty-block"><strong>No places yet</strong><span>A place appears here after a stay of 15 minutes or more.</span></div>';
+    `<div class="empty-block"><strong>No places yet</strong><span>A place appears here after a stay of ${state.settings?.stay_min_minutes ?? 15} minutes or more.</span></div>`;
   onEach(box, "map-visited", (index) => focusPlaceOnMap(places[+index]));
   // From here there is no particular visit, so a correction applies to every visit to the spot.
   onEach(box, "rename-visited", (index) => editVisitedPlace(places[+index], []));

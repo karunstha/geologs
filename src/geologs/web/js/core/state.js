@@ -8,7 +8,6 @@ export const state = {
   reminders: [],
   reminderHistory: [],
   events: [],
-  dailySummaries: [],
   day: null,
   lastEventId: 0,
   insights: null,
