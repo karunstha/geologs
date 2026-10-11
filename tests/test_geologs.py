@@ -1094,7 +1094,7 @@ class StoreTests(unittest.TestCase):
         migrated = Store(path)
         try:
             self.assertEqual(stays(migrated), [])
-            self.assertEqual(migrated.db.execute("PRAGMA user_version").fetchone()[0], 15)
+            self.assertEqual(migrated.db.execute("PRAGMA user_version").fetchone()[0], 16)
         finally:
             migrated.close()
 
@@ -1975,10 +1975,9 @@ class StoreTests(unittest.TestCase):
     def test_sparse_fuel_stop_from_owntracks_is_kept_only_near_a_place(self):
         # Real OwnTracks fixes: the phone went quiet at the pump between 19:29:29 and 19:32:55.
         source = "owntracks:karun/iphone"
-        rows = [("19:24:40", 34.7620, -92.4600, 3), ("19:25:30", 34.7608, -92.4570, 3), ("19:26:20", 34.7600, -92.4550, 3),
-                ("19:27:13", 34.75946, -92.45359, 2), ("19:28:11", 34.75837, -92.45184, 2), ("19:29:29", 34.75796, -92.45161, 16),
-                ("19:32:55", 34.75773, -92.45214, 5), ("19:34:44", 34.75828, -92.44997, 3), ("19:34:58", 34.75784, -92.44775, 2),
-                ("19:35:11", 34.75734, -92.44565, 2), ("19:36:00", 34.7560, -92.4400, 3), ("19:37:00", 34.7540, -92.4320, 3)]
+        # Only these six: the sharp fixes 200 m out as you pull away end the stop at once.
+        rows = [("19:27:13", 34.75946, -92.45359, 2), ("19:28:11", 34.75837, -92.45184, 2), ("19:29:29", 34.75796, -92.45161, 16),
+                ("19:32:55", 34.75773, -92.45214, 5), ("19:34:44", 34.75828, -92.44997, 3), ("19:34:58", 34.75784, -92.44775, 2)]
         self.store.ingest([{"source": source, "external_id": at, "timestamp": f"2026-10-10T{at}+00:00",
                             "lat": lat, "lon": lon, "accuracy_m": accuracy} for at, lat, lon, accuracy in rows])
         shell = {"place_name": "Shell", "place_lat": 34.7579, "place_lon": -92.4519}
@@ -1987,9 +1986,17 @@ class StoreTests(unittest.TestCase):
         self.assertEqual([(row["kind"], row["started_at"], row["observed_minutes"]) for row in kept],
                          [("stop", "2026-10-10T19:29:29+00:00", 3.4)])
         self.assertFalse(lookup.call_args.args[4])  # a history sweep reads only the lookup cache
-        # With no place there it was the road or a red light.
+        # With no place there it was probably the road or a red light, so the day offers it to keep.
         with patch("geologs.analysis.named_place_near", return_value=None):
             self.assertEqual(stays(self.store, limit=None), [])
+            day = day_summary(self.store, "2026-10-10", "UTC")
+        self.assertEqual([(stop["started_at"], stop["minutes"]) for stop in day["possible_stops"]],
+                         [("2026-10-10T19:29:29+00:00", 3.4)])
+        kept = self.store.save_stay_edit({"action": "add", **{key: day["possible_stops"][0][key] for key in ("source", "started_at", "ended_at")}})
+        with patch("geologs.analysis.named_place_near", return_value=None):
+            day = day_summary(self.store, "2026-10-10", "UTC")
+        self.assertEqual(([stay["kind"] for stay in day["stays"]], day["possible_stops"]), (["manual"], []))
+        self.store.delete_stay_edit(kept["id"])
         # A saved place there is evidence too, with no lookup at all.
         self.store.save_place({"name": "Fuel", "lat": 34.7579, "lon": -92.4519, "radius_m": 80})
         with patch("geologs.analysis.named_place_near", side_effect=AssertionError("looked up")):
@@ -2106,7 +2113,7 @@ class StoreTests(unittest.TestCase):
         migrated = Store(path)
         try:
             self.assertEqual([row["kind"] for row in reversed(stays(migrated, limit=None))], ["stationary", "area", "stationary"])
-            self.assertEqual(migrated.db.execute("PRAGMA user_version").fetchone()[0], 15)
+            self.assertEqual(migrated.db.execute("PRAGMA user_version").fetchone()[0], 16)
         finally:
             migrated.close()
 

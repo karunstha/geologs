@@ -790,3 +790,20 @@
   align-items: center;
   gap: 6px;
 }
+/* A stop the detector found but no place confirmed: offered, not shown as a visit. */
+.tl-possible {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 2px 0 6px 21px;
+  padding: 8px 10px 8px 13px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-sm);
+}
+.tl-possible .tl-body {
+  flex: 1;
+  min-width: 0;
+}
+.tl-possible small {
+  color: var(--text-2);
+}

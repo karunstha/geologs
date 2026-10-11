@@ -610,7 +610,7 @@ class Store:
             if "brief" not in {row[1] for row in self.db.execute("PRAGMA table_info(daily_summaries)")}:
                 self.db.execute("ALTER TABLE daily_summaries ADD COLUMN brief TEXT")
             version = self.db.execute("PRAGMA user_version").fetchone()[0]
-            rebuild_analysis = version < 15
+            rebuild_analysis = version < 16
             if version < 1:
                 self.db.execute("UPDATE points SET mode='running_cycling' WHERE mode='cycling'")
             if version < 2:
@@ -694,9 +694,10 @@ class Store:
         # stays (moving around one place) and stray-fix tolerance; 14 records
         # whether travel between stays went somewhere else; 17 adds quick stops
         # on the way (SQLite user_version 14); 18 reads quiet stretches from apps
-        # that report only while moving as time spent still (SQLite 15). One
-        # rebuild covers every missing version.
-        rebuild_versions = (5, 8, 12, 14, 17, 18)
+        # that report only while moving as time spent still (SQLite 15); 19 ends
+        # a stop at a sharp fix far away instead of holding it as a stray (SQLite
+        # 16). One rebuild covers every missing version.
+        rebuild_versions = (5, 8, 12, 14, 17, 18, 19)
         if self.postgres and self._missing_migrations(rebuild_versions):
             self.db.execute("SELECT pg_advisory_xact_lock(hashtext('geologs:stays:rebuild'))")
             missing = self._missing_migrations(rebuild_versions)
@@ -720,8 +721,8 @@ class Store:
         if not self.postgres and version < 9:
             self.db.execute("DELETE FROM analysis_cache")
             self.db.execute("PRAGMA user_version=9")
-        if not self.postgres and version < 15:
-            self.db.execute("PRAGMA user_version=15")
+        if not self.postgres and version < 16:
+            self.db.execute("PRAGMA user_version=16")
         if self.postgres and self._missing_migrations((16,)):
             # Keep one stored daily summary per date: the configured timezone, all sources.
             self._keep_canonical_daily_summaries(self.settings()["timezone"])

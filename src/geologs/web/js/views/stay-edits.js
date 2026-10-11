@@ -85,6 +85,18 @@ export async function removeStay(stay) {
   }
 }
 
+// Keep a stop the detector found but could not confirm with a place.
+export async function keepPossibleStop(stop) {
+  try {
+    await saveEdit(
+      { action: "add", source: stop.source, started_at: stop.started_at, ended_at: stop.ended_at },
+      "Stop kept",
+    );
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
 // Pick when you arrived and left from `fixes` (one source, in time order), then save it as a stay.
 function openStayDialog({ source, fixes, title, note, from, to }) {
   if (fixes.length < 2) {

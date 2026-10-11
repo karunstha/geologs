@@ -6,7 +6,7 @@ import { state } from "../core/state.js";
 import { selectItem, selectedItem, stayColor, tripKey } from "../map/map.js";
 import { modeIcon, modeInfo, modeName, pinBadge, zoneText } from "../ui/icons.js";
 import { refreshExplore } from "./history.js";
-import { openStopDialog, removeStay } from "./stay-edits.js";
+import { keepPossibleStop, openStopDialog, removeStay } from "./stay-edits.js";
 
 export function stayActivityText(stay) {
   if (stay.kind !== "area") return "";
@@ -152,6 +152,7 @@ export function renderTimeline(day) {
     ...day.stays.map((stay) => ({ type: "stay", at: stay.started_at, stay })),
     ...day.trips.map((trip) => ({ type: "trip", at: trip.start, trip })),
     ...(day.coverage_gaps || []).map((gap) => ({ type: "gap", at: gap.start, gap })),
+    ...(day.possible_stops || []).map((stop, index) => ({ type: "possible", at: stop.started_at, stop, index })),
   ].sort((a, b) => new Date(a.at) - new Date(b.at) || (a.type === "stay" ? -1 : 1));
   const counts = [
     `${day.stays.length} stay${day.stays.length === 1 ? "" : "s"}`,
@@ -167,6 +168,9 @@ export function renderTimeline(day) {
   $("day-timeline").innerHTML =
     items
       .map((item) => {
+        if (item.type === "possible")
+          // Found from your samples, but nothing named was close enough to be sure it wasn't traffic.
+          return `<li class="tl-possible"><span class="tl-body"><strong>Possible stop · ${safe(durationText(item.stop.minutes))}</strong><small>${safe(clock(item.stop.started_at))} – ${safe(clock(item.stop.ended_at))} · still, but no named place within 75 m, so it may have been traffic</small></span><button type="button" class="button secondary small" data-keep-stop="${item.index}">Keep</button></li>`;
         if (item.type === "gap")
           return `<li class="tl-gap"><span>No location data</span><small>${safe(clock(item.gap.start))} – ${safe(clock(item.gap.end))} · ${safe(durationText(item.gap.minutes))}</small></li>`;
         if (item.type === "stay") {
@@ -187,6 +191,9 @@ export function renderTimeline(day) {
       })
       .join("") ||
     `<li class="empty">No stays yet on this day. A stay needs ${state.settings?.stay_min_minutes ?? 15} minutes of accurate samples in one place or area.</li>`;
+  $("day-timeline")
+    .querySelectorAll("[data-keep-stop]")
+    .forEach((button) => (button.onclick = () => keepPossibleStop(day.possible_stops[+button.dataset.keepStop])));
   $("day-timeline")
     .querySelectorAll("[data-item]")
     .forEach(

@@ -45,6 +45,9 @@ POSSIBLE_STOP_PLACE_M = 75
 # inside it; indoor GPS often jumps 60-100 m for a sample or two.
 STRAY_MAX_POINTS = 2
 STRAY_MAX_SECONDS = 300
+# ...as long as its accuracy can explain the jump. A sharp fix farther out
+# (200 m away at 3 m accuracy, as you pull away from the pump) is a departure.
+STRAY_MAX_DISTANCE_M = 150
 # Area stays cover time spent moving around one place: a lake loop, a park, a
 # large store. Each window must last as long as a stationary stay, fit inside
 # one of these bounding-box diagonals (tightest first), and circulate: its path
@@ -256,7 +259,8 @@ def _advance_stay(store, source, candidate, point, rules=None, previous_at=None)
                     candidate["event"], candidate["proven_end"] = point.get("external_id"), point["timestamp"]
             _save_candidate(store, source, candidate, True, rules)
             return candidate
-        if candidate["count"] >= 2 and len(strays) < STRAY_MAX_POINTS and elapsed <= STRAY_MAX_SECONDS:
+        stray = to_centre - (point["accuracy_m"] or 0) <= STRAY_MAX_DISTANCE_M
+        if candidate["count"] >= 2 and stray and len(strays) < STRAY_MAX_POINTS and elapsed <= STRAY_MAX_SECONDS:
             candidate["strays"] = strays + [_stray_fix(point)]
             return candidate
     # A real departure (or gap) ends the stay at its last inside fix. The
@@ -718,12 +722,13 @@ def merge_split_visits(rows, place_of, moves_between=None):
 _is_home_place = is_home_place
 
 
-def _confirm_possible_stops(store, rows, places, labels, lookup):
+def _confirm_possible_stops(store, rows, places, labels, lookup, rejected=None):
     """Keep a sparse 'pause' only where there is a place to have stopped at.
 
     A saved place, a name you gave the spot, or a named place within
-    POSSIBLE_STOP_PLACE_M makes it a quick stop; otherwise it was the road or a
-    red light. lookup=False reads only the lookup cache (whole-history sweeps).
+    POSSIBLE_STOP_PLACE_M makes it a quick stop; otherwise it was probably the
+    road or a red light, and it goes to `rejected` (when given) so the day view
+    can offer to keep it. lookup=False reads only the lookup cache.
     """
     kept = []
     for row in rows:
@@ -732,13 +737,15 @@ def _confirm_possible_stops(store, rows, places, labels, lookup):
                      or zone_at(places, row["lat"], row["lon"])
                      or named_place_near(store, row["lat"], row["lon"], POSSIBLE_STOP_PLACE_M, lookup))
             if not place:
+                if rejected is not None:
+                    rejected.append(row)
                 continue
             row = {**row, "kind": "stop", "confirmed_by_place": True}
         kept.append(row)
     return kept
 
 
-def stays(store, start=None, end=None, source=None, limit=500, lookup_places=False):
+def stays(store, start=None, end=None, source=None, limit=500, lookup_places=False, rejected=None):
     clauses, args = [], []
     if start:
         clauses.append("ended_at>=?"); args.append(parse_time(start))
@@ -755,7 +762,7 @@ def stays(store, start=None, end=None, source=None, limit=500, lookup_places=Fal
     rows = store._rows("""SELECT * FROM (SELECT s.*,LAG(s.id) OVER (PARTITION BY s.source ORDER BY s.started_at,s.id)
         AS previous_stay_id FROM observed_stays_v2 s""" + where + ") ordered ORDER BY started_at DESC" + suffix, args)
     places, labels, overrides = store.places(), store.place_labels(), store.mode_overrides()
-    rows = _confirm_possible_stops(store, rows, places, labels, lookup_places)
+    rows = _confirm_possible_stops(store, rows, places, labels, lookup_places, rejected)
     rows = _apply_stay_edits(rows, store.stay_edits(start, end, source))
     if limit is not None:
         rows = rows[:min(max(int(limit), 1), 5000)]
@@ -1267,7 +1274,7 @@ def day_summary(store, date, timezone_name="UTC", source=None):
     end = (day_end - timedelta(microseconds=1)).isoformat()
     # Switching the places provider in Settings re-resolves every day's names.
     provider = places_provider_identity(store)
-    cache_identity = json.dumps(["day-v14", date, timezone_name, source, provider], separators=(",", ":"))
+    cache_identity = json.dumps(["day-v15", date, timezone_name, source, provider], separators=(",", ":"))
     cache_key = "day:" + hashlib.sha256(cache_identity.encode()).hexdigest()
     watermark = store.analysis_watermark(start, end, source)
     cached = store.cached_analysis(cache_key, watermark)
@@ -1277,9 +1284,22 @@ def day_summary(store, date, timezone_name="UTC", source=None):
     samples_by_source = {}
     for point in points:
         samples_by_source[point["source"]] = samples_by_source.get(point["source"], 0) + 1
+    unconfirmed = []
     day_stays, trips, timeline_sources = _fuse_sources(
-        list(reversed(stays(store, start, end, source=source, limit=None, lookup_places=True))),
+        list(reversed(stays(store, start, end, source=source, limit=None, lookup_places=True, rejected=unconfirmed))),
         anchored_trips(store, start, end, source), samples_by_source)
+    # Stops the detector found but no place confirmed, for you to keep or ignore;
+    # none you already added or removed by hand.
+    edits = store.stay_edits(start, end, source)
+    shown_sources = set(timeline_sources) or set(samples_by_source)
+    possible_stops = [{"source": row["source"], "started_at": row["started_at"], "ended_at": row["ended_at"],
+                       "lat": row["lat"], "lon": row["lon"], "point_count": row["point_count"],
+                       "minutes": round((datetime.fromisoformat(row["ended_at"])
+                                         - datetime.fromisoformat(row["started_at"])).total_seconds() / 60, 1)}
+                      for row in reversed(unconfirmed)
+                      if row["source"] in shown_sources
+                      and not any(edit["source"] == row["source"] and windows_overlap(edit, row["started_at"], row["ended_at"], .01)
+                                  for edit in edits)]
     for stay in day_stays:
         first = max(datetime.fromisoformat(stay["started_at"]), day_start)
         last = min(datetime.fromisoformat(stay["ended_at"]), day_end)
@@ -1392,7 +1412,7 @@ def day_summary(store, date, timezone_name="UTC", source=None):
             "movement_km": round(sum(totals["distance_km"] for totals in activity_totals.values()), 2),
             "coverage_gaps": _coverage_gaps(points, trips, day_stays), "timeline_sources": timeline_sources,
             "samples_by_source": samples_by_source,
-            "stay_edits": store.stay_edits(start, end, source),
+            "stay_edits": edits, "possible_stops": possible_stops,
             "visited_places": visited_places, "places_including_home": places_including_home,
             "first_fix": points[-1]["timestamp"] if points else None,
             "last_fix": points[0]["timestamp"] if points else None,
