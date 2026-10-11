@@ -17,11 +17,20 @@ from .core import (ANALYSIS_DEFAULTS, MAX_CONNECTED_GAP_SECONDS, MAX_QUIET_STAY_
 
 STOP_RADIUS_M = 50
 # A quick stop (a fuel stop, a pickup) is shorter than a stay, so it must be
-# stiller: every fix within this reach of the first, none coarser than this.
+# stiller: every fix within this of the stop's centre (less its accuracy),
+# none coarser than this. The centre, not the first fix: the first is often
+# you still rolling in.
 # Creeping traffic moves farther than that over a few minutes; a red light
 # rarely lasts as long as the quick-stop minimum.
 QUICK_STOP_REACH_M = 30
 QUICK_STOP_MAX_ACCURACY_M = 50
+# A candidate keeps its fixes for that measure until it has this many; a
+# stop with more fixes than this lasts too long to be a quick stop anyway.
+QUICK_STOP_MAX_FIXES = 200
+# Dense fixes that end this far from where they began, along a path at least
+# this straight, are creeping traffic.
+CREEP_MIN_NET_M = 40
+CREEP_STRAIGHTNESS = .7
 # A quick stop is on the way somewhere: it is entered and left while tracked,
 # with no longer gap than this on either side.
 QUICK_STOP_MAX_GAP_SECONDS = 300
@@ -159,6 +168,7 @@ def _new_candidate(point, previous_at=None):
     return {"start_id": point["id"], "end_id": point["id"], "start": point["timestamp"], "end": point["timestamp"],
             "first_lat": point["lat"], "first_lon": point["lon"], "lat": point["lat"], "lon": point["lon"], "count": 1,
             "reach": 0.0, "worst_accuracy": point["accuracy_m"] or 0, "arrival_gap": arrival_gap,
+            "fixes": [[point["lat"], point["lon"], point["accuracy_m"] or 0]],
             "event": point.get("external_id"), "proven_end": point["timestamp"]}
 
 
@@ -190,10 +200,36 @@ def _candidate_kind(candidate, ongoing, rules):
     if proven < quick_minutes * 60 or not (arrived and left) or candidate["worst_accuracy"] > QUICK_STOP_MAX_ACCURACY_M:
         return None
     dense = candidate["count"] >= max(2, proven / DENSE_STOP_SECONDS_PER_FIX)
-    if dense and candidate["reach"] <= QUICK_STOP_REACH_M:
+    if dense and _creeping(candidate):
+        return None
+    spread = _spread(candidate)
+    # Frequent fixes that never stray from where the stop began need no place to confirm them.
+    if dense and spread <= QUICK_STOP_REACH_M and candidate["reach"] <= QUICK_STOP_REACH_M:
         return "stop"
     loose = STOP_RADIUS_M + min(candidate["worst_accuracy"], QUIET_ACCURACY_ALLOWANCE_M)
-    return "pause" if candidate["reach"] <= loose else None
+    return "pause" if spread <= loose else None
+
+
+def _creeping(candidate):
+    """Frequent fixes that keep heading one way: stop-and-go traffic, not a stop.
+
+    A parked car's fixes wander around one spot; a queue moves on steadily, so
+    its fixes end far from where they began along a fairly straight path.
+    """
+    fixes = candidate.get("fixes")
+    if not fixes or len(fixes) < 3:
+        return False
+    path = sum(metres(a[0], a[1], b[0], b[1]) for a, b in zip(fixes, fixes[1:]))
+    net = metres(fixes[0][0], fixes[0][1], fixes[-1][0], fixes[-1][1])
+    return net >= CREEP_MIN_NET_M and net >= CREEP_STRAIGHTNESS * path
+
+
+def _spread(candidate):
+    """How far the stop's fixes lie from its centre, beyond what their accuracy explains."""
+    fixes = candidate.get("fixes")
+    if not fixes:  # past QUICK_STOP_MAX_FIXES, or stored before fixes were kept
+        return candidate["reach"]
+    return max(max(0.0, metres(lat, lon, candidate["lat"], candidate["lon"]) - accuracy) for lat, lon, accuracy in fixes)
 
 
 def _save_candidate(store, source, candidate, ongoing, rules=None):
@@ -255,6 +291,10 @@ def _advance_stay(store, source, candidate, point, rules=None, previous_at=None)
                 candidate["reach"] = max(candidate["reach"],
                                          metres(point["lat"], point["lon"], candidate["first_lat"], candidate["first_lon"]))
                 candidate["worst_accuracy"] = max(candidate["worst_accuracy"], point["accuracy_m"] or 0)
+                if candidate.get("fixes") is not None:
+                    candidate["fixes"].append([point["lat"], point["lon"], point["accuracy_m"] or 0])
+                    if len(candidate["fixes"]) > QUICK_STOP_MAX_FIXES:
+                        candidate["fixes"] = None
                 if point.get("external_id") is None or point.get("external_id") != candidate["event"]:
                     candidate["event"], candidate["proven_end"] = point.get("external_id"), point["timestamp"]
             _save_candidate(store, source, candidate, True, rules)

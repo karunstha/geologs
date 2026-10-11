@@ -610,7 +610,7 @@ class Store:
             if "brief" not in {row[1] for row in self.db.execute("PRAGMA table_info(daily_summaries)")}:
                 self.db.execute("ALTER TABLE daily_summaries ADD COLUMN brief TEXT")
             version = self.db.execute("PRAGMA user_version").fetchone()[0]
-            rebuild_analysis = version < 16
+            rebuild_analysis = version < 17
             if version < 1:
                 self.db.execute("UPDATE points SET mode='running_cycling' WHERE mode='cycling'")
             if version < 2:
@@ -696,8 +696,9 @@ class Store:
         # on the way (SQLite user_version 14); 18 reads quiet stretches from apps
         # that report only while moving as time spent still (SQLite 15); 19 ends
         # a stop at a sharp fix far away instead of holding it as a stray (SQLite
-        # 16). One rebuild covers every missing version.
-        rebuild_versions = (5, 8, 12, 14, 17, 18, 19)
+        # 16); 20 measures a quick stop's spread from its centre and sets creeping
+        # traffic apart (SQLite 17). One rebuild covers every missing version.
+        rebuild_versions = (5, 8, 12, 14, 17, 18, 19, 20)
         if self.postgres and self._missing_migrations(rebuild_versions):
             self.db.execute("SELECT pg_advisory_xact_lock(hashtext('geologs:stays:rebuild'))")
             missing = self._missing_migrations(rebuild_versions)
@@ -721,8 +722,8 @@ class Store:
         if not self.postgres and version < 9:
             self.db.execute("DELETE FROM analysis_cache")
             self.db.execute("PRAGMA user_version=9")
-        if not self.postgres and version < 16:
-            self.db.execute("PRAGMA user_version=16")
+        if not self.postgres and version < 17:
+            self.db.execute("PRAGMA user_version=17")
         if self.postgres and self._missing_migrations((16,)):
             # Keep one stored daily summary per date: the configured timezone, all sources.
             self._keep_canonical_daily_summaries(self.settings()["timezone"])
@@ -2380,9 +2381,17 @@ def named_place_near(store, lat, lon, within_m, lookup=True):
             value = store.reverse_region(_provider_cache_key(_require_provider(store)) + f":r{radius}", float(lat), float(lon))
     except (ValueError, OSError, KeyError):
         return None
-    if not value or not value.get("place_name") or value.get("place_lat") is None:
+    if not value or not value.get("place_name"):
         return None
-    return value if metres(lat, lon, value["place_lat"], value["place_lon"]) <= within_m else None
+    if value.get("place_lat") is not None and value.get("place_lon") is not None:
+        distance = metres(lat, lon, value["place_lat"], value["place_lon"])
+    elif value.get("distance_m") is not None:
+        # Results cached before places kept their own position give only their
+        # distance from where that lookup was made.
+        distance = float(value["distance_m"]) + metres(lat, lon, value.get("lat", lat), value.get("lon", lon))
+    else:
+        return None
+    return value if distance <= within_m else None
 
 
 def place_for_coordinate(store, lat, lon, radius_m=None):

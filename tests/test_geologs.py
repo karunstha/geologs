@@ -1094,7 +1094,7 @@ class StoreTests(unittest.TestCase):
         migrated = Store(path)
         try:
             self.assertEqual(stays(migrated), [])
-            self.assertEqual(migrated.db.execute("PRAGMA user_version").fetchone()[0], 16)
+            self.assertEqual(migrated.db.execute("PRAGMA user_version").fetchone()[0], 17)
         finally:
             migrated.close()
 
@@ -1973,34 +1973,47 @@ class StoreTests(unittest.TestCase):
         self.assertEqual([trip["mode"] for trip in reversed(trips)], ["driving", "driving"])
 
     def test_sparse_fuel_stop_from_owntracks_is_kept_only_near_a_place(self):
-        # Real OwnTracks fixes: the phone went quiet at the pump between 19:29:29 and 19:32:55.
-        source = "owntracks:karun/iphone"
-        # Only these six: the sharp fixes 200 m out as you pull away end the stop at once.
-        rows = [("19:27:13", 34.75946, -92.45359, 2), ("19:28:11", 34.75837, -92.45184, 2), ("19:29:29", 34.75796, -92.45161, 16),
-                ("19:32:55", 34.75773, -92.45214, 5), ("19:34:44", 34.75828, -92.44997, 3), ("19:34:58", 34.75784, -92.44775, 2)]
-        self.store.ingest([{"source": source, "external_id": at, "timestamp": f"2026-10-10T{at}+00:00",
+        # Real OwnTracks fixes from 2026-10-10 19:27-19:35 Chicago time, at full precision.
+        # The phone went quiet at the Costco pumps; 00:28:11 is still rolling in at 12 km/h,
+        # 76 m from where the car stood at 00:32:55, but only 37 m from the stop's centre.
+        source = "owntracks:owntracks/AAECA792-3041-476E-A643-12321E9A9694"
+        rows = [("00:26:59", 34.761179, -92.454262, 3), ("00:27:13", 34.759461, -92.453592, 2),
+                ("00:28:11", 34.758368, -92.451837, 2), ("00:29:29", 34.757962, -92.451609, 16),
+                ("00:32:55", 34.75773, -92.452137, 5), ("00:34:44", 34.758283, -92.449974, 3),
+                ("00:34:58", 34.757837, -92.447753, 2), ("00:35:11", 34.757339, -92.445648, 2)]
+        self.store.ingest([{"source": source, "external_id": at, "timestamp": f"2026-10-11T{at}+00:00",
                             "lat": lat, "lon": lon, "accuracy_m": accuracy} for at, lat, lon, accuracy in rows])
-        shell = {"place_name": "Shell", "place_lat": 34.7579, "place_lon": -92.4519}
-        with patch("geologs.analysis.named_place_near", return_value=shell) as lookup:
+        costco = {"place_name": "Costco Gas Station", "place_lat": 34.757878, "place_lon": -92.451721}
+        with patch("geologs.analysis.named_place_near", return_value=costco) as lookup:
             kept = stays(self.store, limit=None)
-        self.assertEqual([(row["kind"], row["started_at"], row["observed_minutes"]) for row in kept],
-                         [("stop", "2026-10-10T19:29:29+00:00", 3.4)])
+        self.assertEqual([(row["kind"], row["started_at"], row["ended_at"]) for row in kept],
+                         [("stop", "2026-10-11T00:28:11+00:00", "2026-10-11T00:32:55+00:00")])
         self.assertFalse(lookup.call_args.args[4])  # a history sweep reads only the lookup cache
         # With no place there it was probably the road or a red light, so the day offers it to keep.
         with patch("geologs.analysis.named_place_near", return_value=None):
             self.assertEqual(stays(self.store, limit=None), [])
-            day = day_summary(self.store, "2026-10-10", "UTC")
+            day = day_summary(self.store, "2026-10-11", "UTC")
         self.assertEqual([(stop["started_at"], stop["minutes"]) for stop in day["possible_stops"]],
-                         [("2026-10-10T19:29:29+00:00", 3.4)])
+                         [("2026-10-11T00:28:11+00:00", 4.7)])
         kept = self.store.save_stay_edit({"action": "add", **{key: day["possible_stops"][0][key] for key in ("source", "started_at", "ended_at")}})
         with patch("geologs.analysis.named_place_near", return_value=None):
-            day = day_summary(self.store, "2026-10-10", "UTC")
+            day = day_summary(self.store, "2026-10-11", "UTC")
         self.assertEqual(([stay["kind"] for stay in day["stays"]], day["possible_stops"]), (["manual"], []))
         self.store.delete_stay_edit(kept["id"])
         # A saved place there is evidence too, with no lookup at all.
-        self.store.save_place({"name": "Fuel", "lat": 34.7579, "lon": -92.4519, "radius_m": 80})
+        self.store.save_place({"name": "Fuel", "lat": 34.757878, "lon": -92.451721, "radius_m": 80})
         with patch("geologs.analysis.named_place_near", side_effect=AssertionError("looked up")):
             self.assertEqual(len(stays(self.store, limit=None)), 1)
+
+    def test_a_cached_place_with_only_its_distance_still_confirms_a_stop(self):
+        from geologs.core import named_place_near
+        # The Mapbox result cached on the server: no position of its own, 11 m from the lookup point.
+        cached = {"place_name": "Costco Gas Station", "lat": 34.75796, "lon": -92.4516, "distance_m": 11,
+                  "category": "gas_station"}
+        with patch("geologs.core.reverse_geocode", return_value={**cached, "lat": 34.75802, "lon": -92.45186}):
+            self.assertEqual(named_place_near(self.store, 34.75802, -92.45186, 75)["place_name"], "Costco Gas Station")
+        with patch("geologs.core.reverse_geocode", return_value={**cached, "distance_m": 140}):
+            self.assertIsNone(named_place_near(self.store, 34.75802, -92.45186, 75))
 
     def test_leaving_after_a_quiet_stretch_ends_the_stay_near_the_departure(self):
         # Home at 13:00, the phone quiet until it reports 2.7 km away at 15:00.
@@ -2113,7 +2126,7 @@ class StoreTests(unittest.TestCase):
         migrated = Store(path)
         try:
             self.assertEqual([row["kind"] for row in reversed(stays(migrated, limit=None))], ["stationary", "area", "stationary"])
-            self.assertEqual(migrated.db.execute("PRAGMA user_version").fetchone()[0], 16)
+            self.assertEqual(migrated.db.execute("PRAGMA user_version").fetchone()[0], 17)
         finally:
             migrated.close()
 
