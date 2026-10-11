@@ -1592,3 +1592,28 @@ def save_scheduled_summaries(store, now=None):
         due = now - datetime.fromisoformat(row["updated_at"]) >= timedelta(hours=settings["summary_interval_hours"])
     if due:
         daily_overview(store, today, settings["timezone"])
+
+
+def delete_samples(store, ids, confirm=False):
+    """Preview, or with confirm=True permanently delete, raw samples.
+
+    The affected sources' stays are rebuilt and the stored summaries of the
+    affected days refreshed, so history never refers to a deleted sample.
+    """
+    plan = store.sample_deletion(ids)
+    timezone_name = store.settings()["timezone"]
+    zone = ZoneInfo(timezone_name)
+    dates = sorted({datetime.fromisoformat(value).astimezone(zone).date().isoformat() for value in plan["timestamps"]})
+    preview = {"samples": plan["samples"], "sources": plan["sources"], "first": plan["first"], "last": plan["last"],
+               "dates": dates, "reminder_triggers": [{"reminder": item["reminder"], "triggered_at": item["triggered_at"]}
+                                                     for item in plan["reminder_triggers"]]}
+    if not confirm:
+        return {**preview, "deleted": False}
+    store.delete_samples(plan)
+    process_stays(store, plan["sources"], rebuild=True)
+    store.db.commit()
+    for date in dates:
+        # Rebuild (or drop, when nothing is left) each stored record for those days.
+        if store.stored_daily_overview(date, timezone_name) is not None:
+            daily_overview(store, date, timezone_name)
+    return {**preview, "deleted": True}

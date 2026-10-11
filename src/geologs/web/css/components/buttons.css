@@ -148,3 +148,12 @@
 .button[data-state="denied"] {
   color: var(--text-2);
 }
+/* The confirming button of a destructive action. */
+.button.danger.strong {
+  border-color: var(--danger);
+  background: var(--danger);
+  color: var(--surface);
+}
+.button.danger.strong:hover {
+  background: color-mix(in srgb, var(--danger) 88%, var(--text));
+}

@@ -55,6 +55,11 @@ def minute_fixes(segments, source="phone", start=datetime(2026, 9, 27, 13, tzinf
     return fixes
 
 
+def metres_between(place, row):
+    from geologs.core import metres
+    return metres(place[0], place[1], row["lat"], row["lon"])
+
+
 def lake_run_day(hold=1):
     """Home, drive 10 km, run an hour of laps around a 500 m radius lake, drive back, home."""
     shore = shifted(LAKE, -500, 0)
@@ -1886,6 +1891,52 @@ class StoreTests(unittest.TestCase):
         with patch("geologs.analysis.daily_overview") as rebuild:
             save_scheduled_summaries(self.store, now=start + timedelta(hours=3))
         self.assertNotIn("2026-09-27", [call.args[1] for call in rebuild.call_args_list])
+
+    def test_deleting_samples_previews_then_removes_and_recalculates(self):
+        from geologs.analysis import delete_samples
+        cafe = shifted(HOME, 5000, 0)
+        place = self.store.save_place({"name": "Cafe", "lat": cafe[0], "lon": cafe[1], "radius_m": 120})
+        self.store.create_reminder({"text": "Buy beans", "place_id": place["id"]})
+        fixes = minute_fixes([still(HOME, 30), line(HOME, cafe, 8), still(cafe, 25), line(cafe, HOME, 8), still(HOME, 30)])
+        with patch("geologs.core.datetime") as clock:
+            clock.now.return_value = datetime(2026, 9, 27, 13, 40, tzinfo=timezone.utc)
+            clock.fromisoformat = datetime.fromisoformat
+            clock.fromtimestamp = datetime.fromtimestamp
+            self.store.ingest(fixes)
+        daily_overview(self.store, "2026-09-27", "UTC")
+        at_cafe = [row for row in self.store.observations(limit=None)
+                   if metres_between(cafe, row) < 60]
+        self.assertGreaterEqual(len(at_cafe), 20)
+        ids = [row["id"] for row in at_cafe]
+        preview = delete_samples(self.store, ids)
+        self.assertFalse(preview["deleted"])
+        self.assertEqual((preview["samples"], preview["sources"], preview["dates"]), (len(ids), ["phone"], ["2026-09-27"]))
+        self.assertEqual([item["reminder"] for item in preview["reminder_triggers"]], ["Buy beans"])
+        self.assertEqual(self.store.observation_count(), len(fixes))  # a preview changes nothing
+        result = delete_samples(self.store, ids, confirm=True)
+        self.assertTrue(result["deleted"])
+        self.assertEqual(self.store.observation_count(), len(fixes) - len(ids))
+        self.assertEqual(self.store._rows("SELECT * FROM events"), [])
+        # The cafe visit is gone from stays and from the stored summary.
+        self.assertFalse([stay for stay in stays(self.store, limit=None) if metres_between(cafe, stay) < 100])
+        record = stored_daily_record(self.store, "2026-09-27")
+        self.assertFalse(record["stale"])
+        self.assertEqual(record["summary"]["totals"]["raw_fixes"], len(fixes) - len(ids))
+        with self.assertRaises(ValueError):
+            delete_samples(self.store, ids, confirm=True)
+
+    def test_deleting_every_sample_of_a_day_drops_its_summary(self):
+        from geologs.analysis import delete_samples
+        self.store.ingest(minute_fixes([still(HOME, 40)]))
+        daily_overview(self.store, "2026-09-27", "UTC")
+        ids = [row["id"] for row in self.store.observations(limit=None)]
+        delete_samples(self.store, ids, confirm=True)
+        self.assertEqual((self.store.daily_overviews(), self.store.latest()), ([], None))
+        # The source can send again afterwards.
+        self.assertEqual(self.store.ingest(minute_fixes([still(HOME, 2)]))["inserted"], 2)
+        for bad in ([], ["x"], list(range(1, 502))):
+            with self.assertRaises(ValueError):
+                delete_samples(self.store, bad)
 
     def test_search_visits_finds_named_places_by_word(self):
         costco, club = shifted(HOME, 5000, 0), shifted(HOME, -5000, 0)

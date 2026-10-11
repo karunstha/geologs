@@ -1,11 +1,12 @@
 // The detail tabs under the History map: the day's places, speed, samples, and recorded data.
-import { api } from "../core/api.js";
+import { api, post } from "../core/api.js";
 import { $, safe, toast } from "../core/dom.js";
-import { clock, clockPrecise, durationText, formatTime, plural, zonedMidnight } from "../core/format.js";
+import { clock, clockPrecise, durationText, formatTime, longDate, plural, zonedMidnight } from "../core/format.js";
 import { state } from "../core/state.js";
 import { onEach, rowActions } from "../ui/actions.js";
 import { modeInfo, modeName, pinBadge, sourceName, zoneText } from "../ui/icons.js";
-import { focusPlaceOnMap, params } from "./history.js";
+import { focusPlaceOnMap, params, refreshExplore } from "./history.js";
+import { refreshInsights } from "./patterns.js";
 import { dayVisits, editVisitedPlace } from "./place-dialogs.js";
 import { showView } from "./shell.js";
 
@@ -171,6 +172,8 @@ export function renderSamples() {
       ? `${(start + 1).toLocaleString()}–${(start + rows.length).toLocaleString()} of ${plural(state.rawTotal, "raw sample")}`
       : "No raw samples on this page.";
   const visible = timeline ? rows.slice(0, 200) : rows;
+  const shownIds = new Set(visible.map((point) => point.id));
+  for (const id of state.selectedSamples) if (!shownIds.has(id)) state.selectedSamples.delete(id);
   const body = $("points-table");
   body.innerHTML =
     visible
@@ -182,17 +185,106 @@ export function renderSamples() {
             : point.speed_origin === "reported_adjusted"
               ? ' <small title="Device speed with your adjustment">adj.</small>'
               : "";
-        return `<tr><td title="${safe(formatTime(point.timestamp))}">${safe(clockPrecise(point.timestamp))}</td><td>${safe(timeline ? ROLES[point.role] || "Sample" : "Raw sample")}</td><td title="${safe(point.source)}">${safe(source.device || source.kind)}</td><td>${safe(contextAt(state.day, Date.parse(point.timestamp)))}</td><td class="numeric">${point.speed_mps == null ? "—" : (point.speed_mps * 3.6).toFixed(1) + " km/h"}${origin}</td><td class="mono">${point.lat.toFixed(5)}, ${point.lon.toFixed(5)}</td><td class="numeric">${point.accuracy_m == null ? "—" : Math.round(point.accuracy_m) + " m"}</td><td>${rowActions([{ icon: "map", label: "Show on map", data: `data-sample-map="${index}"` }])}</td></tr>`;
+        const ticked = state.selectedSamples.has(point.id);
+        return `<tr${ticked ? ' class="selected"' : ""}><td class="select-col"><input type="checkbox" data-select-sample="${point.id}" aria-label="Select the sample at ${safe(clockPrecise(point.timestamp))}"${ticked ? " checked" : ""}></td><td title="${safe(formatTime(point.timestamp))}">${safe(clockPrecise(point.timestamp))}</td><td>${safe(timeline ? ROLES[point.role] || "Sample" : "Raw sample")}</td><td title="${safe(point.source)}">${safe(source.device || source.kind)}</td><td>${safe(contextAt(state.day, Date.parse(point.timestamp)))}</td><td class="numeric">${point.speed_mps == null ? "—" : (point.speed_mps * 3.6).toFixed(1) + " km/h"}${origin}</td><td class="mono">${point.lat.toFixed(5)}, ${point.lon.toFixed(5)}</td><td class="numeric">${point.accuracy_m == null ? "—" : Math.round(point.accuracy_m) + " m"}</td><td>${rowActions([
+          { icon: "map", label: "Show on map", data: `data-sample-map="${index}"` },
+          { icon: "delete", label: "Delete this sample", data: `data-delete-sample="${point.id}"`, tone: "danger" },
+        ])}</td></tr>`;
       })
-      .join("") || '<tr><td colspan="8" class="empty">No fixes on this day.</td></tr>';
+      .join("") || '<tr><td colspan="9" class="empty">No fixes on this day.</td></tr>';
   onEach(body, "sample-map", (index) =>
     focusPlaceOnMap({ ...visible[+index], display_name: formatTime(visible[+index].timestamp) }),
   );
+  onEach(body, "delete-sample", (id) => deleteSamples([+id]));
+  body.querySelectorAll("[data-select-sample]").forEach((input) => {
+    input.onchange = () => {
+      const id = +input.dataset.selectSample;
+      if (input.checked) state.selectedSamples.add(id);
+      else state.selectedSamples.delete(id);
+      input.closest("tr").classList.toggle("selected", input.checked);
+      renderSampleSelection(visible.length);
+    };
+  });
+  renderSampleSelection(visible.length);
   $("raw-pagination").hidden = timeline || state.rawTotal <= state.rawPageSize;
   $("raw-page").textContent =
     `Page ${state.rawPage + 1} of ${Math.max(1, Math.ceil(state.rawTotal / state.rawPageSize))}`;
   $("raw-previous").disabled = state.rawPage === 0;
   $("raw-next").disabled = start + rows.length >= state.rawTotal;
+}
+
+function renderSampleSelection(shown) {
+  const count = state.selectedSamples.size;
+  $("sample-selection").hidden = !count;
+  $("sample-selected-count").textContent = `${plural(count, "sample")} selected`;
+  const all = $("select-all-samples");
+  all.disabled = !shown;
+  all.checked = shown > 0 && count === shown;
+  all.indeterminate = count > 0 && count < shown;
+}
+
+function sourceList(sources) {
+  const names = sources.map((source) => {
+    const name = sourceName(source);
+    return name.device || name.kind;
+  });
+  return names.length > 2 ? `${names.slice(0, -1).join(", ")}, and ${names.at(-1)}` : names.join(" and ");
+}
+
+// Ask the server what would go, spell it out, and delete only once confirmed.
+async function deleteSamples(ids) {
+  let preview;
+  try {
+    preview = await post("/api/observations/delete", { ids });
+  } catch (error) {
+    toast(error.message);
+    return;
+  }
+  const count = preview.samples;
+  const devices = sourceList(preview.sources);
+  const when =
+    count === 1
+      ? formatTime(preview.first)
+      : `${clockPrecise(preview.first)} – ${clockPrecise(preview.last)}${preview.dates.length === 1 ? ` on ${longDate(preview.dates[0])}` : ""}`;
+  $("delete-samples-title").textContent = `Delete ${count === 1 ? "this sample" : plural(count, "sample")}?`;
+  $("delete-samples-summary").textContent = `From ${devices} · ${when}`;
+  const days = preview.dates.map(longDate).join(", ");
+  $("delete-samples-effects").innerHTML = [
+    `<strong>This can't be undone.</strong> ${count === 1 ? "The sample is" : "The samples are"} removed from your archive for good.`,
+    `Stays, trips, and visited places from ${safe(devices)} are recalculated without ${count === 1 ? "it" : "them"}, which can take a moment.`,
+    `Daily summaries for ${safe(days)} are rebuilt to match.`,
+  ]
+    .map((line) => `<li>${line}</li>`)
+    .join("");
+  const triggers = preview.reminder_triggers;
+  $("delete-samples-reminders").hidden = !triggers.length;
+  $("delete-samples-reminders").innerHTML = triggers.length
+    ? `<strong>${count === 1 ? "This sample" : triggers.length === 1 ? "One of these samples" : "Some of these samples"} set off ${triggers.length === 1 ? "a reminder" : plural(triggers.length, "reminder")}</strong><span>${triggers
+        .map((item) => `“${safe(item.reminder)}” at ${safe(clock(item.triggered_at))}`)
+        .join(", ")}. The trigger is removed from the reminder inbox; the reminder itself is unchanged.</span>`
+    : "";
+  const button = $("confirm-delete-samples");
+  button.textContent = `Delete ${count === 1 ? "sample" : plural(count, "sample")}`;
+  button.disabled = false;
+  button.onclick = async () => {
+    button.disabled = true;
+    button.textContent = "Deleting…";
+    try {
+      await post("/api/observations/delete", { ids, confirm: true });
+      $("delete-samples-dialog").close();
+      state.selectedSamples.clear();
+      // Step back a page if this one is now past the end.
+      const remaining = state.rawTotal - count;
+      if (state.rawPage > 0 && state.rawPage * state.rawPageSize >= remaining) state.rawPage -= 1;
+      await Promise.all([refreshExplore(false), refreshInsights()]);
+      toast(`Deleted ${plural(count, "sample")}`);
+    } catch (error) {
+      button.disabled = false;
+      button.textContent = "Try again";
+      toast(error.message);
+    }
+  };
+  $("delete-samples-dialog").showModal();
 }
 
 // What was recorded on this day, by which device, and where it is missing.
@@ -276,4 +368,24 @@ export function initDayDetails() {
   };
   $("raw-previous").onclick = page(-1);
   $("raw-next").onclick = page(1);
+  $("select-all-samples").onchange = () => {
+    const boxes = [...$("points-table").querySelectorAll("[data-select-sample]")];
+    for (const input of boxes) {
+      input.checked = $("select-all-samples").checked;
+      input.closest("tr").classList.toggle("selected", input.checked);
+      if (input.checked) state.selectedSamples.add(+input.dataset.selectSample);
+      else state.selectedSamples.delete(+input.dataset.selectSample);
+    }
+    renderSampleSelection(boxes.length);
+  };
+  $("clear-sample-selection").onclick = () => {
+    state.selectedSamples.clear();
+    renderSamples();
+  };
+  $("delete-selected-samples").onclick = () => deleteSamples([...state.selectedSamples]);
+  const closeDelete = () => $("delete-samples-dialog").close();
+  $("close-delete-samples").onclick = $("cancel-delete-samples").onclick = closeDelete;
+  $("delete-samples-dialog").onclick = (event) => {
+    if (event.target === $("delete-samples-dialog")) closeDelete();
+  };
 }

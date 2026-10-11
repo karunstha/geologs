@@ -20,6 +20,8 @@ export const state = {
   rawPage: 0,
   rawPageSize: 50,
   rawTotal: 0,
+  // Sample ids ticked in the Samples table; only those shown stay selected.
+  selectedSamples: new Set(),
   selected: null,
   fitKey: null,
   pendingStayId: null,

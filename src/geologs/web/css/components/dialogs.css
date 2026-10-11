@@ -132,3 +132,24 @@
     max-width: none;
   }
 }
+/* A short confirmation, such as before deleting. */
+.dialog.narrow {
+  width: min(480px, calc(100% - 32px));
+}
+.effects-list {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 16px;
+  padding-left: 18px;
+  color: var(--text-2);
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+.effects-list strong {
+  color: var(--text);
+}
+.dialog .callout {
+  display: grid;
+  gap: 2px;
+  margin-bottom: 16px;
+}

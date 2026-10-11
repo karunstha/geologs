@@ -57,6 +57,8 @@ AWAY_MIN_FIXES = 3
 AWAY_MIN_SECONDS = 240
 # Short moves cannot be told from driving by speed alone; a drive needs this much distance.
 DRIVING_MIN_DISTANCE_M = 500
+# One delete request covers at most a page of raw samples.
+MAX_SAMPLE_DELETE = 500
 
 
 def database_path() -> str:
@@ -1082,6 +1084,63 @@ class Store:
         for row in rows:
             row["mode"] = mode_for(row["speed_mps"], row["accuracy_m"], speeds)
         return rows
+
+    def sample_deletion(self, ids):
+        """What deleting these raw samples (point_observations ids) would remove.
+
+        A canonical point goes too once none of its samples are left, and with
+        it any reminder trigger it caused.
+        """
+        try:
+            ids = sorted({int(value) for value in ids})
+        except (TypeError, ValueError) as exc:
+            raise ValueError("ids must be a list of sample ids") from exc
+        if not 1 <= len(ids) <= MAX_SAMPLE_DELETE:
+            raise ValueError(f"choose between 1 and {MAX_SAMPLE_DELETE} samples")
+        marks = ",".join("?" * len(ids))
+        rows = self._rows(f"SELECT id,point_id,source,timestamp FROM point_observations WHERE id IN ({marks})", ids)
+        if not rows:
+            raise ValueError("those samples no longer exist")
+        point_ids = sorted({row["point_id"] for row in rows})
+        point_marks = ",".join("?" * len(point_ids))
+        # Points that keep another sample stay; the rest are removed with their samples.
+        kept = {row["point_id"] for row in self._rows(f"""SELECT DISTINCT point_id FROM point_observations
+            WHERE point_id IN ({point_marks}) AND id NOT IN ({marks})""", point_ids + ids)}
+        orphans = [point_id for point_id in point_ids if point_id not in kept]
+        triggers = self._rows(f"""SELECT e.id,e.triggered_at,r.text AS reminder FROM events e
+            JOIN reminders r ON r.id=e.reminder_id WHERE e.point_id IN ({",".join("?" * len(orphans))})
+            ORDER BY e.triggered_at""", orphans) if orphans else []
+        timestamps = sorted(row["timestamp"] for row in rows)
+        return {"ids": [row["id"] for row in rows], "samples": len(rows), "points": orphans,
+                "sources": sorted({row["source"] for row in rows}), "first": timestamps[0], "last": timestamps[-1],
+                "timestamps": timestamps, "reminder_triggers": triggers}
+
+    def delete_samples(self, plan):
+        """Remove the samples in a sample_deletion() plan without committing.
+
+        Stays of the affected sources reference raw samples, so they are
+        dropped here and must be rebuilt (process_stays) before committing.
+        """
+        ids, orphans, sources = plan["ids"], plan["points"], plan["sources"]
+        source_marks = ",".join("?" * len(sources))
+        self.db.execute(f"DELETE FROM timeline_fixes WHERE source IN ({source_marks})", sources)
+        self.db.execute(f"DELETE FROM observed_stays_v2 WHERE source IN ({source_marks})", sources)
+        self.db.execute(f"DELETE FROM stay_observation_state WHERE source IN ({source_marks})", sources)
+        self.db.execute(f"DELETE FROM point_observations WHERE id IN ({','.join('?' * len(ids))})", ids)
+        if orphans:
+            marks = ",".join("?" * len(orphans))
+            self.db.execute(f"DELETE FROM events WHERE point_id IN ({marks})", orphans)
+            self.db.execute(f"DELETE FROM observed_stays WHERE start_point_id IN ({marks}) OR end_point_id IN ({marks})",
+                            orphans + orphans)
+            # A source's latest point moves back to the newest one left.
+            for row in self._rows(f"SELECT source FROM source_state WHERE point_id IN ({marks})", orphans):
+                latest = self.db.execute(f"""SELECT id FROM points WHERE source=? AND id NOT IN ({marks})
+                    ORDER BY timestamp DESC,id DESC LIMIT 1""", [row["source"], *orphans]).fetchone()
+                if latest:
+                    self.db.execute("UPDATE source_state SET point_id=? WHERE source=?", (latest["id"], row["source"]))
+                else:
+                    self.db.execute("DELETE FROM source_state WHERE source=?", (row["source"],))
+            self.db.execute(f"DELETE FROM points WHERE id IN ({marks})", orphans)
 
     def observation_count(self, start=None, end=None, source=None):
         clauses, args = [], []

@@ -105,7 +105,7 @@
         </div>
         <div class="detail-panel active" data-panel-view="places"><div id="visited-places" class="list"></div></div>
         <div class="detail-panel" data-panel-view="speed"><div id="speed-chart"></div></div>
-        <div class="detail-panel" data-panel-view="samples"><div class="sample-toolbar"><div class="segmented"><button class="active" data-sample-view="timeline">Key fixes</button><button data-sample-view="raw">Raw samples</button></div><p id="sample-count" class="muted"></p></div><div class="table-wrap"><table><thead><tr><th>Time</th><th>Type</th><th>Source</th><th>Part of</th><th>Speed</th><th>Coordinates</th><th>Accuracy</th><th><span class="sr-only">Map</span></th></tr></thead><tbody id="points-table"></tbody></table></div><div id="raw-pagination" class="pagination" hidden><button id="raw-previous" class="button secondary small">Previous</button><span id="raw-page"></span><button id="raw-next" class="button secondary small">Next</button></div></div>
+        <div class="detail-panel" data-panel-view="samples"><div class="sample-toolbar"><div class="segmented"><button class="active" data-sample-view="timeline">Key fixes</button><button data-sample-view="raw">Raw samples</button></div><p id="sample-count" class="muted"></p></div><div id="sample-selection" class="sample-selection" hidden><span id="sample-selected-count"></span><button id="clear-sample-selection" type="button" class="button ghost small">Clear</button><button id="delete-selected-samples" type="button" class="button danger small">Delete selected</button></div><div class="table-wrap"><table><thead><tr><th class="select-col"><input type="checkbox" id="select-all-samples" aria-label="Select every sample shown"></th><th>Time</th><th>Type</th><th>Source</th><th>Part of</th><th>Speed</th><th>Coordinates</th><th>Accuracy</th><th><span class="sr-only">Actions</span></th></tr></thead><tbody id="points-table"></tbody></table></div><div id="raw-pagination" class="pagination" hidden><button id="raw-previous" class="button secondary small">Previous</button><span id="raw-page"></span><button id="raw-next" class="button secondary small">Next</button></div></div>
         <div class="detail-panel" data-panel-view="data"><div id="day-data" class="day-data"></div></div>
       </section>
     </section>
@@ -293,6 +293,15 @@
       <p id="label-where" class="help"></p>
       <div class="dialog-actions"><button type="button" id="reset-label" class="button ghost" hidden>Use automatic name</button><button type="button" id="cancel-label" class="button secondary">Cancel</button><button class="button primary">Save name</button></div>
     </form></section>
+  </dialog>
+
+  <dialog id="delete-samples-dialog" class="dialog narrow" aria-labelledby="delete-samples-title" aria-describedby="delete-samples-summary">
+    <div class="dialog-head"><div><h2 id="delete-samples-title">Delete samples?</h2><p id="delete-samples-summary"></p></div><button id="close-delete-samples" class="icon-button" type="button" aria-label="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
+    <section class="dialog-section">
+      <ul id="delete-samples-effects" class="effects-list"></ul>
+      <div id="delete-samples-reminders" class="callout warning" hidden></div>
+      <div class="dialog-actions"><button id="cancel-delete-samples" type="button" class="button secondary" autofocus>Cancel</button><button id="confirm-delete-samples" type="button" class="button danger strong">Delete</button></div>
+    </section>
   </dialog>
 
   <div id="auth-panel" class="auth-backdrop" hidden><form id="auth-form" class="auth-card"><span class="brand-mark large" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3.5c-3.6 0-6.5 2.8-6.5 6.3 0 4.7 6.5 9.2 6.5 9.2s6.5-4.5 6.5-9.2c0-3.5-2.9-6.3-6.5-6.3Z"/><circle cx="12" cy="9.9" r="2.1"/></svg></span><h2>Sign in to GeoLogs</h2><p class="muted">Enter the access token from your server's .env file (GEOLOGS_TOKEN).</p><label class="field"><span>Access token</span><input id="auth-token" class="input" type="password" autocomplete="current-password" required></label><p id="auth-error" class="auth-error" role="alert"></p><div class="auth-actions"><button type="button" id="auth-cancel" class="button secondary">Cancel</button><button class="button primary">Sign in</button></div></form></div>

@@ -485,6 +485,34 @@
 .sample-toolbar p {
   font-size: 12.5px;
 }
+/* Shown while samples are ticked in the table. */
+.sample-selection {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 8px 8px 8px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  font-size: 13px;
+  font-weight: 560;
+}
+.sample-selection span {
+  margin-right: auto;
+}
+.history-details .select-col {
+  width: 1%;
+  padding-right: 0;
+}
+.select-col input {
+  display: block;
+  margin: 0;
+  accent-color: var(--accent);
+}
+.history-details tr.selected td {
+  background: var(--accent-soft);
+}
 @media (max-width: 1100px) {
   .history-layout {
     grid-template-columns: minmax(0, 1fr) 320px;
