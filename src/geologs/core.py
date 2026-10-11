@@ -610,7 +610,7 @@ class Store:
             if "brief" not in {row[1] for row in self.db.execute("PRAGMA table_info(daily_summaries)")}:
                 self.db.execute("ALTER TABLE daily_summaries ADD COLUMN brief TEXT")
             version = self.db.execute("PRAGMA user_version").fetchone()[0]
-            rebuild_analysis = version < 17
+            rebuild_analysis = version < 18
             if version < 1:
                 self.db.execute("UPDATE points SET mode='running_cycling' WHERE mode='cycling'")
             if version < 2:
@@ -697,8 +697,10 @@ class Store:
         # that report only while moving as time spent still (SQLite 15); 19 ends
         # a stop at a sharp fix far away instead of holding it as a stray (SQLite
         # 16); 20 measures a quick stop's spread from its centre and sets creeping
-        # traffic apart (SQLite 17). One rebuild covers every missing version.
-        rebuild_versions = (5, 8, 12, 14, 17, 18, 19, 20)
+        # traffic apart (SQLite 17); 21 allows for accuracy at a stay's first fix,
+        # so rolling in does not split it (SQLite 18). One rebuild covers every
+        # missing version.
+        rebuild_versions = (5, 8, 12, 14, 17, 18, 19, 20, 21)
         if self.postgres and self._missing_migrations(rebuild_versions):
             self.db.execute("SELECT pg_advisory_xact_lock(hashtext('geologs:stays:rebuild'))")
             missing = self._missing_migrations(rebuild_versions)
@@ -722,8 +724,8 @@ class Store:
         if not self.postgres and version < 9:
             self.db.execute("DELETE FROM analysis_cache")
             self.db.execute("PRAGMA user_version=9")
-        if not self.postgres and version < 17:
-            self.db.execute("PRAGMA user_version=17")
+        if not self.postgres and version < 18:
+            self.db.execute("PRAGMA user_version=18")
         if self.postgres and self._missing_migrations((16,)):
             # Keep one stored daily summary per date: the configured timezone, all sources.
             self._keep_canonical_daily_summaries(self.settings()["timezone"])

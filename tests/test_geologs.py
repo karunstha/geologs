@@ -1094,7 +1094,7 @@ class StoreTests(unittest.TestCase):
         migrated = Store(path)
         try:
             self.assertEqual(stays(migrated), [])
-            self.assertEqual(migrated.db.execute("PRAGMA user_version").fetchone()[0], 17)
+            self.assertEqual(migrated.db.execute("PRAGMA user_version").fetchone()[0], 18)
         finally:
             migrated.close()
 
@@ -2028,6 +2028,32 @@ class StoreTests(unittest.TestCase):
         day = day_summary(self.store, "2026-09-27", "UTC")
         self.assertEqual(day["coverage_gaps"], [])
 
+    def test_rolling_in_fix_does_not_split_the_stay_it_starts(self):
+        # Real Home Assistant (OwnTracks) fixes arriving home on 2026-10-07: the first is still
+        # moving at 12 km/h, 53.5 m from where the phone settled at 12 m accuracy.
+        source = "home_assistant:device_tracker.owntracks_phone"
+        rows = [("03:36:01", 34.740353, -92.371355, 2), ("03:37:01", 34.742055, -92.372287, 2),
+                ("03:38:01", 34.742961, -92.374196, 2), ("03:41:01", 34.742993, -92.374631, 10),
+                ("03:44:01", 34.742994, -92.374673, 12), ("03:47:02", 34.743128, -92.374745, 12),
+                ("03:50:02", 34.743126, -92.374763, 12), ("03:59:02", 34.743127, -92.374760, 12)]
+        self.store.ingest([{"source": source, "external_id": at, "timestamp": f"2026-10-08T{at}+00:00",
+                            "lat": lat, "lon": lon, "accuracy_m": accuracy} for at, lat, lon, accuracy in rows])
+        self.assertEqual([(stay["started_at"], stay["ended_at"]) for stay in stays(self.store, limit=None)],
+                         [("2026-10-08T03:38:01+00:00", "2026-10-08T03:59:02+00:00")])
+
+    def test_switching_trackers_mid_visit_is_one_visit(self):
+        # The Home Assistant app stops at 15:00 and OwnTracks takes over two minutes later, still at home.
+        app = minute_fixes([still(CAMPUS, 30), line(CAMPUS, HOME, 10), still(HOME, 60)], source="ha:app")
+        owntracks = minute_fixes([still(HOME, 40), line(HOME, CAMPUS, 10), still(CAMPUS, 30)], source="ha:owntracks",
+                                 start=datetime(2026, 9, 27, 14, 42, tzinfo=timezone.utc))
+        self.store.ingest(app + owntracks)
+        with patch("geologs.analysis.place_for_coordinate", side_effect=campus_label):
+            day = day_summary(self.store, "2026-09-27", "UTC")
+        home = [stay for stay in day["stays"] if metres_between(HOME, stay) < 100]
+        self.assertEqual([(stay["started_at"], stay["ended_at"], stay["sources"]) for stay in home],
+                         [("2026-09-27T13:39:00+00:00", "2026-09-27T15:21:00+00:00", ["ha:app", "ha:owntracks"])])
+        self.assertEqual(len(day["trips"]), 2)
+
     def test_creeping_traffic_and_short_waits_are_not_quick_stops(self):
         queue = shifted(HOME, 4000, 0)
         crawl = line(queue, shifted(queue, 0, 60), 6)  # 60 m in six minutes: stop-and-go traffic
@@ -2126,7 +2152,7 @@ class StoreTests(unittest.TestCase):
         migrated = Store(path)
         try:
             self.assertEqual([row["kind"] for row in reversed(stays(migrated, limit=None))], ["stationary", "area", "stationary"])
-            self.assertEqual(migrated.db.execute("PRAGMA user_version").fetchone()[0], 17)
+            self.assertEqual(migrated.db.execute("PRAGMA user_version").fetchone()[0], 18)
         finally:
             migrated.close()
 

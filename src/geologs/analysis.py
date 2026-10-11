@@ -269,10 +269,14 @@ def _advance_stay(store, source, candidate, point, rules=None, previous_at=None)
     to_centre = metres(point["lat"], point["lon"], candidate["lat"], candidate["lon"])
     if 0 < elapsed <= MAX_QUIET_STAY_SECONDS:
         moving = (reported_speed(point) or 0) > 2.5
+        # The first fix anchors the stay so a slow creep cannot drag it along,
+        # but it is often you still rolling in: allow for both fixes' accuracy.
+        first_accuracy = (candidate.get("fixes") or [[0, 0, 0]])[0][2]
+        anchor = STOP_RADIUS_M + min((point["accuracy_m"] or 0) + first_accuracy, QUIET_ACCURACY_ALLOWANCE_M)
         # Back at the same spot after any quiet stretch (an app that reports
         # only while moving): you never left.
         inside = (not moving
-                  and metres(point["lat"], point["lon"], candidate["first_lat"], candidate["first_lon"]) <= STOP_RADIUS_M
+                  and metres(point["lat"], point["lon"], candidate["first_lat"], candidate["first_lon"]) <= anchor
                   and to_centre <= STOP_RADIUS_M)
         allowance = min((point["accuracy_m"] or 0) + (candidate.get("last_accuracy") or 0), QUIET_ACCURACY_ALLOWANCE_M)
         # Held-back strays mean fixes kept coming: that is not quiet.
@@ -1277,6 +1281,32 @@ def _fuse_sources(day_stays, trips, samples_by_source):
     return kept_stays, kept_trips, used
 
 
+def _join_source_handoffs(day_stays, trips):
+    """One visit when the device recording it changed partway through.
+
+    Switching trackers (Home Assistant's app to OwnTracks, say) ends one
+    source's stay and starts another's at the same place minutes later. Stays
+    from different sources at one place, no more than MAX_SAMPLE_GAP_SECONDS
+    apart with no trip between them, are one visit. `day_stays` is chronological.
+    """
+    joined = []
+    for stay in day_stays:
+        previous = joined[-1] if joined else None
+        if (previous is not None and previous["source"] != stay["source"]
+                and previous.get("cluster_id") is not None and previous.get("cluster_id") == stay.get("cluster_id")):
+            gap = (datetime.fromisoformat(stay["started_at"]) - datetime.fromisoformat(previous["ended_at"])).total_seconds()
+            travelled = any(previous["ended_at"] <= trip["start"] and trip["end"] <= stay["started_at"] for trip in trips)
+            if 0 <= gap <= MAX_SAMPLE_GAP_SECONDS and not travelled:
+                previous.update(ended_at=stay["ended_at"], ongoing=stay["ongoing"],
+                                point_count=previous["point_count"] + stay["point_count"],
+                                observed_minutes=round(previous["observed_minutes"] + gap / 60 + stay["observed_minutes"], 1),
+                                internal_moves=previous.get("internal_moves", []) + stay.get("internal_moves", []),
+                                sources=sorted(set(previous.get("sources") or [previous["source"]]) | {stay["source"]}))
+                continue
+        joined.append(stay)
+    return joined
+
+
 def _coverage_gaps(points, trips, day_stays=()):
     """Unobserved stretches over 30 minutes, except inside a trip that already notes
     them or a stay (an app that reports only while moving is quiet while you stay)."""
@@ -1413,6 +1443,7 @@ def day_summary(store, date, timezone_name="UTC", source=None):
         kept_trips.append(trip)
     trips = kept_trips
     day_stays = merge_split_visits(day_stays, lambda stay: stay.get("cluster_id"), internal_moves)
+    day_stays = _join_source_handoffs(day_stays, trips)
     for stay in day_stays:
         if stay["kind"] == "area":
             path = [point for point in chronological if point["source"] == stay["source"]
