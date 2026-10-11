@@ -199,6 +199,11 @@
               <div id="source-list" class="list rows source-list" aria-live="polite"></div>
             </div>
             <div class="card">
+              <div class="card-head"><div><h3>Tracker priority</h3><p>When trackers disagree about the same moment, the one higher up wins; the others fill only the times it has nothing to say. Drag to reorder.</p></div></div>
+              <ol id="priority-list" class="priority-list" aria-label="Trackers, most trusted first"></ol>
+              <p id="priority-note" class="help" hidden></p>
+            </div>
+            <div class="card">
               <div class="card-head"><div><h3>Connect a tracker app</h3><p>Phones send locations straight here, with no polling. Use an address your phone can reach, such as HTTPS or a private network like Tailscale.</p></div></div>
               <p id="ingest-token-note" class="callout warning" hidden><strong>Give phones their own token</strong><span>Set GEOLOGS_INGEST_TOKEN in .env. Until then, apps need your main access token, which can also read your whole history.</span></p>
               <div id="tracker-endpoints" class="tracker-list"></div>

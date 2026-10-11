@@ -36,9 +36,14 @@ ANALYSIS_DEFAULTS = {"stay_min_minutes": 15, "quick_stop_minutes": 3, "walking_m
 # Completed days are always saved after midnight; "interval" also saves today so far.
 SUMMARY_SCHEDULES = ("nightly", "interval")
 # An empty places_provider means the first configured provider (see places_provider()).
+# source_priority lists trackers, most trusted first; when several report the
+# same time, the first one with data wins. Unlisted sources follow, busiest first.
 DEFAULT_SETTINGS = {"speed_strategy": "reported", "reported_speed_offset_kmh": 0.0, "timezone": "UTC",
                     "places_provider": "", **ANALYSIS_DEFAULTS,
-                    "summary_schedule": "nightly", "summary_interval_hours": 3}
+                    "summary_schedule": "nightly", "summary_interval_hours": 3, "source_priority": []}
+# A higher-priority tracker's latest fix stands for where you are while it is
+# this close to the newest fix from any tracker.
+PRIORITY_FRESH_SECONDS = 900
 MAX_CONNECTED_GAP_SECONDS = 900
 MAX_PLAUSIBLE_SPEED_MPS = 55.6
 # Transit (bus, train) is never guessed from speed; it only comes from a correction.
@@ -814,17 +819,25 @@ class Store:
         interval = float(raw.get("summary_interval_hours", current["summary_interval_hours"]))
         if not interval.is_integer() or not 1 <= interval <= 12:
             raise ValueError("summary_interval_hours must be a whole number from 1 to 12")
+        priority = raw.get("source_priority", current["source_priority"])
+        if not isinstance(priority, list) or len(priority) > 100:
+            raise ValueError("source_priority must be a list of at most 100 source names")
+        priority = list(dict.fromkeys(str(name).strip()[:80] for name in priority if str(name).strip()))
         values = {"speed_strategy": strategy, "reported_speed_offset_kmh": round(offset, 2),
                   "timezone": timezone_name, "places_provider": provider, "stay_min_minutes": int(stay_minutes),
                   "quick_stop_minutes": int(quick_minutes),
                   **{key: round(value, 1) for key, value in speeds.items()},
-                  "summary_schedule": schedule, "summary_interval_hours": int(interval)}
+                  "summary_schedule": schedule, "summary_interval_hours": int(interval),
+                  "source_priority": priority}
         for key, value in values.items():
             self.db.execute("""INSERT INTO app_settings(key,value) VALUES (?,?)
                 ON CONFLICT(key) DO UPDATE SET value=excluded.value""", (key, json.dumps(value)))
         if timezone_name != current["timezone"]:
             # Summaries are derived; days are rebuilt in the new zone when requested.
             self._keep_canonical_daily_summaries(timezone_name)
+        if priority != current["source_priority"]:
+            # Days combine sources at read time; drop what was combined in the old order.
+            self.clear_analysis_cache(commit=False)
         if any(values[key] != current[key] for key in ANALYSIS_DEFAULTS):
             # Stays and their activities are stored; recalculate them under the new rules.
             # Stored summaries go stale through their watermark and are rebuilt when requested.
@@ -892,7 +905,7 @@ class Store:
         settings = self.settings()
         # Stay length and mode speeds change what a day contains.
         analysis = {key: settings[key] for key in ANALYSIS_DEFAULTS}
-        value = ["stay-trips-v12", modes, stay_edits, analysis, self.analysis_watermark(start, end, source),
+        value = ["stay-trips-v12", modes, stay_edits, analysis, settings["source_priority"], self.analysis_watermark(start, end, source),
                  self.analysis_watermark(context_start, context_end, source),
                  event_row["count"], event_row["max_id"], places, reminders, labels]
         return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
@@ -1177,10 +1190,20 @@ class Store:
         return self.db.execute("SELECT COUNT(*) AS n FROM point_observations" + where, args).fetchone()["n"]
 
     def latest(self):
+        """Your latest position: the newest fix, unless a tracker ranked above it
+        (Settings) reported within PRIORITY_FRESH_SECONDS of it."""
         rows = self.observations(limit=1)
         if not rows:
             return None
         point = rows[0]
+        newest = datetime.fromisoformat(point["timestamp"])
+        for source in self.settings()["source_priority"]:
+            if source == point["source"]:
+                break
+            preferred = self.observations(source=source, limit=1)
+            if preferred and (newest - datetime.fromisoformat(preferred[0]["timestamp"])).total_seconds() <= PRIORITY_FRESH_SECONDS:
+                point = preferred[0]
+                break
         point["id"] = point["point_id"]
         point["age_seconds"] = max(0, round((datetime.now(timezone.utc) - datetime.fromisoformat(point["timestamp"])).total_seconds()))
         point["stale"] = point["age_seconds"] > 900

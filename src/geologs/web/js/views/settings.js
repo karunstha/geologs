@@ -6,7 +6,7 @@ import { ago, formatTime, localDateKey, plural, zoneOptions } from "../core/form
 import { state } from "../core/state.js";
 import { actionIcon, onEach } from "../ui/actions.js";
 import { modeIcon, modeInfo, sourceName, statusPill } from "../ui/icons.js";
-import { refreshExplore } from "./history.js";
+import { refreshCurrent, refreshExplore } from "./history.js";
 import { refreshInsights } from "./patterns.js";
 import { showView } from "./shell.js";
 
@@ -344,6 +344,98 @@ function deviceRows(devices) {
     .join("")}</ul>`;
 }
 
+// Trackers most trusted first: the ones you ranked, then any new ones in the order Sources lists them.
+function priorityOrder() {
+  const known = (state.sources?.sources || []).map((item) => item.source);
+  const ranked = (state.settings?.source_priority || []).filter((source) => known.includes(source));
+  return [...ranked, ...known.filter((source) => !ranked.includes(source))];
+}
+
+function trackerLabel(source) {
+  const name = sourceName(source);
+  return name.device ? `${name.kind} · ${name.device}` : name.kind;
+}
+
+const CHEVRON = (direction) =>
+  `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${direction < 0 ? "m6 15 6-6 6 6" : "m6 9 6 6 6-6"}"/></svg>`;
+
+export function renderPriority(focusSource, focusMove) {
+  const list = $("priority-list");
+  if (list.querySelector(".dragging")) return; // the 30 s Sources refresh must not drop a drag in progress
+  const order = priorityOrder();
+  list.hidden = order.length < 2;
+  $("priority-note").hidden = order.length > 1;
+  $("priority-note").textContent = order.length
+    ? "Priority matters once a second tracker sends locations."
+    : "Trackers appear here once they send a location.";
+  list.innerHTML = order
+    .map((source, index) => {
+      const name = sourceName(source),
+        label = trackerLabel(source);
+      return `<li class="priority-item" draggable="true" data-source="${safe(source)}"><span class="drag-handle" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="9" cy="6" r="1.3"/><circle cx="15" cy="6" r="1.3"/><circle cx="9" cy="12" r="1.3"/><circle cx="15" cy="12" r="1.3"/><circle cx="9" cy="18" r="1.3"/><circle cx="15" cy="18" r="1.3"/></svg></span><span class="priority-rank">${index + 1}</span><span class="priority-name" title="${safe(source)}"><strong>${safe(name.kind)}</strong>${name.device ? `<small>${safe(name.device)}</small>` : ""}</span>${index === 0 ? '<span class="status-pill success">Preferred</span>' : ""}<span class="priority-moves"><button type="button" class="icon-button" data-move="-1" aria-label="Move ${safe(label)} up"${index === 0 ? " disabled" : ""}>${CHEVRON(-1)}</button><button type="button" class="icon-button" data-move="1" aria-label="Move ${safe(label)} down"${index === order.length - 1 ? " disabled" : ""}>${CHEVRON(1)}</button></span></li>`;
+    })
+    .join("");
+  list.querySelectorAll("[data-move]").forEach((button) => {
+    button.onclick = () => {
+      const source = button.closest("li").dataset.source;
+      const next = [...order];
+      const from = next.indexOf(source),
+        to = from + +button.dataset.move;
+      next.splice(to, 0, next.splice(from, 1)[0]);
+      savePriority(next, source, button.dataset.move);
+    };
+  });
+  // Keep focus on the tracker you just moved, so arrowing it along works from the keyboard.
+  if (focusSource) {
+    const item = [...list.children].find((li) => li.dataset.source === focusSource);
+    const button = item?.querySelector(`[data-move="${focusMove}"]:not([disabled])`) || item?.querySelector("[data-move]:not([disabled])");
+    button?.focus();
+  }
+}
+
+async function savePriority(order, focusSource, focusMove) {
+  // Trackers that sent nothing lately keep their place at the end of the list.
+  const unseen = (state.settings.source_priority || []).filter((source) => !order.includes(source));
+  try {
+    state.settings = await post("/api/settings", { source_priority: [...order, ...unseen] });
+    renderPriority(focusSource, focusMove);
+    toast(`${trackerLabel(order[0])} is preferred when trackers disagree`);
+    await Promise.all([refreshExplore(false), refreshInsights(), refreshCurrent()]);
+  } catch (error) {
+    toast(error.message);
+    renderPriority();
+  }
+}
+
+function initPriorityDrag() {
+  const list = $("priority-list");
+  let dragged = null;
+  list.addEventListener("dragstart", (event) => {
+    dragged = event.target.closest(".priority-item");
+    if (!dragged) return;
+    dragged.classList.add("dragging");
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", dragged.dataset.source);
+  });
+  list.addEventListener("dragover", (event) => {
+    if (!dragged) return;
+    event.preventDefault();
+    const over = event.target.closest(".priority-item");
+    if (!over || over === dragged) return;
+    const box = over.getBoundingClientRect();
+    over.parentNode.insertBefore(dragged, event.clientY > box.top + box.height / 2 ? over.nextSibling : over);
+  });
+  list.addEventListener("drop", (event) => event.preventDefault());
+  list.addEventListener("dragend", () => {
+    if (!dragged) return;
+    dragged.classList.remove("dragging");
+    dragged = null;
+    const order = [...list.children].map((item) => item.dataset.source);
+    if (order.join("\n") !== priorityOrder().join("\n")) savePriority(order);
+    else renderPriority();
+  });
+}
+
 export function renderSources() {
   const data = state.sources;
   if (!data) return;
@@ -391,6 +483,7 @@ export function renderSources() {
       <div class="tracker-body">${deviceRows(devices)}<div class="tracker-setup"><h4>Set up</h4><div class="copy-field"><input class="input mono" readonly value="${safe(url)}" aria-label="${safe(tracker.name)} address"><button type="button" class="button secondary small" data-copy-endpoint="${safe(url)}">Copy</button></div><ol class="steps">${tracker.steps.map((step) => `<li>${safe(step)}</li>`).join("")}</ol></div></div></details>`;
   }).join("");
   onEach($("tracker-endpoints"), "copy-endpoint", (url) => copyText(url, "Address copied"));
+  renderPriority();
 }
 
 export async function refreshSources() {
@@ -417,6 +510,7 @@ export function updateSpeedSettingsVisibility() {
 }
 
 export function initSettings() {
+  initPriorityDrag();
   for (const [mode] of SPEED_FIELDS)
     $(`speed-${mode}-name`).innerHTML = `${modeIcon(mode)}${safe(modeInfo[mode].noun)}`;
   document.querySelectorAll(".settings-tab").forEach((tab) => (tab.onclick = () => showSettingsPage(tab.dataset.settingsPage)));

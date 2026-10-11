@@ -1252,15 +1252,17 @@ def insights(store, limit=50):
             "observed_stays": len(rows)}
 
 
-def _fuse_sources(day_stays, trips, samples_by_source):
+def _fuse_sources(day_stays, trips, samples_by_source, priority=()):
     """Tell one story when several sources recorded the same day.
 
-    One device can sit at the university while another drives. The source
-    with the most samples is taken whole; other sources fill only the times
-    it has nothing to say, so the timeline never places you in two spots.
+    One device can sit at the university while another drives. The source you
+    ranked highest in Settings (else the one with the most samples) is taken
+    whole; each next source fills only the times those before it have nothing
+    to say, so the timeline never places you in two spots.
     """
+    rank = {name: index for index, name in enumerate(priority)}
     sources = sorted({stay["source"] for stay in day_stays} | {trip["source"] for trip in trips},
-                     key=lambda name: (-samples_by_source.get(name, 0), name))
+                     key=lambda name: (rank.get(name, len(rank)), -samples_by_source.get(name, 0), name))
     if len(sources) < 2:
         return day_stays, trips, sources
     taken, kept_stays, kept_trips, used = [], [], [], []
@@ -1344,7 +1346,8 @@ def day_summary(store, date, timezone_name="UTC", source=None):
     end = (day_end - timedelta(microseconds=1)).isoformat()
     # Switching the places provider in Settings re-resolves every day's names.
     provider = places_provider_identity(store)
-    cache_identity = json.dumps(["day-v15", date, timezone_name, source, provider], separators=(",", ":"))
+    cache_identity = json.dumps(["day-v16", date, timezone_name, source, provider, store.settings()["source_priority"]],
+                                separators=(",", ":"))
     cache_key = "day:" + hashlib.sha256(cache_identity.encode()).hexdigest()
     watermark = store.analysis_watermark(start, end, source)
     cached = store.cached_analysis(cache_key, watermark)
@@ -1357,7 +1360,7 @@ def day_summary(store, date, timezone_name="UTC", source=None):
     unconfirmed = []
     day_stays, trips, timeline_sources = _fuse_sources(
         list(reversed(stays(store, start, end, source=source, limit=None, lookup_places=True, rejected=unconfirmed))),
-        anchored_trips(store, start, end, source), samples_by_source)
+        anchored_trips(store, start, end, source), samples_by_source, store.settings()["source_priority"])
     # Stops the detector found but no place confirmed, for you to keep or ignore;
     # none you already added or removed by hand.
     edits = store.stay_edits(start, end, source)

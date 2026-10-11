@@ -1286,6 +1286,31 @@ class StoreTests(unittest.TestCase):
         self.assertEqual([(stay["started_at"], stay["ended_at"]) for stay in campus],
                          [("2026-09-27T13:41:00+00:00", "2026-09-27T17:59:00+00:00")])
 
+    def test_tracker_priority_decides_conflicting_sources(self):
+        # A tablet left at home all afternoon sends more samples than the phone you carried to campus.
+        tablet = minute_fixes([still(HOME, 200)], source="old_tablet", start=datetime(2026, 9, 27, 14, tzinfo=timezone.utc))
+        phone = minute_fixes([still(CAMPUS, 180)], source="phone", start=datetime(2026, 9, 27, 14, 10, tzinfo=timezone.utc))
+        self.store.ingest(tablet + phone)
+        with patch("geologs.analysis.place_for_coordinate", side_effect=campus_label):
+            busiest = day_summary(self.store, "2026-09-27", "UTC")
+            self.store.save_settings({"source_priority": ["phone", "old_tablet"]})
+            ranked = day_summary(self.store, "2026-09-27", "UTC")
+        self.assertEqual((busiest["timeline_sources"][0], ranked["timeline_sources"][0]), ("old_tablet", "phone"))
+        self.assertIn("University", [stay["display_name"] for stay in ranked["stays"]])
+        self.assertEqual(self.store.settings()["source_priority"], ["phone", "old_tablet"])
+        with self.assertRaises(ValueError):
+            self.store.save_settings({"source_priority": "phone"})
+
+    def test_current_location_prefers_the_top_tracker_while_it_is_fresh(self):
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        self.store.ingest([{"source": "phone", "timestamp": (now - timedelta(minutes=5)).isoformat(), "lat": CAMPUS[0], "lon": CAMPUS[1]},
+                           {"source": "tablet", "timestamp": now.isoformat(), "lat": HOME[0], "lon": HOME[1]}])
+        self.assertEqual(self.store.latest()["source"], "tablet")  # newest wins without a priority
+        self.store.save_settings({"source_priority": ["phone"]})
+        self.assertEqual(self.store.latest()["source"], "phone")
+        self.store.ingest({"source": "tablet", "timestamp": (now + timedelta(minutes=20)).isoformat(), "lat": HOME[0], "lon": HOME[1]})
+        self.assertEqual(self.store.latest()["source"], "tablet")  # the phone has gone quiet for 25 minutes
+
     def test_coverage_gap_between_different_places_is_still_reported(self):
         # Silent overnight and the next fix 300 km away: no way to know when you left.
         far = shifted(HOME, 300000, 0)
