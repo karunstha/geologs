@@ -19,4 +19,4 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
-geologs = ["web/*.html", "web/css/*.css", "web/css/*/*.css", "web/js/*.js", "web/js/*/*.js"]
+geologs = ["web/*.html", "web/css/*.css", "web/css/*/*.css", "web/js/*.js", "web/js/*/*.js", "web/ha/*.yaml"]

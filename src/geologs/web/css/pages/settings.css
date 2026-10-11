@@ -531,3 +531,111 @@
     display: none;
   }
 }
+/* Configured or not: quiet text with a tick, never shaped like a button. */
+.config-state {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-3);
+  font-size: 12.5px;
+  font-weight: 560;
+  white-space: nowrap;
+}
+.config-state svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.config-state.ready {
+  color: var(--success);
+}
+/* One list for trackers: health, details, order, and removal. */
+.trackers-help {
+  margin: -4px 0 12px;
+}
+.priority-item .health-dot {
+  margin-top: 0;
+}
+.priority-item .priority-name small {
+  white-space: normal;
+}
+.priority-list.single .priority-item {
+  padding-left: 12px;
+}
+.device-list li > span:nth-child(2) {
+  flex: 1;
+  min-width: 0;
+}
+.device-list .icon-button {
+  flex: none;
+  margin-top: -4px;
+}
+/* Copyable configuration for Home Assistant. */
+.steps.rich li {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.steps code,
+.tracker-setup .help code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--surface-3);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+}
+.code-block {
+  position: relative;
+  min-width: 0;
+}
+.code-block pre {
+  margin: 0;
+  padding: 12px 74px 12px 12px;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre;
+}
+.code-block .button {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+}
+.ha-import {
+  align-self: flex-start;
+  text-decoration: none;
+}
+.tracker-setup > .help {
+  margin-top: 12px;
+}
+/* Long configuration lines scroll inside their block instead of widening the card. */
+.tracker-body,
+.tracker-setup,
+.tracker-setup > *,
+.steps.rich li,
+.steps.rich li > * {
+  min-width: 0;
+  max-width: 100%;
+}
+@media (max-width: 760px) {
+  /* The name gets the row; order and remove sit beneath it, on the right. */
+  .priority-item {
+    flex-wrap: wrap;
+    row-gap: 2px;
+  }
+  .priority-item .priority-name {
+    flex: 1 1 calc(100% - 90px);
+  }
+  .priority-moves {
+    margin-left: auto;
+  }
+}

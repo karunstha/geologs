@@ -18,11 +18,12 @@ from urllib.parse import parse_qs, urlparse
 from .ingest import FORMATS as INGEST_FORMATS, claimed_source
 
 from .core import PLACES_PROVIDERS, Store, configured_places_providers, current_location, deliver_webhook, geocode, nearby_places, place_details, places_provider, reverse_geocode, save_place_label
-from .analysis import daily_briefs, daily_overview, day_summary, delete_samples, insights, place_overview, stored_daily_record, place_patterns, predict_next, resolve_place_patterns, save_scheduled_summaries, search_visits, stays, transitions, visited_places
+from .analysis import daily_briefs, daily_overview, day_summary, delete_samples, delete_source, insights, place_overview, stored_daily_record, place_patterns, predict_next, resolve_place_patterns, save_scheduled_summaries, search_visits, stays, transitions, visited_places
 from .mcp import SUPPORTED_VERSIONS, dispatch
 from .postgres import INTEGRITY_ERRORS
 
-WEB_TYPES = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8"}
+WEB_TYPES = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8",
+             ".yaml": "text/yaml; charset=utf-8"}
 DB_INPUT_ERRORS = (ValueError, KeyError, TypeError, sqlite3.IntegrityError) + INTEGRITY_ERRORS
 
 
@@ -163,7 +164,8 @@ class Handler(BaseHTTPRequestHandler):
         return any(secrets.compare_digest(value, token) for value in supplied for token in (main, ingest) if token)
 
     def send_web_file(self, path):
-        """The browser app: index.html, and stylesheets and modules under /css/ and /js/."""
+        """The browser app: index.html, stylesheets and modules under /css/ and /js/, and the Home
+        Assistant blueprint under /ha/ (public: Home Assistant fetches it, and it holds no secrets)."""
         relative = "index.html" if path == "/" else path.lstrip("/")
         parts = relative.split("/")
         kind = WEB_TYPES.get(Path(relative).suffix)
@@ -282,7 +284,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         url = urlparse(self.path)
-        if url.path == "/" or url.path.startswith(("/css/", "/js/")):
+        if url.path == "/" or url.path.startswith(("/css/", "/js/", "/ha/")):
             self.send_web_file(url.path)
             return
         if url.path == "/mcp":
@@ -437,6 +439,10 @@ class Handler(BaseHTTPRequestHandler):
                 deliver_webhook(store, result["events"])
                 last = payload[-1] if isinstance(payload, list) and payload else payload
                 store.record_ingest("api", 200, None, str((last or {}).get("source") or "manual")[:80], result["inserted"])
+            elif path == "/api/sources/delete":
+                result = delete_source(store, payload.get("source"), payload.get("confirm") is True)
+            elif path == "/api/ingest-devices/delete":
+                result = store.delete_ingest_device(payload["kind"], payload.get("device") or "")
             elif path == "/api/observations/delete":
                 result = delete_samples(store, payload.get("ids") or [], payload.get("confirm") is True)
             elif path == "/api/settings": result = store.save_settings(payload)

@@ -1873,3 +1873,27 @@ def delete_samples(store, ids, confirm=False):
         if store.stored_daily_overview(date, timezone_name) is not None:
             daily_overview(store, date, timezone_name)
     return {**preview, "deleted": True}
+
+
+def delete_source(store, source, confirm=False):
+    """Preview, or with confirm=True permanently remove, a tracker and all its samples.
+
+    Stored summaries of the days it recorded are rebuilt (or dropped when
+    nothing is left), as for deleted samples.
+    """
+    plan = store.source_deletion(str(source or "").strip())
+    timezone_name = store.settings()["timezone"]
+    zone = ZoneInfo(timezone_name)
+    first = datetime.fromisoformat(plan["first"]).astimezone(zone).date()
+    last = datetime.fromisoformat(plan["last"]).astimezone(zone).date()
+    dates = [row["summary_date"] for row in store._rows("""SELECT summary_date FROM daily_summaries
+        WHERE timezone=? AND source='' AND summary_date>=? AND summary_date<=? ORDER BY summary_date""",
+        (timezone_name, first.isoformat(), last.isoformat()))]
+    preview = {**plan, "days": (last - first).days + 1, "stored_summaries": len(dates)}
+    if not confirm:
+        return {**preview, "deleted": False}
+    store.delete_source(plan["source"])
+    store.db.commit()
+    for date in dates:
+        daily_overview(store, date, timezone_name)
+    return {**preview, "deleted": True}

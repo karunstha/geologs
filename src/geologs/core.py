@@ -1151,6 +1151,41 @@ class Store:
                 "sources": sorted({row["source"] for row in rows}), "first": timestamps[0], "last": timestamps[-1],
                 "timestamps": timestamps, "reminder_triggers": triggers}
 
+    def source_deletion(self, source):
+        """What removing a tracker would remove: all its samples, and the reminder triggers they caused."""
+        row = self.db.execute("""SELECT COUNT(*) AS samples,MIN(timestamp) AS first,MAX(timestamp) AS last
+            FROM point_observations WHERE source=?""", (source,)).fetchone()
+        if not row["samples"]:
+            raise ValueError("that tracker has no samples")
+        triggers = self._rows("""SELECT e.triggered_at,r.text AS reminder FROM events e JOIN reminders r ON r.id=e.reminder_id
+            JOIN points p ON p.id=e.point_id WHERE p.source=? ORDER BY e.triggered_at""", (source,))
+        return {"source": source, "samples": row["samples"], "first": row["first"], "last": row["last"],
+                "reminder_triggers": triggers}
+
+    def delete_source(self, source):
+        """Remove a tracker and everything derived from it, without committing."""
+        for table in ("timeline_fixes", "observed_stays_v2", "stay_observation_state", "stay_edits", "mode_overrides"):
+            self.db.execute(f"DELETE FROM {table} WHERE source=?", (source,))
+        self.db.execute("DELETE FROM place_labels WHERE source=? AND started_at IS NOT NULL", (source,))
+        self.db.execute("DELETE FROM events WHERE point_id IN (SELECT id FROM points WHERE source=?)", (source,))
+        self.db.execute("DELETE FROM observed_stays WHERE source=?", (source,))
+        self.db.execute("DELETE FROM point_observations WHERE source=?", (source,))
+        self.db.execute("DELETE FROM source_state WHERE source=?", (source,))
+        self.db.execute("DELETE FROM points WHERE source=?", (source,))
+        priority = self.settings()["source_priority"]
+        if source in priority:
+            self.db.execute("UPDATE app_settings SET value=? WHERE key='source_priority'",
+                            (json.dumps([name for name in priority if name != source]),))
+        self.clear_analysis_cache(commit=False)
+
+    def delete_ingest_device(self, kind, device):
+        """Forget a tracker app's device status row (a failed or retired phone); its samples stay."""
+        result = self.db.execute("DELETE FROM ingest_devices WHERE kind=? AND device=?", (str(kind), str(device or "")))
+        if not result.rowcount:
+            raise ValueError("that device is already gone")
+        self.db.commit()
+        return {"deleted": True}
+
     def delete_samples(self, plan):
         """Remove the samples in a sample_deletion() plan without committing.
 

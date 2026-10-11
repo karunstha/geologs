@@ -195,13 +195,10 @@
           <section id="settings-sources" class="settings-section" aria-labelledby="sources-title">
             <div class="section-intro"><h2 id="sources-title">Devices</h2><p>The phones and apps sending locations, whether they are getting through, and how to connect another.</p></div>
             <div class="card">
-              <div class="card-head"><div><h3>Location sources</h3><p id="sources-summary">Checking…</p></div><button id="refresh-sources" class="button secondary small" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12a7 7 0 1 1-2.1-5M19 4v4h-4"/></svg><span>Refresh</span></button></div>
-              <div id="source-list" class="list rows source-list" aria-live="polite"></div>
-            </div>
-            <div class="card">
-              <div class="card-head"><div><h3>Tracker priority</h3><p>When trackers disagree about the same moment, the one higher up wins; the others fill only the times it has nothing to say. Drag to reorder.</p></div></div>
-              <ol id="priority-list" class="priority-list" aria-label="Trackers, most trusted first"></ol>
-              <p id="priority-note" class="help" hidden></p>
+              <div class="card-head"><div><h3>Trackers</h3><p id="sources-summary">Checking…</p></div><button id="refresh-sources" class="button secondary small" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12a7 7 0 1 1-2.1-5M19 4v4h-4"/></svg><span>Refresh</span></button></div>
+              <p id="priority-help" class="help trackers-help">Most trusted first. When trackers disagree about the same moment, the higher one wins; the others only fill times it has nothing to say. Drag or use the arrows to reorder.</p>
+              <ol id="priority-list" class="priority-list" aria-label="Trackers, most trusted first" aria-live="polite"></ol>
+              <div id="priority-note" class="empty-block" hidden><strong>No trackers yet</strong><span>Locations appear here as soon as a device sends one. Connect an app below.</span></div>
             </div>
             <div class="card">
               <div class="card-head"><div><h3>Connect a tracker app</h3><p>Phones send locations straight here, with no polling. Use an address your phone can reach, such as HTTPS or a private network like Tailscale.</p></div></div>

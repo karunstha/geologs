@@ -2323,6 +2323,42 @@ class IngestTests(LiveServerCase):
         self.assertEqual({point["source"] for point in self.points()}, {"osmand:pixel"})
         self.assertAlmostEqual(speeds[41.0], 5.14444, places=4)  # 10 knots
 
+    def test_home_assistant_blueprint_is_public_and_its_payload_is_accepted(self):
+        status, body, response = self.send("GET", "/ha/geologs-location.yaml")
+        self.assertEqual((status, response.getheader("Content-Type")), (200, "text/yaml; charset=utf-8"))
+        self.assertIn(b"rest_command.geologs_location", body)
+        self.assertIn(b'source: "home_assistant:{{ trigger.entity_id }}"', body)
+        # What the REST command sends, as rendered by Home Assistant (no accuracy on this tracker).
+        sent = {"source": "home_assistant:device_tracker.phone", "timestamp": "2026-10-11T18:00:00.123456+00:00",
+                "external_id": "2026-10-11T18:00:00.123456+00:00", "lat": 34.74, "lon": -92.37, "accuracy": None}
+        for _ in range(2):  # Home Assistant may resend after a restart; the repeat is recognised
+            status, _, _ = self.send("POST", "/api/ingest/generic", sent, {"Authorization": "Bearer phone-token"})
+            self.assertEqual(status, 200)
+        self.assertEqual([(point["source"], point["lat"]) for point in self.points()],
+                         [("home_assistant:device_tracker.phone", 34.74)])
+
+    def test_forgetting_a_failed_device_and_removing_a_tracker(self):
+        self.send("POST", "/api/ingest/generic?device=old", {"lat": 1, "lon": 2}, {"Authorization": "Bearer wrong"})
+        self.send("POST", "/api/ingest/generic?device=phone", {"lat": 41, "lon": -87.9}, {"Authorization": "Bearer phone-token"})
+        auth = {"Authorization": "Bearer main-token"}
+        _, sources, _ = self.send("GET", "/api/sources", headers=auth)
+        self.assertEqual(sorted(device["device"] for device in sources["devices"]), ["generic:old", "generic:phone"])
+        status, _, _ = self.send("POST", "/api/ingest-devices/delete", {"kind": "generic", "device": "generic:old"}, auth)
+        self.assertEqual(status, 200)
+        _, sources, _ = self.send("GET", "/api/sources", headers=auth)
+        self.assertEqual([device["device"] for device in sources["devices"]], ["generic:phone"])
+        # Removing a tracker previews first, then deletes its samples and its place in the priority list.
+        self.send("POST", "/api/settings", {"source_priority": ["generic:phone", "other"]}, auth)
+        _, preview, _ = self.send("POST", "/api/sources/delete", {"source": "generic:phone"}, auth)
+        self.assertEqual((preview["samples"], preview["deleted"], len(self.points())), (1, False, 1))
+        _, done, _ = self.send("POST", "/api/sources/delete", {"source": "generic:phone", "confirm": True}, auth)
+        self.assertTrue(done["deleted"])
+        self.assertEqual(self.points(), [])
+        _, settings, _ = self.send("GET", "/api/settings", headers=auth)
+        self.assertEqual(settings["source_priority"], ["other"])
+        status, _, _ = self.send("POST", "/api/sources/delete", {"source": "generic:phone"}, auth)
+        self.assertEqual(status, 400)
+
     def test_generic_form_query_and_json(self):
         headers = {"Authorization": "Bearer phone-token"}
         form = b"lat=41&lon=-87.9&timestamp=1790514000000&accuracy=7&speed_kmh=18&device=tasker"

@@ -1,0 +1,42 @@
+blueprint:
+  name: Send locations to GeoLogs
+  description: >-
+    Sends each new position of the trackers you pick to GeoLogs the moment
+    Home Assistant updates it, so there is nothing to poll. It needs the
+    `rest_command.geologs_location` service; GeoLogs shows the few lines to
+    add under Settings → Devices → Home Assistant.
+  domain: automation
+  input:
+    trackers:
+      name: Trackers
+      description: The device trackers whose locations GeoLogs should keep.
+      selector:
+        entity:
+          filter:
+            - domain: device_tracker
+          multiple: true
+
+mode: queued
+max: 50
+
+trigger:
+  # With no to/from, a state trigger also fires when only the position attributes change.
+  - platform: state
+    entity_id: !input trackers
+
+condition:
+  - condition: template
+    value_template: >-
+      {{ trigger.to_state is not none
+         and trigger.to_state.attributes.latitude is number
+         and trigger.to_state.attributes.longitude is number }}
+
+action:
+  - service: rest_command.geologs_location
+    data:
+      # Named like the GeoLogs poller's sources, so history continues and repeats are recognised.
+      source: "home_assistant:{{ trigger.entity_id }}"
+      timestamp: "{{ trigger.to_state.last_updated.isoformat() }}"
+      lat: "{{ trigger.to_state.attributes.latitude }}"
+      lon: "{{ trigger.to_state.attributes.longitude }}"
+      accuracy: "{{ trigger.to_state.attributes.gps_accuracy | default('null', true) }}"

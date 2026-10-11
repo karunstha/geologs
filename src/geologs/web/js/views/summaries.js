@@ -62,11 +62,12 @@ export async function refreshSummaries() {
   const index = $("summary-index");
   index.innerHTML =
     catalogMarkup(state.summaryCatalog) ||
-    '<div class="empty-block"><strong>No saved days yet</strong><span>Each day is saved after midnight. You can also open any past date above.</span></div>';
+    '<div class="empty-block"><strong>No saved days yet</strong><span>Open any day above and its summary is saved.</span></div>';
   index.querySelectorAll("[data-summary]").forEach((button) => {
     button.onclick = () => openSummary(button.dataset.summary, true);
   });
-  if (!state.summaryDate && state.summaryCatalog[0]) openSummary(state.summaryCatalog[0].date);
+  // The tab opens on today (saved now, so it is current), else the latest saved day.
+  if (!state.summaryDate) openSummary(localDateKey(), false, true);
 }
 
 function markSelected(date) {
@@ -79,7 +80,7 @@ function markSelected(date) {
 }
 
 // Show a saved day, or build it when it isn't saved yet. A day with nothing recorded is never stored.
-export async function openSummary(date, reveal = false) {
+export async function openSummary(date, reveal = false, fallback = false) {
   state.summaryDate = date;
   $("summary-date").value = date;
   markSelected(date);
@@ -91,22 +92,20 @@ export async function openSummary(date, reveal = false) {
       behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
       block: "start",
     });
-  const stored = () => api("/api/daily-summary/stored?" + new URLSearchParams({ date }));
   try {
-    let record;
-    try {
-      record = await stored();
-    } catch (error) {
-      if (!/no summary is stored/.test(error.message)) throw error;
-      const built = await api("/api/daily-summary?" + new URLSearchParams({ date }));
-      if (state.summaryDate !== date) return;
-      if (!(built.totals?.raw_fixes > 0)) {
-        renderNothingRecorded(date);
-        return;
-      }
-      record = await stored();
-      await refreshSummaries();
+    // Opening a day brings its summary up to date, whatever the schedule: building
+    // reuses the saved record when nothing changed, so this is cheap.
+    const known = state.summaryCatalog?.some((item) => item.date === date);
+    const built = await api("/api/daily-summary?" + new URLSearchParams({ date }));
+    if (state.summaryDate !== date) return;
+    if (!(built.totals?.raw_fixes > 0)) {
+      if (fallback && state.summaryCatalog?.[0]) return openSummary(state.summaryCatalog[0].date);
+      renderNothingRecorded(date);
+      return;
     }
+    const record = await api("/api/daily-summary/stored?" + new URLSearchParams({ date }));
+    if (state.summaryDate !== date) return;
+    if (!known) await refreshSummaries();
     renderSummaryDetail(record);
   } catch (error) {
     if (state.summaryDate !== date) return;

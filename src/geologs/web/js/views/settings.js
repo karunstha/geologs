@@ -188,6 +188,14 @@ function renderSummarySchedule() {
   $("summary-interval").value = String(state.settings.summary_interval_hours || 3);
 }
 
+// Whether something is configured: plain text with a tick, so it never reads as a button.
+function configState(ready, text, title = "") {
+  const icon = ready
+    ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg>'
+    : '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 8v4.5M12 16h.01"/></svg>';
+  return `<span class="config-state${ready ? " ready" : ""}"${title ? ` title="${safe(title)}"` : ""}>${icon}${safe(text)}</span>`;
+}
+
 const PROVIDER_NOTES = {
   geoapify: "Free plan with 3,000 lookups a day.",
   mapbox: "Generous free tier. Its terms allow names for temporary use only.",
@@ -214,8 +222,8 @@ export function renderPlacesProvider() {
       const available = option.configured || option.id === chosen;
       const pill = option.id
         ? option.configured
-          ? statusPill("success", "Set up")
-          : `<span class="status-pill neutral" title="Add ${safe(option.env)} to .env and restart">Needs ${safe(option.env)}</span>`
+          ? configState(true, "Key added")
+          : configState(false, `Needs ${option.env}`, `Add ${option.env} to .env and restart`)
         : "";
       return `<label class="choice-card${available ? "" : " unavailable"}"><input type="radio" name="places-provider" value="${safe(option.id)}"${option.id === chosen ? " checked" : ""}${available ? "" : " disabled"}><span class="choice-body"><strong>${safe(option.label)}</strong><small>${safe(option.note)}</small></span>${pill}</label>`;
     })
@@ -283,15 +291,43 @@ export const TRACKERS = [
     ],
   },
   {
-    kind: "api",
-    name: "Home Assistant poller & API",
-    platform: "POST /api/points",
-    path: "/api/points",
-    steps: [
-      "Run ./geologs poll-ha from cron to read a Home Assistant device tracker, or POST JSON points with a Bearer token.",
-    ],
+    kind: "home_assistant",
+    name: "Home Assistant",
+    platform: "Sends each position the moment it changes",
+    path: "/api/ingest/generic",
+    setup: homeAssistantSetup,
   },
 ];
+
+const HA_BLUEPRINT_PATH = "/ha/geologs-location.yaml";
+
+// One REST command and a blueprint: no polling, and positions arrive as Home Assistant sees them.
+function homeAssistantSetup() {
+  const origin = location.origin;
+  const command = `rest_command:
+  geologs_location:
+    url: "${origin}/api/ingest/generic"
+    method: post
+    headers:
+      authorization: !secret geologs_authorization
+    content_type: application/json
+    payload: >-
+      {"source": "{{ source }}", "timestamp": "{{ timestamp }}", "external_id": "{{ timestamp }}",
+       "lat": {{ lat }}, "lon": {{ lon }}, "accuracy": {{ accuracy }}}`;
+  const secret = 'geologs_authorization: "Bearer YOUR_PHONE_TOKEN"';
+  const importUrl =
+    "https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=" + encodeURIComponent(origin + HA_BLUEPRINT_PATH);
+  const block = (label, text) =>
+    `<div class="code-block"><pre class="mono" aria-label="${safe(label)}">${safe(text)}</pre><button type="button" class="button secondary small" data-copy-text="${safe(text)}">Copy</button></div>`;
+  return `<ol class="steps rich">
+    <li><span>Add this to <code>configuration.yaml</code>:</span>${block("REST command for configuration.yaml", command)}</li>
+    <li><span>Add your phone token to <code>secrets.yaml</code>:</span>${block("Line for secrets.yaml", secret)}</li>
+    <li><span>Restart Home Assistant, or reload <strong>REST commands</strong> under Developer tools → YAML.</span></li>
+    <li><span>Import the automation, then choose <strong>Create automation</strong> and pick your trackers:</span>
+      <a class="button primary small ha-import" href="${safe(importUrl)}" target="_blank" rel="noopener">Import into Home Assistant</a></li>
+  </ol>
+  <p class="help">Home Assistant fetches the blueprint from <a href="${safe(HA_BLUEPRINT_PATH)}" target="_blank" rel="noopener">${safe(origin + HA_BLUEPRINT_PATH)}</a>, so it must be able to reach this address; if it can't, download that file and import it by hand. Positions arrive under the same names as <code>./geologs poll-ha</code>, so history continues: stop that cron job once this works.</p>`;
+}
 
 function failing(device) {
   return (
@@ -339,7 +375,7 @@ function deviceRows(devices) {
           ]
             .filter(Boolean)
             .join(" · ");
-      return `<li><span class="health-dot ${tone}" aria-hidden="true"></span><span><strong>${safe(deviceLabel(device))}</strong><small title="${safe(formatTime(device.last_attempt_at))}">${safe(detail)}</small></span></li>`;
+      return `<li><span class="health-dot ${tone}" aria-hidden="true"></span><span><strong>${safe(deviceLabel(device))}</strong><small title="${safe(formatTime(device.last_attempt_at))}">${safe(detail)}</small></span><button type="button" class="icon-button" data-forget-device="${safe(JSON.stringify([device.kind, device.device]))}" aria-label="Forget ${safe(deviceLabel(device))}" title="Forget this device">${actionIcon("cancel")}</button></li>`;
     })
     .join("")}</ul>`;
 }
@@ -359,20 +395,46 @@ function trackerLabel(source) {
 const CHEVRON = (direction) =>
   `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${direction < 0 ? "m6 15 6-6 6 6" : "m6 9 6 6 6-6"}"/></svg>`;
 
+// Health follows the newest fix itself: an old backfill that arrived a minute ago is not live.
+function sourceHealth(item) {
+  const age = Date.now() - Date.parse(item.last_fix);
+  return age < 3600e3 ? ["success", "Live"] : age < 86400e3 ? ["warning", "Quiet"] : ["neutral", "Idle"];
+}
+
+function sourceDetails(item) {
+  const lag = (Date.parse(item.last_received) - Date.parse(item.last_fix)) / 60000;
+  return [
+    `received ${ago(item.last_received)}`,
+    lag > 15 ? `newest fix from ${formatTime(item.last_fix)}` : "",
+    `${Number(item.fixes_24h).toLocaleString()} in the last 24 h`,
+    `${Number(item.fixes).toLocaleString()} since ${new Date(item.first_fix).toLocaleDateString(undefined, { month: "short", year: "numeric", ...zoneOptions() })}`,
+  ].filter(Boolean);
+}
+
+// Every tracker, most trusted first, with its health; reorder by dragging or the arrows.
 export function renderPriority(focusSource, focusMove) {
   const list = $("priority-list");
   if (list.querySelector(".dragging")) return; // the 30 s Sources refresh must not drop a drag in progress
   const order = priorityOrder();
-  list.hidden = order.length < 2;
-  $("priority-note").hidden = order.length > 1;
-  $("priority-note").textContent = order.length
-    ? "Priority matters once a second tracker sends locations."
-    : "Trackers appear here once they send a location.";
+  const bySource = new Map((state.sources?.sources || []).map((item) => [item.source, item]));
+  const several = order.length > 1;
+  list.hidden = !order.length;
+  list.classList.toggle("single", !several);
+  $("priority-note").hidden = !!order.length;
+  $("priority-help").textContent = several
+    ? "Most trusted first. When trackers disagree about the same moment, the higher one wins; the others only fill times it has nothing to say. Drag or use the arrows to reorder."
+    : "Once a second tracker sends locations, you can choose which one wins when they disagree.";
+  $("priority-help").hidden = !order.length;
   list.innerHTML = order
     .map((source, index) => {
       const name = sourceName(source),
-        label = trackerLabel(source);
-      return `<li class="priority-item" draggable="true" data-source="${safe(source)}"><span class="drag-handle" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="9" cy="6" r="1.3"/><circle cx="15" cy="6" r="1.3"/><circle cx="9" cy="12" r="1.3"/><circle cx="15" cy="12" r="1.3"/><circle cx="9" cy="18" r="1.3"/><circle cx="15" cy="18" r="1.3"/></svg></span><span class="priority-rank">${index + 1}</span><span class="priority-name" title="${safe(source)}"><strong>${safe(name.kind)}</strong>${name.device ? `<small>${safe(name.device)}</small>` : ""}</span>${index === 0 ? '<span class="status-pill success">Preferred</span>' : ""}<span class="priority-moves"><button type="button" class="icon-button" data-move="-1" aria-label="Move ${safe(label)} up"${index === 0 ? " disabled" : ""}>${CHEVRON(-1)}</button><button type="button" class="icon-button" data-move="1" aria-label="Move ${safe(label)} down"${index === order.length - 1 ? " disabled" : ""}>${CHEVRON(1)}</button></span></li>`;
+        label = trackerLabel(source),
+        item = bySource.get(source);
+      const [tone, health] = sourceHealth(item);
+      const moves = several
+        ? `<button type="button" class="icon-button" data-move="-1" aria-label="Move ${safe(label)} up"${index === 0 ? " disabled" : ""}>${CHEVRON(-1)}</button><button type="button" class="icon-button" data-move="1" aria-label="Move ${safe(label)} down"${index === order.length - 1 ? " disabled" : ""}>${CHEVRON(1)}</button>`
+        : "";
+      return `<li class="priority-item" draggable="${several}" data-source="${safe(source)}">${several ? `<span class="drag-handle" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="9" cy="6" r="1.3"/><circle cx="15" cy="6" r="1.3"/><circle cx="9" cy="12" r="1.3"/><circle cx="15" cy="12" r="1.3"/><circle cx="9" cy="18" r="1.3"/><circle cx="15" cy="18" r="1.3"/></svg></span><span class="priority-rank" title="${index === 0 ? "Preferred when trackers disagree" : ""}">${index + 1}</span>` : ""}<span class="health-dot ${tone}" title="${health}" aria-hidden="true"></span><span class="priority-name" title="${safe(source)}"><strong>${safe(name.kind)}${name.device ? ` <span class="muted">· ${safe(name.device)}</span>` : ""}</strong><small>${safe([health, ...sourceDetails(item)].join(" · "))}</small></span><span class="priority-moves">${moves}<button type="button" class="icon-button danger" data-remove-source aria-label="Remove ${safe(label)} and its data" title="Remove this tracker">${actionIcon("delete")}</button></span></li>`;
     })
     .join("");
   list.querySelectorAll("[data-move]").forEach((button) => {
@@ -385,12 +447,64 @@ export function renderPriority(focusSource, focusMove) {
       savePriority(next, source, button.dataset.move);
     };
   });
+  list.querySelectorAll("[data-remove-source]").forEach((button) => {
+    button.onclick = () => removeTracker(button.closest("li").dataset.source);
+  });
   // Keep focus on the tracker you just moved, so arrowing it along works from the keyboard.
   if (focusSource) {
     const item = [...list.children].find((li) => li.dataset.source === focusSource);
     const button = item?.querySelector(`[data-move="${focusMove}"]:not([disabled])`) || item?.querySelector("[data-move]:not([disabled])");
     button?.focus();
   }
+}
+
+// Removing a tracker deletes its history, so say exactly what goes before doing it.
+async function removeTracker(source) {
+  let preview;
+  try {
+    preview = await post("/api/sources/delete", { source });
+  } catch (error) {
+    toast(error.message);
+    return;
+  }
+  const label = trackerLabel(source);
+  const span = `${new Date(preview.first).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric", ...zoneOptions() })} – ${new Date(preview.last).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric", ...zoneOptions() })}`;
+  $("delete-samples-title").textContent = `Remove ${label}?`;
+  $("delete-samples-summary").textContent = `${plural(preview.samples, "sample")} · ${span}`;
+  $("delete-samples-effects").innerHTML = [
+    `<strong>This can't be undone.</strong> All of this tracker's samples are deleted, with the stays, trips, and corrections made from them.`,
+    preview.stored_summaries
+      ? `${plural(preview.stored_summaries, "saved daily summary", "saved daily summaries")} are rebuilt from your other trackers.`
+      : "No saved daily summaries depend on it.",
+    "If the device sends again, it comes back as a new tracker. To stop it, turn it off in its app.",
+  ]
+    .map((line) => `<li>${line}</li>`)
+    .join("");
+  const triggers = preview.reminder_triggers;
+  $("delete-samples-reminders").hidden = !triggers.length;
+  $("delete-samples-reminders").innerHTML = triggers.length
+    ? `<strong>It set off ${plural(triggers.length, "reminder")}</strong><span>Those triggers are removed from the reminder inbox; the reminders themselves are unchanged.</span>`
+    : "";
+  const button = $("confirm-delete-samples");
+  button.textContent = `Remove tracker`;
+  button.disabled = false;
+  button.onclick = async () => {
+    button.disabled = true;
+    button.textContent = "Removing…";
+    try {
+      await post("/api/sources/delete", { source, confirm: true });
+      $("delete-samples-dialog").close();
+      state.settings = await api("/api/settings");
+      await refreshSources();
+      await Promise.all([refreshExplore(false), refreshInsights(), refreshCurrent()]);
+      toast(`Removed ${label}`);
+    } catch (error) {
+      button.disabled = false;
+      button.textContent = "Try again";
+      toast(error.message);
+    }
+  };
+  $("delete-samples-dialog").showModal();
 }
 
 async function savePriority(order, focusSource, focusMove) {
@@ -444,34 +558,15 @@ export function renderSources() {
   $("sources-summary").textContent = sources.length
     ? `${plural(sources.length, "source")} · last location received ${ago(newest.last_received)}`
     : "No locations received yet. Connect an app below.";
-  $("source-list").innerHTML =
-    sources
-      .map((item) => {
-        // Health follows the newest fix itself: an old backfill that arrived a minute ago is not live.
-        const age = Date.now() - Date.parse(item.last_fix),
-          tone = age < 3600e3 ? "success" : age < 86400e3 ? "warning" : "neutral";
-        const name = sourceName(item.source);
-        const lag = (Date.parse(item.last_received) - Date.parse(item.last_fix)) / 60000;
-        const details = [
-          `received ${ago(item.last_received)}`,
-          lag > 15 ? `newest fix from ${formatTime(item.last_fix)}` : "",
-          `${Number(item.fixes_24h).toLocaleString()} in the last 24 h`,
-          `${Number(item.fixes).toLocaleString()} since ${new Date(item.first_fix).toLocaleDateString(undefined, { month: "short", year: "numeric", ...zoneOptions() })}`,
-        ].filter(Boolean);
-        return `<div class="list-item"><div class="place-main"><span class="health-dot ${tone}" aria-hidden="true"></span><div><strong>${safe(name.kind)}${name.device ? ` <span class="muted">· ${safe(name.device)}</span>` : ""}</strong><small>${safe(details.join(" · "))}</small></div></div>${statusPill(tone, tone === "success" ? "Live" : tone === "warning" ? "Quiet" : "Idle")}</div>`;
-      })
-      .join("") ||
-    '<div class="empty-block"><strong>No sources yet</strong><span>Locations appear here as soon as a device sends one.</span></div>';
   const byKind = new Map();
   for (const device of data.devices || []) {
-    if (!byKind.has(device.kind)) byKind.set(device.kind, []);
-    byKind.get(device.kind).push(device);
+    // Home Assistant sends through the generic endpoint (the blueprint) or the API (the poller).
+    const kind = device.kind === "api" || String(device.device || "").startsWith("home_assistant:") ? "home_assistant" : device.kind;
+    if (!byKind.has(kind)) byKind.set(kind, []);
+    byKind.get(kind).push(device);
   }
   $("ingest-token-note").hidden = !!data.ingest_token;
-  $("access-ingest-badge").innerHTML = statusPill(
-    data.ingest_token ? "success" : "warning",
-    data.ingest_token ? "Set up" : "Not set",
-  );
+  $("access-ingest-badge").innerHTML = configState(!!data.ingest_token, data.ingest_token ? "Set" : "Not set");
   const open = new Set(
     [...document.querySelectorAll("#tracker-endpoints details[open]")].map((item) => item.dataset.kind),
   );
@@ -480,9 +575,24 @@ export function renderSources() {
     const status = trackerStatus(devices);
     const url = location.origin + tracker.path;
     return `<details class="tracker" data-kind="${tracker.kind}"${open.has(tracker.kind) ? " open" : ""}><summary><span class="tracker-title"><strong>${safe(tracker.name)}</strong><small>${safe(tracker.platform)}</small></span>${statusPill(status.tone, status.label)}<svg class="chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary>
-      <div class="tracker-body">${deviceRows(devices)}<div class="tracker-setup"><h4>Set up</h4><div class="copy-field"><input class="input mono" readonly value="${safe(url)}" aria-label="${safe(tracker.name)} address"><button type="button" class="button secondary small" data-copy-endpoint="${safe(url)}">Copy</button></div><ol class="steps">${tracker.steps.map((step) => `<li>${safe(step)}</li>`).join("")}</ol></div></div></details>`;
+      <div class="tracker-body">${deviceRows(devices)}<div class="tracker-setup"><h4>Set up</h4>${
+        tracker.setup
+          ? tracker.setup()
+          : `<div class="copy-field"><input class="input mono" readonly value="${safe(url)}" aria-label="${safe(tracker.name)} address"><button type="button" class="button secondary small" data-copy-endpoint="${safe(url)}">Copy</button></div><ol class="steps">${tracker.steps.map((step) => `<li>${safe(step)}</li>`).join("")}</ol>`
+      }</div></div></details>`;
   }).join("");
   onEach($("tracker-endpoints"), "copy-endpoint", (url) => copyText(url, "Address copied"));
+  onEach($("tracker-endpoints"), "copy-text", (text) => copyText(text, "Copied"));
+  onEach($("tracker-endpoints"), "forget-device", async (value) => {
+    const [kind, device] = JSON.parse(value);
+    try {
+      await post("/api/ingest-devices/delete", { kind, device });
+      await refreshSources();
+      toast("Device forgotten. It comes back if it sends again.");
+    } catch (error) {
+      toast(error.message);
+    }
+  });
   renderPriority();
 }
 
