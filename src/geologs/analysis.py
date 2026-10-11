@@ -7,8 +7,8 @@ import math
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from .core import (ANALYSIS_DEFAULTS, MAX_CONNECTED_GAP_SECONDS, MODE_OVERRIDE_MIN_OVERLAP, MAX_PLAUSIBLE_SPEED_MPS, MAX_SAMPLE_GAP_SECONDS, MOVEMENT_MODES,
-                   _label_place, classify_motion, is_excursion, is_home_place, label_at, place_in_zone, zone_at, mode_override_for, went_elsewhere_between, windows_overlap, metres, name_matches,
+from .core import (ANALYSIS_DEFAULTS, MAX_CONNECTED_GAP_SECONDS, MAX_QUIET_STAY_SECONDS, QUIET_DEPARTURE_SPEED_MPS, MODE_OVERRIDE_MIN_OVERLAP, MAX_PLAUSIBLE_SPEED_MPS, MAX_SAMPLE_GAP_SECONDS, MOVEMENT_MODES,
+                   _label_place, classify_motion, is_excursion, is_home_place, label_at, place_in_zone, zone_at, mode_override_for, went_elsewhere_between, windows_overlap, metres, name_matches, named_place_near,
                    nearby_places,
                    parse_time, place_for_coordinate,
                    places_provider_identity, reported_speed, search_text, street_key,
@@ -25,6 +25,22 @@ QUICK_STOP_MAX_ACCURACY_M = 50
 # A quick stop is on the way somewhere: it is entered and left while tracked,
 # with no longer gap than this on either side.
 QUICK_STOP_MAX_GAP_SECONDS = 300
+# Apps that report only while moving go quiet when you stop. A quiet stretch
+# of at least QUIET_MIN_SECONDS (longer than such apps' interval on the move,
+# so it never applies to steady polling) that ends this close (allowing for
+# accuracy) and this slowly is time spent still, even if the phone was
+# already pulling away.
+QUIET_MIN_SECONDS = 120
+QUIET_STILL_MPS = 0.5
+QUIET_ACCURACY_ALLOWANCE_M = 30
+# Leaving after a quiet stretch, the stay lasts until shortly before the next
+# fix; that estimate is trusted for a quick stop when the fix is this close.
+QUIET_DEPARTURE_MAX_M = 1500
+# A quick stop backed by a fix at least this often needs nothing more; a
+# sparser one (a phone that went quiet at the pump) is only kept with a named,
+# saved, or corrected place this close: a road or a red light has none.
+DENSE_STOP_SECONDS_PER_FIX = 90
+POSSIBLE_STOP_PLACE_M = 75
 # A stay survives this many consecutive stray fixes when the next fix is back
 # inside it; indoor GPS often jumps 60-100 m for a sample or two.
 STRAY_MAX_POINTS = 2
@@ -121,7 +137,8 @@ def sync_timeline(store, sources=None, rebuild=False, since_ids=None):
 
 
 def _duration(candidate):
-    return (datetime.fromisoformat(candidate["end"]) - datetime.fromisoformat(candidate["start"])).total_seconds()
+    end = candidate.get("left_at") or candidate["end"]
+    return (datetime.fromisoformat(end) - datetime.fromisoformat(candidate["start"])).total_seconds()
 
 
 def _stay_seconds(rules):
@@ -143,12 +160,15 @@ def _new_candidate(point, previous_at=None):
 
 
 def _candidate_kind(candidate, ongoing, rules):
-    """'stationary' for a stay, 'stop' for a quick stop on the way, else None.
+    """'stationary' for a stay, 'stop' or 'pause' for a quick stop on the way, else None.
 
-    A quick stop must be proven still by fresh fixes: a Home Assistant state
-    held for several polls (one external_id) may hide driving, so only the
-    time until the last new state counts. It must be entered and left while
-    tracked, and is only known once left.
+    A quick stop must be proven still: by fresh fixes (a Home Assistant state
+    held for several polls, one external_id, may hide driving, so only the
+    time until its last new state counts) or by the quiet of an app that
+    reports only while moving. It must be entered while tracked and left
+    either while tracked or for somewhere close, and is only known once left.
+    A 'stop' has fixes close together within QUICK_STOP_REACH_M; a sparser
+    or looser one is a 'pause', kept only where there is a place (stays()).
     """
     if candidate is None or candidate["count"] < 2:
         return None
@@ -157,11 +177,20 @@ def _candidate_kind(candidate, ongoing, rules):
     quick_minutes = (rules or ANALYSIS_DEFAULTS)["quick_stop_minutes"]
     if not quick_minutes or ongoing or "reach" not in candidate:  # older stored candidates never qualify
         return None
-    proven = (datetime.fromisoformat(candidate["proven_end"]) - datetime.fromisoformat(candidate["start"])).total_seconds()
-    on_the_way = all(gap is not None and gap <= QUICK_STOP_MAX_GAP_SECONDS
-                     for gap in (candidate["arrival_gap"], candidate.get("departure_gap")))
-    still = candidate["reach"] <= QUICK_STOP_REACH_M and candidate["worst_accuracy"] <= QUICK_STOP_MAX_ACCURACY_M
-    return "stop" if proven >= quick_minutes * 60 and on_the_way and still else None
+    proven_end = max(datetime.fromisoformat(value) for value in (candidate["proven_end"], candidate.get("left_at"))
+                     if value)
+    proven = (proven_end - datetime.fromisoformat(candidate["start"])).total_seconds()
+    arrived = candidate["arrival_gap"] is not None and candidate["arrival_gap"] <= QUICK_STOP_MAX_GAP_SECONDS
+    departure_gap = candidate.get("departure_gap")
+    left = departure_gap is not None and (departure_gap <= QUICK_STOP_MAX_GAP_SECONDS
+                                          or (candidate.get("departure_m") or float("inf")) <= QUIET_DEPARTURE_MAX_M)
+    if proven < quick_minutes * 60 or not (arrived and left) or candidate["worst_accuracy"] > QUICK_STOP_MAX_ACCURACY_M:
+        return None
+    dense = candidate["count"] >= max(2, proven / DENSE_STOP_SECONDS_PER_FIX)
+    if dense and candidate["reach"] <= QUICK_STOP_REACH_M:
+        return "stop"
+    loose = STOP_RADIUS_M + min(candidate["worst_accuracy"], QUIET_ACCURACY_ALLOWANCE_M)
+    return "pause" if candidate["reach"] <= loose else None
 
 
 def _save_candidate(store, source, candidate, ongoing, rules=None):
@@ -178,7 +207,7 @@ def _save_candidate(store, source, candidate, ongoing, rules=None):
         end_observation_id=excluded.end_observation_id,ended_at=excluded.ended_at,
         lat=excluded.lat,lon=excluded.lon,point_count=excluded.point_count,ongoing=excluded.ongoing,
         kind=excluded.kind,activity=NULL,distance_m=NULL,radius_m=NULL""",
-        (source, candidate["start_id"], candidate["end_id"], candidate["start"], candidate["end"],
+        (source, candidate["start_id"], candidate["end_id"], candidate["start"], candidate.get("left_at") or candidate["end"],
          candidate["lat"], candidate["lon"], candidate["count"], int(ongoing), kind))
     candidate["saved"] = True
 
@@ -198,12 +227,18 @@ def _advance_stay(store, source, candidate, point, rules=None, previous_at=None)
         return _new_candidate(point, previous_at)
     elapsed = (datetime.fromisoformat(point["timestamp"]) - datetime.fromisoformat(candidate["end"])).total_seconds()
     strays = candidate.get("strays") or []
-    if 0 < elapsed <= MAX_SAMPLE_GAP_SECONDS:
+    to_centre = metres(point["lat"], point["lon"], candidate["lat"], candidate["lon"])
+    if 0 < elapsed <= MAX_QUIET_STAY_SECONDS:
         moving = (reported_speed(point) or 0) > 2.5
+        # Back at the same spot after any quiet stretch (an app that reports
+        # only while moving): you never left.
         inside = (not moving
                   and metres(point["lat"], point["lon"], candidate["first_lat"], candidate["first_lon"]) <= STOP_RADIUS_M
-                  and metres(point["lat"], point["lon"], candidate["lat"], candidate["lon"]) <= STOP_RADIUS_M)
-        if inside:
+                  and to_centre <= STOP_RADIUS_M)
+        allowance = min((point["accuracy_m"] or 0) + (candidate.get("last_accuracy") or 0), QUIET_ACCURACY_ALLOWANCE_M)
+        # Held-back strays mean fixes kept coming: that is not quiet.
+        quiet = not strays and elapsed >= QUIET_MIN_SECONDS and to_centre <= STOP_RADIUS_M + allowance and to_centre / elapsed < QUIET_STILL_MPS
+        if inside or quiet:
             # Back inside: the held-back fixes were GPS strays, not a departure.
             candidate.pop("strays", None)
             count = candidate["count"] + 1
@@ -212,6 +247,7 @@ def _advance_stay(store, source, candidate, point, rules=None, previous_at=None)
             candidate["count"] = count
             candidate["end"] = point["timestamp"]
             candidate["end_id"] = point["id"]
+            candidate["last_accuracy"] = point["accuracy_m"] or 0
             if "reach" in candidate:  # stored JSON stays finite: older candidates lack it and never qualify
                 candidate["reach"] = max(candidate["reach"],
                                          metres(point["lat"], point["lon"], candidate["first_lat"], candidate["first_lon"]))
@@ -226,6 +262,13 @@ def _advance_stay(store, source, candidate, point, rules=None, previous_at=None)
     # A real departure (or gap) ends the stay at its last inside fix. The
     # held-back fixes belong to whatever comes next, so replay them.
     candidate["departure_gap"] = elapsed
+    if 180 <= elapsed <= MAX_QUIET_STAY_SECONDS and not strays:
+        # Left after a quiet stretch: you were here until about the time it
+        # takes to reach the next fix.
+        speed = max(reported_speed(point) or 0, QUIET_DEPARTURE_SPEED_MPS)
+        left = datetime.fromisoformat(point["timestamp"]) - timedelta(seconds=to_centre / speed)
+        candidate["left_at"] = max(datetime.fromisoformat(candidate["end"]), left).isoformat(timespec="seconds")
+        candidate["departure_m"] = round(to_centre, 1)
     _save_candidate(store, source, candidate, False, rules)
     previous_at, candidate = candidate["end"], None
     for item in strays + [point]:
@@ -446,7 +489,7 @@ def _refresh_area_stays(store, source, since=None, rules=None):
     if since is not None:
         # Quick stops are not anchors here, as in a rebuild, so live and rebuilt flags agree.
         head = next(iter(store._rows("""SELECT id,started_at,ended_at,lat,lon,radius_m FROM observed_stays_v2
-            WHERE source=? AND ended_at<=? AND kind<>'stop' ORDER BY ended_at DESC,id DESC LIMIT 1""", (source, since))), None)
+            WHERE source=? AND ended_at<=? AND kind NOT IN ('stop','pause') ORDER BY ended_at DESC,id DESC LIMIT 1""", (source, since))), None)
     intervals = [(head, anchors[0] if anchors else None)] + list(zip(anchors, anchors[1:]))
     if anchors:
         intervals.append((anchors[-1], None))
@@ -480,6 +523,9 @@ def _refresh_area_stays(store, source, since=None, rules=None):
             between = [point for point in points if earlier["ended_at"] < point["timestamp"] < later["started_at"]]
             flags[id(later)] = _flag(went_elsewhere_between(between, earlier, later))
         for window in windows:
+            # A quick stop inside an area (a pause on a lake loop) is part of that visit.
+            store.db.execute("""DELETE FROM observed_stays_v2 WHERE source=? AND kind IN ('stop','pause')
+                AND started_at<=? AND ended_at>=?""", (source, window["ended_at"], window["started_at"]))
             store.db.execute("""INSERT INTO observed_stays_v2
                 (source,start_observation_id,end_observation_id,started_at,ended_at,lat,lon,point_count,ongoing,
                  kind,activity,distance_m,radius_m,went_elsewhere)
@@ -672,7 +718,27 @@ def merge_split_visits(rows, place_of, moves_between=None):
 _is_home_place = is_home_place
 
 
-def stays(store, start=None, end=None, source=None, limit=500):
+def _confirm_possible_stops(store, rows, places, labels, lookup):
+    """Keep a sparse 'pause' only where there is a place to have stopped at.
+
+    A saved place, a name you gave the spot, or a named place within
+    POSSIBLE_STOP_PLACE_M makes it a quick stop; otherwise it was the road or a
+    red light. lookup=False reads only the lookup cache (whole-history sweeps).
+    """
+    kept = []
+    for row in rows:
+        if row["kind"] == "pause":
+            place = (label_at(labels, row["lat"], row["lon"], row["source"], row["started_at"], row["ended_at"])
+                     or zone_at(places, row["lat"], row["lon"])
+                     or named_place_near(store, row["lat"], row["lon"], POSSIBLE_STOP_PLACE_M, lookup))
+            if not place:
+                continue
+            row = {**row, "kind": "stop", "confirmed_by_place": True}
+        kept.append(row)
+    return kept
+
+
+def stays(store, start=None, end=None, source=None, limit=500, lookup_places=False):
     clauses, args = [], []
     if start:
         clauses.append("ended_at>=?"); args.append(parse_time(start))
@@ -688,10 +754,11 @@ def stays(store, start=None, end=None, source=None, limit=500):
     # previous_stay_id lets callers tell whether went_elsewhere refers to the stay they hold.
     rows = store._rows("""SELECT * FROM (SELECT s.*,LAG(s.id) OVER (PARTITION BY s.source ORDER BY s.started_at,s.id)
         AS previous_stay_id FROM observed_stays_v2 s""" + where + ") ordered ORDER BY started_at DESC" + suffix, args)
+    places, labels, overrides = store.places(), store.place_labels(), store.mode_overrides()
+    rows = _confirm_possible_stops(store, rows, places, labels, lookup_places)
     rows = _apply_stay_edits(rows, store.stay_edits(start, end, source))
     if limit is not None:
         rows = rows[:min(max(int(limit), 1), 5000)]
-    places, labels, overrides = store.places(), store.place_labels(), store.mode_overrides()
     for row in rows:
         row["observed_minutes"] = round((datetime.fromisoformat(row["ended_at"]) - datetime.fromisoformat(row["started_at"])).total_seconds() / 60, 1)
         # A saved place is a zone around the stay, not its name: a university
@@ -745,7 +812,7 @@ def anchored_trips(store, start=None, end=None, source=None):
     """Return travel intervals bounded by consecutive stays (of the length set in Settings)."""
     context_start = (datetime.fromisoformat(parse_time(start)) - timedelta(days=1)).isoformat() if start else None
     context_end = (datetime.fromisoformat(parse_time(end)) + timedelta(days=1)).isoformat() if end else None
-    anchors = stays(store, context_start, context_end, source=source, limit=None)
+    anchors = stays(store, context_start, context_end, source=source, limit=None, lookup_places=True)
     points = list(reversed(store.observations(context_start, context_end, source=source, limit=None)))
     trips = trips_between_stays(points, anchors, start, end, store.settings())
     overrides = store.mode_overrides()
@@ -1163,15 +1230,22 @@ def _fuse_sources(day_stays, trips, samples_by_source):
     return kept_stays, kept_trips, used
 
 
-def _coverage_gaps(points, trips):
-    """Unobserved stretches long enough to split a stay, except inside a trip that already notes them."""
+def _coverage_gaps(points, trips, day_stays=()):
+    """Unobserved stretches over 30 minutes, except inside a trip that already notes
+    them or a stay (an app that reports only while moving is quiet while you stay)."""
     times = sorted({datetime.fromisoformat(point["timestamp"]) for point in points})
     spans = [(datetime.fromisoformat(trip["start"]), datetime.fromisoformat(trip["end"])) for trip in trips]
+    spans += [(datetime.fromisoformat(stay["started_at"]), datetime.fromisoformat(stay["ended_at"])) for stay in day_stays]
     gaps = []
     for earlier, later in zip(times, times[1:]):
         if (later - earlier).total_seconds() <= MAX_SAMPLE_GAP_SECONDS:
             continue
-        if any(start <= earlier and later <= end for start, end in spans):
+        # Covered end to end by stays and trips together (a stay that ran until you left, then the trip).
+        reached = earlier
+        for start, end in sorted(spans):
+            if start <= reached < end:
+                reached = end
+        if reached >= later:
             continue
         gaps.append({"start": earlier.isoformat(), "end": later.isoformat(),
                      "minutes": round((later - earlier).total_seconds() / 60, 1)})
@@ -1204,7 +1278,7 @@ def day_summary(store, date, timezone_name="UTC", source=None):
     for point in points:
         samples_by_source[point["source"]] = samples_by_source.get(point["source"], 0) + 1
     day_stays, trips, timeline_sources = _fuse_sources(
-        list(reversed(stays(store, start, end, source=source, limit=None))),
+        list(reversed(stays(store, start, end, source=source, limit=None, lookup_places=True))),
         anchored_trips(store, start, end, source), samples_by_source)
     for stay in day_stays:
         first = max(datetime.fromisoformat(stay["started_at"]), day_start)
@@ -1316,7 +1390,7 @@ def day_summary(store, date, timezone_name="UTC", source=None):
             "activity_counts": activity_counts, "activity_totals": activity_totals,
             "movement_minutes": round(sum(totals["minutes"] for totals in activity_totals.values()), 1),
             "movement_km": round(sum(totals["distance_km"] for totals in activity_totals.values()), 2),
-            "coverage_gaps": _coverage_gaps(points, trips), "timeline_sources": timeline_sources,
+            "coverage_gaps": _coverage_gaps(points, trips, day_stays), "timeline_sources": timeline_sources,
             "samples_by_source": samples_by_source,
             "stay_edits": store.stay_edits(start, end, source),
             "visited_places": visited_places, "places_including_home": places_including_home,

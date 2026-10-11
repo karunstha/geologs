@@ -91,7 +91,7 @@
           <div id="map-footer" class="map-footer" hidden><span id="map-legend" class="map-legend"></span><span class="map-caveat">Gaps and implausible jumps are not connected</span></div>
         </section>
         <aside id="inspector" class="card flush inspector" hidden aria-label="Day timeline">
-          <section class="timeline-section"><div class="card-head compact"><h2>Timeline</h2><span id="timeline-count" class="badge"></span></div><ol id="day-timeline" class="day-timeline"></ol></section>
+          <section class="timeline-section"><div class="card-head compact"><h2>Timeline</h2><span class="timeline-tools"><span id="timeline-count" class="badge"></span><button id="add-stay" type="button" class="button ghost small" title="Add a stay or stop the timeline missed"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span>Add a stay</span></button></span></div><ol id="day-timeline" class="day-timeline"></ol></section>
           <section id="map-detail-section" class="map-detail" hidden><div class="card-head compact"><h2>Fixes near this point</h2><button id="close-map-detail" class="button ghost small" type="button">Close</button></div><div id="map-detail" class="list"></div></section>
         </aside>
       </div>
@@ -105,7 +105,7 @@
         </div>
         <div class="detail-panel active" data-panel-view="places"><div id="visited-places" class="list"></div></div>
         <div class="detail-panel" data-panel-view="speed"><div id="speed-chart"></div></div>
-        <div class="detail-panel" data-panel-view="samples"><div class="sample-toolbar"><div class="segmented"><button class="active" data-sample-view="timeline">Key fixes</button><button data-sample-view="raw">Raw samples</button></div><p id="sample-count" class="muted"></p></div><div id="sample-selection" class="sample-selection" hidden><span id="sample-selected-count"></span><button id="clear-sample-selection" type="button" class="button ghost small">Clear</button><button id="delete-selected-samples" type="button" class="button danger small">Delete selected</button></div><div class="table-wrap"><table><thead><tr><th class="select-col"><input type="checkbox" id="select-all-samples" aria-label="Select every sample shown"></th><th>Time</th><th>Type</th><th>Source</th><th>Part of</th><th>Speed</th><th>Coordinates</th><th>Accuracy</th><th><span class="sr-only">Actions</span></th></tr></thead><tbody id="points-table"></tbody></table></div><div id="raw-pagination" class="pagination" hidden><button id="raw-previous" class="button secondary small">Previous</button><span id="raw-page"></span><button id="raw-next" class="button secondary small">Next</button></div></div>
+        <div class="detail-panel" data-panel-view="samples"><div class="sample-toolbar"><div class="segmented"><button class="active" data-sample-view="timeline">Key fixes</button><button data-sample-view="raw">Raw samples</button></div><p id="sample-count" class="muted"></p></div><div id="sample-selection" class="sample-selection" hidden><span id="sample-selected-count"></span><button id="clear-sample-selection" type="button" class="button ghost small">Clear</button><button id="stay-from-samples" type="button" class="button secondary small">Make a stay</button><button id="delete-selected-samples" type="button" class="button danger small">Delete selected</button></div><div class="table-wrap"><table><thead><tr><th class="select-col"><input type="checkbox" id="select-all-samples" aria-label="Select every sample shown"></th><th>Time</th><th>Type</th><th>Source</th><th>Part of</th><th>Speed</th><th>Coordinates</th><th>Accuracy</th><th><span class="sr-only">Actions</span></th></tr></thead><tbody id="points-table"></tbody></table></div><div id="raw-pagination" class="pagination" hidden><button id="raw-previous" class="button secondary small">Previous</button><span id="raw-page"></span><button id="raw-next" class="button secondary small">Next</button></div></div>
         <div class="detail-panel" data-panel-view="data"><div id="day-data" class="day-data"></div></div>
       </section>
     </section>
@@ -300,13 +300,13 @@
   </dialog>
 
   <dialog id="stop-dialog" class="dialog narrow" aria-labelledby="stop-dialog-title" aria-describedby="stop-dialog-note">
-    <div class="dialog-head"><div><h2 id="stop-dialog-title">Add a stop</h2><p id="stop-dialog-note"></p></div><button id="close-stop-dialog" class="icon-button" type="button" aria-label="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
+    <div class="dialog-head"><div><h2 id="stop-dialog-title">Add a stay</h2><p id="stop-dialog-note"></p></div><button id="close-stop-dialog" class="icon-button" type="button" aria-label="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
     <section class="dialog-section"><form id="stop-form" class="form-stack">
       <p id="stop-suggestion" class="callout" hidden></p>
       <div class="form-pair"><label class="field"><span>Arrived</span><select id="stop-from" class="input"></select></label><label class="field"><span>Left</span><select id="stop-to" class="input"></select></label></div>
       <p id="stop-detail" class="help"></p>
       <p id="stop-error" class="field-error" role="alert" hidden></p>
-      <div class="dialog-actions"><button type="button" id="cancel-stop" class="button secondary">Cancel</button><button class="button primary">Add stop</button></div>
+      <div class="dialog-actions"><button type="button" id="cancel-stop" class="button secondary">Cancel</button><button class="button primary">Add stay</button></div>
     </form></section>
   </dialog>
 

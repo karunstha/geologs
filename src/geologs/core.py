@@ -48,6 +48,12 @@ MOVEMENT_MODES = ("driving", "transit", "cycling", "running", "walking")
 MODE_OVERRIDE_MIN_OVERLAP = .5
 # A stay may bridge this much time without samples; longer gaps split it.
 MAX_SAMPLE_GAP_SECONDS = 1800
+# Apps such as OwnTracks and Overland report only while you move, so silence
+# usually means you stayed put. A quiet stretch up to this long that ends at
+# the same spot is time spent there, and one that ends elsewhere is time there
+# until you left (estimated from the distance to the next fix).
+MAX_QUIET_STAY_SECONDS = 16 * 3600
+QUIET_DEPARTURE_SPEED_MPS = 30 / 3.6
 # Travel that leaves and returns to one place is kept only when it really went somewhere;
 # smaller excursions are GPS drift between two halves of one stay.
 ROUND_TRIP_MIN_EXCURSION_M = 150
@@ -604,7 +610,7 @@ class Store:
             if "brief" not in {row[1] for row in self.db.execute("PRAGMA table_info(daily_summaries)")}:
                 self.db.execute("ALTER TABLE daily_summaries ADD COLUMN brief TEXT")
             version = self.db.execute("PRAGMA user_version").fetchone()[0]
-            rebuild_analysis = version < 14
+            rebuild_analysis = version < 15
             if version < 1:
                 self.db.execute("UPDATE points SET mode='running_cycling' WHERE mode='cycling'")
             if version < 2:
@@ -687,8 +693,10 @@ class Store:
         # Stay algorithm versions: 5 and 8 changed stationary stays; 12 adds area
         # stays (moving around one place) and stray-fix tolerance; 14 records
         # whether travel between stays went somewhere else; 17 adds quick stops
-        # on the way (SQLite user_version 14). One rebuild covers every missing version.
-        rebuild_versions = (5, 8, 12, 14, 17)
+        # on the way (SQLite user_version 14); 18 reads quiet stretches from apps
+        # that report only while moving as time spent still (SQLite 15). One
+        # rebuild covers every missing version.
+        rebuild_versions = (5, 8, 12, 14, 17, 18)
         if self.postgres and self._missing_migrations(rebuild_versions):
             self.db.execute("SELECT pg_advisory_xact_lock(hashtext('geologs:stays:rebuild'))")
             missing = self._missing_migrations(rebuild_versions)
@@ -712,8 +720,8 @@ class Store:
         if not self.postgres and version < 9:
             self.db.execute("DELETE FROM analysis_cache")
             self.db.execute("PRAGMA user_version=9")
-        if not self.postgres and version < 14:
-            self.db.execute("PRAGMA user_version=14")
+        if not self.postgres and version < 15:
+            self.db.execute("PRAGMA user_version=15")
         if self.postgres and self._missing_migrations((16,)):
             # Keep one stored daily summary per date: the configured timezone, all sources.
             self._keep_canonical_daily_summaries(self.settings()["timezone"])
@@ -880,7 +888,7 @@ class Store:
         settings = self.settings()
         # Stay length and mode speeds change what a day contains.
         analysis = {key: settings[key] for key in ANALYSIS_DEFAULTS}
-        value = ["stay-trips-v11", modes, stay_edits, analysis, self.analysis_watermark(start, end, source),
+        value = ["stay-trips-v12", modes, stay_edits, analysis, self.analysis_watermark(start, end, source),
                  self.analysis_watermark(context_start, context_end, source),
                  event_row["count"], event_row["max_id"], places, reminders, labels]
         return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
@@ -2355,6 +2363,25 @@ def _label_place(label):
     return {"name": label["name"], "named": True, "address": label.get("address") or "", "category": label.get("category") or "",
             "categories": [label["category"]] if label.get("category") else [],
             "provider_place_id": label.get("provider_place_id") or "", "label_id": label["id"]}
+
+
+def named_place_near(store, lat, lon, within_m, lookup=True):
+    """The named place within `within_m` of a position, or None.
+
+    With lookup=False only the reverse-lookup cache is read, so a sweep over
+    the whole history spends no provider quota.
+    """
+    try:
+        if lookup:
+            value = reverse_geocode(store, lat, lon)
+        else:
+            radius = nearest_place_radius(None)
+            value = store.reverse_region(_provider_cache_key(_require_provider(store)) + f":r{radius}", float(lat), float(lon))
+    except (ValueError, OSError, KeyError):
+        return None
+    if not value or not value.get("place_name") or value.get("place_lat") is None:
+        return None
+    return value if metres(lat, lon, value["place_lat"], value["place_lon"]) <= within_m else None
 
 
 def place_for_coordinate(store, lat, lon, radius_m=None):

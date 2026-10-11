@@ -785,3 +785,8 @@
 .button.danger-text:hover {
   background: var(--danger-soft);
 }
+.timeline-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}

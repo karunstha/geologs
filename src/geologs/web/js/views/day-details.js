@@ -10,7 +10,7 @@ import { refreshInsights } from "./patterns.js";
 import { dayVisits, editVisitedPlace } from "./place-dialogs.js";
 import { showSettingsPage } from "./settings.js";
 import { showView } from "./shell.js";
-import { stayEditsSection, undoStayEdit } from "./stay-edits.js";
+import { openSampleStayDialog, stayEditsSection, undoStayEdit } from "./stay-edits.js";
 
 const ROLES = { arrival: "Arrival", departure: "Departure", latest: "Latest at stop", movement: "Moving" };
 
@@ -387,6 +387,10 @@ export function initDayDetails() {
     renderSamples();
   };
   $("delete-selected-samples").onclick = () => deleteSamples([...state.selectedSamples]);
+  $("stay-from-samples").onclick = () => {
+    const rows = state.sampleView === "timeline" ? state.timeline : state.points;
+    openSampleStayDialog(rows.filter((row) => state.selectedSamples.has(row.id)));
+  };
   const closeDelete = () => $("delete-samples-dialog").close();
   $("close-delete-samples").onclick = $("cancel-delete-samples").onclick = closeDelete;
   $("delete-samples-dialog").onclick = (event) => {

@@ -954,18 +954,19 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(predict_next(self.store)["frequency"], 1)
         self.assertEqual(day_summary(self.store, "2026-09-25", "UTC")["points"], 21)
         place = self.store.save_place({"name": "University", "lat": 41, "lon": -87.9})
-        self.assertEqual(self.store.place_visits(place["id"])["total_observed_minutes"], 64)
+        # Fixes come every 8 minutes, so each visit lasts until shortly before the next fix elsewhere.
+        self.assertEqual(self.store.place_visits(place["id"])["total_observed_minutes"], 84.4)
         ranked = visited_places(self.store)
         # A saved place is a zone: with nothing named right there, the place inside is known by the zone's name.
-        self.assertEqual((ranked[0]["display_name"], ranked[0]["zone"], ranked[0]["saved"], ranked[0]["visits"]),
-                         ("University", "University", False, 4))
-        self.assertGreater(ranked[0]["observed_minutes"], ranked[1]["observed_minutes"])
+        university = next(item for item in ranked if item["zone"] == "University")
+        self.assertEqual((university["display_name"], university["saved"], university["visits"]), ("University", False, 4))
+        self.assertGreaterEqual(ranked[0]["observed_minutes"], ranked[1]["observed_minutes"])
         insight = insights(self.store)
         self.assertEqual(insight["unlabeled_places"][0]["visits"], 3)
         self.assertNotIn("Unlabeled", insight["unlabeled_places"][0]["display_name"])
         mcp = dispatch(self.store, {"jsonrpc": "2.0", "id": 9, "method": "tools/call",
                                     "params": {"name": "get_frequent_places", "arguments": {"limit": 10}}})
-        self.assertEqual(mcp["result"]["structuredContent"]["result"][0]["name"], "University")
+        self.assertIn("University", [item["name"] for item in mcp["result"]["structuredContent"]["result"]])
 
     def test_resolved_stays_at_same_provider_place_are_merged(self):
         base = datetime(2026, 9, 25, 10, tzinfo=timezone.utc)
@@ -1038,7 +1039,7 @@ class StoreTests(unittest.TestCase):
         put(2, 8)
         self.assertEqual(stays(self.store)[0]["point_count"], 3)
 
-    def test_repeated_home_assistant_samples_create_separate_stays_across_gap(self):
+    def test_repeated_home_assistant_samples_at_one_spot_are_one_stay_across_a_gap(self):
         base = datetime(2026, 9, 25, 10, tzinfo=timezone.utc)
         def poll(minute):
             return self.store.ingest({"source": "home_assistant:phone", "external_id": "unchanged-state",
@@ -1051,9 +1052,9 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(stays(self.store)[0]["point_count"], 2)
         poll(50)
         poll(66)
+        # Still at the same spot after a quiet half hour: one stay, not two.
         rows = stays(self.store)
-        self.assertEqual(len(rows), 2)
-        self.assertEqual([row["point_count"] for row in rows], [2, 2])
+        self.assertEqual([(row["point_count"], row["observed_minutes"]) for row in rows], [(4, 66)])
 
     def test_existing_raw_samples_bootstrap_stays_when_opened(self):
         path = Path(self.tmp.name) / "bootstrap.db"
@@ -1093,7 +1094,7 @@ class StoreTests(unittest.TestCase):
         migrated = Store(path)
         try:
             self.assertEqual(stays(migrated), [])
-            self.assertEqual(migrated.db.execute("PRAGMA user_version").fetchone()[0], 14)
+            self.assertEqual(migrated.db.execute("PRAGMA user_version").fetchone()[0], 15)
         finally:
             migrated.close()
 
@@ -1273,14 +1274,26 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(day["timeline_sources"][0], "phone")
         self.assertIn("University", [stay["display_name"] for stay in day["stays"]])
 
-    def test_coverage_gap_is_reported_instead_of_a_repeated_visit(self):
+    def test_quiet_hours_at_the_same_place_are_one_visit(self):
+        # An app that reports only while moving: two quiet hours on campus.
         before = minute_fixes([still(HOME, 30), line(HOME, CAMPUS, 12), still(CAMPUS, 60)])
         after = minute_fixes([still(CAMPUS, 60), line(CAMPUS, HOME, 12), still(HOME, 30)], start=datetime(2026, 9, 27, 17, tzinfo=timezone.utc))
         self.store.ingest(before + after)
         with patch("geologs.analysis.place_for_coordinate", side_effect=campus_label):
             day = day_summary(self.store, "2026-09-27", "UTC")
-        self.assertEqual([(gap["start"], gap["end"]) for gap in day["coverage_gaps"]],
-                         [("2026-09-27T14:41:00+00:00", "2026-09-27T17:00:00+00:00")])
+        self.assertEqual(day["coverage_gaps"], [])
+        campus = [stay for stay in day["stays"] if metres_between(CAMPUS, stay) < 100]
+        self.assertEqual([(stay["started_at"], stay["ended_at"]) for stay in campus],
+                         [("2026-09-27T13:41:00+00:00", "2026-09-27T17:59:00+00:00")])
+
+    def test_coverage_gap_between_different_places_is_still_reported(self):
+        # Silent overnight and the next fix 300 km away: no way to know when you left.
+        far = shifted(HOME, 300000, 0)
+        self.store.ingest(minute_fixes([still(HOME, 30)]) + minute_fixes([still(far, 30)], start=datetime(2026, 9, 27, 20, tzinfo=timezone.utc)))
+        day = day_summary(self.store, "2026-09-27", "UTC")
+        self.assertEqual(len(day["coverage_gaps"]), 1)
+        home = next(stay for stay in day["stays"] if metres_between(HOME, stay) < 100)
+        self.assertEqual(home["ended_at"], "2026-09-27T13:29:00+00:00")
 
     def test_went_elsewhere_flags_match_rebuild_when_ingested_live(self):
         taco = shifted(CAMPUS, 2500, 0)
@@ -1959,6 +1972,42 @@ class StoreTests(unittest.TestCase):
         trips = day_summary(self.store, "2026-09-27", "UTC")["trips"]
         self.assertEqual([trip["mode"] for trip in reversed(trips)], ["driving", "driving"])
 
+    def test_sparse_fuel_stop_from_owntracks_is_kept_only_near_a_place(self):
+        # Real OwnTracks fixes: the phone went quiet at the pump between 19:29:29 and 19:32:55.
+        source = "owntracks:karun/iphone"
+        rows = [("19:24:40", 34.7620, -92.4600, 3), ("19:25:30", 34.7608, -92.4570, 3), ("19:26:20", 34.7600, -92.4550, 3),
+                ("19:27:13", 34.75946, -92.45359, 2), ("19:28:11", 34.75837, -92.45184, 2), ("19:29:29", 34.75796, -92.45161, 16),
+                ("19:32:55", 34.75773, -92.45214, 5), ("19:34:44", 34.75828, -92.44997, 3), ("19:34:58", 34.75784, -92.44775, 2),
+                ("19:35:11", 34.75734, -92.44565, 2), ("19:36:00", 34.7560, -92.4400, 3), ("19:37:00", 34.7540, -92.4320, 3)]
+        self.store.ingest([{"source": source, "external_id": at, "timestamp": f"2026-10-10T{at}+00:00",
+                            "lat": lat, "lon": lon, "accuracy_m": accuracy} for at, lat, lon, accuracy in rows])
+        shell = {"place_name": "Shell", "place_lat": 34.7579, "place_lon": -92.4519}
+        with patch("geologs.analysis.named_place_near", return_value=shell) as lookup:
+            kept = stays(self.store, limit=None)
+        self.assertEqual([(row["kind"], row["started_at"], row["observed_minutes"]) for row in kept],
+                         [("stop", "2026-10-10T19:29:29+00:00", 3.4)])
+        self.assertFalse(lookup.call_args.args[4])  # a history sweep reads only the lookup cache
+        # With no place there it was the road or a red light.
+        with patch("geologs.analysis.named_place_near", return_value=None):
+            self.assertEqual(stays(self.store, limit=None), [])
+        # A saved place there is evidence too, with no lookup at all.
+        self.store.save_place({"name": "Fuel", "lat": 34.7579, "lon": -92.4519, "radius_m": 80})
+        with patch("geologs.analysis.named_place_near", side_effect=AssertionError("looked up")):
+            self.assertEqual(len(stays(self.store, limit=None)), 1)
+
+    def test_leaving_after_a_quiet_stretch_ends_the_stay_near_the_departure(self):
+        # Home at 13:00, the phone quiet until it reports 2.7 km away at 15:00.
+        away = shifted(HOME, 2000, 0)  # line() starts one 700 m step past this
+        self.store.ingest(minute_fixes([still(HOME, 3)]) + minute_fixes(
+            [line(away, shifted(HOME, 9000, 0), 10), still(shifted(HOME, 9000, 0), 30)],
+            start=datetime(2026, 9, 27, 15, tzinfo=timezone.utc)))
+        home = list(reversed(stays(self.store, limit=None)))[0]
+        self.assertEqual(home["started_at"], "2026-09-27T13:00:00+00:00")
+        # 2.7 km at 30 km/h is 5 min 24 s before the fix.
+        self.assertEqual(home["ended_at"], "2026-09-27T14:54:36+00:00")
+        day = day_summary(self.store, "2026-09-27", "UTC")
+        self.assertEqual(day["coverage_gaps"], [])
+
     def test_creeping_traffic_and_short_waits_are_not_quick_stops(self):
         queue = shifted(HOME, 4000, 0)
         crawl = line(queue, shifted(queue, 0, 60), 6)  # 60 m in six minutes: stop-and-go traffic
@@ -2057,7 +2106,7 @@ class StoreTests(unittest.TestCase):
         migrated = Store(path)
         try:
             self.assertEqual([row["kind"] for row in reversed(stays(migrated, limit=None))], ["stationary", "area", "stationary"])
-            self.assertEqual(migrated.db.execute("PRAGMA user_version").fetchone()[0], 14)
+            self.assertEqual(migrated.db.execute("PRAGMA user_version").fetchone()[0], 15)
         finally:
             migrated.close()
 
