@@ -17,7 +17,7 @@ from urllib.parse import parse_qs, urlparse
 
 from .ingest import FORMATS as INGEST_FORMATS, claimed_source
 
-from .core import PLACES_PROVIDERS, Store, configured_places_providers, current_location, deliver_webhook, geocode, nearby_places, place_details, places_provider, reverse_geocode, save_place_label
+from .core import PLACES_PROVIDERS, Store, token_allows_source, configured_places_providers, current_location, deliver_webhook, geocode, nearby_places, place_details, places_provider, reverse_geocode, save_place_label
 from .analysis import daily_briefs, daily_overview, day_summary, delete_samples, delete_source, insights, place_overview, stored_daily_record, place_patterns, predict_next, resolve_place_patterns, save_scheduled_summaries, search_visits, stays, transitions, visited_places
 from .mcp import SUPPORTED_VERSIONS, dispatch
 from .postgres import INTEGRITY_ERRORS
@@ -144,10 +144,12 @@ class Handler(BaseHTTPRequestHandler):
     def ingest_authorized(self, query):
         """Tracking apps authenticate however they can: a bearer header, the password
         of HTTP Basic auth (OwnTracks), or ?token= in the URL (Overland, Traccar Client,
-        GPSLogger). Either the main token or the ingest-only token is accepted."""
+        GPSLogger). The main token, the .env ingest token, or a device token from
+        Settings is accepted; a device token is kept on self.device_token so its
+        tracker lock can be checked once the points are read. With no token
+        configured anywhere, anyone may send (a loopback-only server)."""
+        self.device_token = None
         main, ingest = active_token(), ingest_token()
-        if not main and not ingest:
-            return True
         if main and self.authorized():
             return True
         supplied = []
@@ -161,7 +163,33 @@ class Handler(BaseHTTPRequestHandler):
                 pass
         if query.get("token"):
             supplied.append(query["token"])
-        return any(secrets.compare_digest(value, token) for value in supplied for token in (main, ingest) if token)
+        if any(secrets.compare_digest(value, token) for value in supplied for token in (main, ingest) if token):
+            return True
+        try:
+            store = Store()
+        except Exception:
+            return not main and not ingest
+        try:
+            for value in supplied:
+                row = store.ingest_token_for(value)
+                if row:
+                    self.device_token = row
+                    return True
+            return not main and not ingest and not store.has_ingest_tokens()
+        finally:
+            store.close()
+
+    def token_refuses(self, sources):
+        """The message when a device token is locked to another tracker, else None."""
+        locked = self.device_token["source"] if self.device_token else None
+        stray = next((source for source in sources if not token_allows_source(locked, source)), None)
+        if stray is None:
+            return None
+        return f"This token can only send as {locked}" + (" trackers" if locked.endswith(":") else "") + f", not {stray}"
+
+    def note_token_use(self, store, source):
+        if self.device_token:
+            store.note_ingest_token_use(self.device_token["id"], source)
 
     def send_web_file(self, path):
         """The browser app: index.html, stylesheets and modules under /css/ and /js/, and the Home
@@ -245,10 +273,15 @@ class Handler(BaseHTTPRequestHandler):
             message = str(exc) if isinstance(exc, ValueError) else "invalid request body"
             self.note_ingest(kind, 400, message, claimed)
             self.error_json(400, message); return
+        source = points[-1]["source"] if points else claimed
+        refused = self.token_refuses([point["source"] for point in points])
+        if refused:
+            self.close_connection = True
+            self.note_ingest(kind, 403, refused, source)
+            self.error_json(403, refused); return
         store = self.open_store()
         if store is None:
             return
-        source = points[-1]["source"] if points else claimed
         try:
             inserted = duplicates = 0
             for start in range(0, len(points), 1000):
@@ -259,6 +292,7 @@ class Handler(BaseHTTPRequestHandler):
             # Retries and acknowledged non-location messages still prove the app gets through.
             store.record_ingest(kind, 200, f"{skipped} malformed fix{'' if skipped == 1 else 'es'} skipped" if skipped else None,
                                 source, inserted)
+            self.note_token_use(store, source)
         except DB_INPUT_ERRORS as exc:
             self.note_ingest(kind, 400, str(exc), source)
             self.error_json(400, str(exc)); return
@@ -335,6 +369,8 @@ class Handler(BaseHTTPRequestHandler):
             elif url.path == "/api/daily-brief": value = daily_briefs(store, q["date"], q.get("end_date"))
             elif url.path == "/api/places": value = store.places(enrich=True)
             elif url.path == "/api/place-labels": value = store.place_labels()
+            elif url.path == "/api/ingest-tokens":
+                value = {"tokens": store.ingest_tokens(), "env_token": bool(ingest_token())}
             elif url.path == "/api/stay-edits": value = store.stay_edits(q.get("start"), q.get("end"), q.get("source"))
             elif url.path == "/api/mode-overrides": value = store.mode_overrides()
             elif url.path == "/api/reminders": value = store.reminders()
@@ -435,10 +471,20 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json(200, result)
                 return
             if path == "/api/points":
+                items = payload if isinstance(payload, list) else [payload]
+                refused = sender and self.token_refuses([str((item or {}).get("source") or "manual") for item in items])
+                if refused:
+                    self.error_json(403, refused); return
                 result = store.ingest(payload)
                 deliver_webhook(store, result["events"])
                 last = payload[-1] if isinstance(payload, list) and payload else payload
                 store.record_ingest("api", 200, None, str((last or {}).get("source") or "manual")[:80], result["inserted"])
+                if sender:
+                    self.note_token_use(store, str((last or {}).get("source") or "manual")[:80])
+            elif path == "/api/ingest-tokens":
+                result = store.create_ingest_token(payload)
+            elif path == "/api/ingest-tokens/delete":
+                result = store.delete_ingest_token(payload["id"])
             elif path == "/api/sources/delete":
                 result = delete_source(store, payload.get("source"), payload.get("confirm") is True)
             elif path == "/api/ingest-devices/delete":

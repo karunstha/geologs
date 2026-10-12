@@ -648,3 +648,45 @@
 .steps.rich .help {
   margin: 0;
 }
+/* Device tokens: the list, the one-time reveal, and the form to make one. */
+.token-reveal {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.token-reveal .copy-field {
+  margin-top: 4px;
+}
+.token-list {
+  margin: 0 0 12px;
+  padding: 0;
+  list-style: none;
+}
+.token-list .list-item {
+  gap: 12px;
+}
+.token-list .place-main > div {
+  min-width: 0;
+}
+.token-list .button {
+  flex: none;
+}
+.token-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 10px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.ha-token {
+  align-self: flex-start;
+}
+@media (max-width: 760px) {
+  .token-form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .token-list .list-item {
+    flex-wrap: wrap;
+  }
+}

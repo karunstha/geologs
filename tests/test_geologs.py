@@ -1,3 +1,4 @@
+import base64
 import json
 import hashlib
 import hmac
@@ -2322,6 +2323,62 @@ class IngestTests(LiveServerCase):
         store.close()
         self.assertEqual({point["source"] for point in self.points()}, {"osmand:pixel"})
         self.assertAlmostEqual(speeds[41.0], 5.14444, places=4)  # 10 knots
+
+    def test_device_tokens_send_locations_and_nothing_else(self):
+        auth = {"Authorization": "Bearer main-token"}
+        status, created, _ = self.send("POST", "/api/ingest-tokens", {"name": "Karun's iPhone"}, auth)
+        self.assertEqual(status, 200)
+        token = created["token"]
+        self.assertTrue(token.startswith("glp_") and created["hint"] == token[:8])
+        # Listed without the token or its hash; the .env token is reported alongside.
+        _, listing, _ = self.send("GET", "/api/ingest-tokens", headers=auth)
+        self.assertEqual(listing["env_token"], True)
+        self.assertNotIn("token", listing["tokens"][0])
+        self.assertNotIn("token_hash", listing["tokens"][0])
+        self.assertNotIn(token, json.dumps(listing))
+        # Every way a tracker app sends a token works.
+        basic = base64.b64encode(f"karun:{token}".encode()).decode()
+        for path, headers in (("/api/ingest/generic?device=a", {"Authorization": f"Bearer {token}"}),
+                              ("/api/ingest/generic?device=b", {"Authorization": f"Basic {basic}"}),
+                              (f"/api/ingest/generic?device=c&token={token}", {})):
+            status, _, _ = self.send("POST", path, {"lat": 41, "lon": -87.9}, headers)
+            self.assertEqual(status, 200, path)
+        _, listing, _ = self.send("GET", "/api/ingest-tokens", headers=auth)
+        self.assertEqual(listing["tokens"][0]["last_source"], "generic:c")
+        self.assertIsNotNone(listing["tokens"][0]["last_used_at"])
+        # It cannot read anything or manage tokens.
+        for method, path in (("GET", "/api/sources"), ("GET", "/api/ingest-tokens"), ("POST", "/api/ingest-tokens")):
+            status, _, _ = self.send(method, path, {"name": "x"} if method == "POST" else None, {"Authorization": f"Bearer {token}"})
+            self.assertEqual(status, 401, path)
+        # Revoked, it is refused at once.
+        self.send("POST", "/api/ingest-tokens/delete", {"id": created["id"]}, auth)
+        status, _, _ = self.send("POST", "/api/ingest/generic?device=a", {"lat": 41, "lon": -87.9}, {"Authorization": f"Bearer {token}"})
+        self.assertEqual(status, 401)
+
+    def test_a_locked_device_token_sends_only_as_its_trackers(self):
+        auth = {"Authorization": "Bearer main-token"}
+        _, ha, _ = self.send("POST", "/api/ingest-tokens", {"name": "Home Assistant", "source": "home_assistant:"}, auth)
+        bearer = {"Authorization": f"Bearer {ha['token']}"}
+        status, _, _ = self.send("POST", "/api/ingest/generic", {"source": "home_assistant:device_tracker.phone", "lat": 41, "lon": -87.9}, bearer)
+        self.assertEqual(status, 200)
+        status, body, _ = self.send("POST", "/api/ingest/generic", {"source": "owntracks:karun/phone", "lat": 41, "lon": -87.9}, bearer)
+        self.assertEqual((status, body["error"]), (403, "This token can only send as home_assistant: trackers, not owntracks:karun/phone"))
+        status, _, _ = self.send("POST", "/api/points", {"source": "manual", "lat": 41, "lon": -87.9}, bearer)
+        self.assertEqual(status, 403)
+        self.assertEqual([point["source"] for point in self.points()], ["home_assistant:device_tracker.phone"])
+        _, sources, _ = self.send("GET", "/api/sources", headers=auth)
+        refused = next(device for device in sources["devices"] if device["device"] == "owntracks:karun/phone")
+        self.assertEqual(refused["last_status"], 403)
+
+    def test_device_tokens_alone_close_an_open_server(self):
+        store = Store(self.db)
+        token = store.create_ingest_token({"name": "Phone"})["token"]
+        store.close()
+        with patch.dict(os.environ, {"GEOLOGS_TOKEN": "", "GEOLOGS_INGEST_TOKEN": ""}):
+            status, _, _ = self.send("POST", "/api/ingest/generic?device=x", {"lat": 41, "lon": -87.9})
+            self.assertEqual(status, 401)
+            status, _, _ = self.send("POST", "/api/ingest/generic?device=x", {"lat": 41, "lon": -87.9}, {"Authorization": f"Bearer {token}"})
+            self.assertEqual(status, 200)
 
     def test_home_assistant_blueprint_is_public_and_its_payload_is_accepted(self):
         status, body, response = self.send("GET", "/ha/geologs-location.yaml")

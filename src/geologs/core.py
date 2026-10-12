@@ -10,6 +10,7 @@ import json
 import math
 import os
 import re
+import secrets
 import sqlite3
 import threading
 import time
@@ -535,6 +536,10 @@ class Store:
             id INTEGER PRIMARY KEY, source TEXT NOT NULL, target TEXT NOT NULL,
             started_at TEXT NOT NULL, ended_at TEXT NOT NULL, mode TEXT NOT NULL,
             created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS ingest_tokens (
+            id INTEGER PRIMARY KEY, name TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, hint TEXT NOT NULL,
+            source TEXT, created_at TEXT NOT NULL, last_used_at TEXT, last_source TEXT
         );
         CREATE TABLE IF NOT EXISTS stay_edits (
             id INTEGER PRIMARY KEY, source TEXT NOT NULL, action TEXT NOT NULL,
@@ -1177,6 +1182,51 @@ class Store:
             self.db.execute("UPDATE app_settings SET value=? WHERE key='source_priority'",
                             (json.dumps([name for name in priority if name != source]),))
         self.clear_analysis_cache(commit=False)
+
+    def ingest_tokens(self):
+        """Device tokens, newest first. The tokens themselves are never stored, only their hashes."""
+        return self._rows("""SELECT id,name,hint,source,created_at,last_used_at,last_source
+            FROM ingest_tokens ORDER BY created_at DESC,id DESC""")
+
+    def create_ingest_token(self, raw):
+        """A token one device sends locations with, shown once.
+
+        `source` locks it to one tracker name, or to every tracker of a kind
+        when it ends with ":" (such as "home_assistant:").
+        """
+        name = str(raw.get("name") or "").strip()
+        if not name or len(name) > 60:
+            raise ValueError("name is required (max 60 characters)")
+        source = str(raw.get("source") or "").strip() or None
+        if source and len(source) > 80:
+            raise ValueError("source must be at most 80 characters")
+        token = "glp_" + secrets.token_urlsafe(24)
+        row = self.db.execute("""INSERT INTO ingest_tokens(name,token_hash,hint,source,created_at)
+            VALUES (?,?,?,?,?) RETURNING id""", (name, ingest_token_hash(token), token[:8], source, parse_time(None))).fetchone()
+        self.db.commit()
+        return {**next(item for item in self.ingest_tokens() if item["id"] == row["id"]), "token": token}
+
+    def delete_ingest_token(self, id_):
+        result = self.db.execute("DELETE FROM ingest_tokens WHERE id=?", (int(id_),))
+        if not result.rowcount:
+            raise ValueError("that token was already revoked")
+        self.db.commit()
+        return {"deleted": int(id_)}
+
+    def ingest_token_for(self, token):
+        """The stored device token a request presented, or None."""
+        if not token or not token.startswith("glp_"):
+            return None
+        row = self.db.execute("SELECT id,name,source FROM ingest_tokens WHERE token_hash=?",
+                              (ingest_token_hash(token),)).fetchone()
+        return dict(row) if row else None
+
+    def has_ingest_tokens(self):
+        return self.db.execute("SELECT 1 FROM ingest_tokens LIMIT 1").fetchone() is not None
+
+    def note_ingest_token_use(self, id_, source):
+        self.db.execute("UPDATE ingest_tokens SET last_used_at=?,last_source=? WHERE id=?", (parse_time(None), source, int(id_)))
+        self.db.commit()
 
     def delete_ingest_device(self, kind, device):
         """Forget a tracker app's device status row (a failed or retired phone); its samples stay."""
@@ -2425,6 +2475,18 @@ def _label_place(label):
     return {"name": label["name"], "named": True, "address": label.get("address") or "", "category": label.get("category") or "",
             "categories": [label["category"]] if label.get("category") else [],
             "provider_place_id": label.get("provider_place_id") or "", "label_id": label["id"]}
+
+
+def ingest_token_hash(token):
+    """Device tokens are long and random, so a plain SHA-256 is enough to keep them out of the database."""
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def token_allows_source(locked, source):
+    """Whether a device token locked to `locked` may send as `source`."""
+    if not locked:
+        return True
+    return source == locked or (locked.endswith(":") and str(source or "").startswith(locked))
 
 
 def named_place_near(store, lat, lon, within_m, lookup=True):

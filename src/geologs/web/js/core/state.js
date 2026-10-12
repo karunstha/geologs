@@ -22,6 +22,8 @@ export const state = {
   rawTotal: 0,
   // Sample ids ticked in the Samples table; only those shown stay selected.
   selectedSamples: new Set(),
+  // Device tokens for sending locations ({ tokens, env_token }), from /api/ingest-tokens.
+  ingestTokens: null,
   selected: null,
   fitKey: null,
   pendingStayId: null,

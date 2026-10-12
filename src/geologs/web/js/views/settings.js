@@ -257,7 +257,7 @@ export const TRACKERS = [
     steps: [
       "In OwnTracks, open Preferences → Connection and set Mode to HTTP.",
       "Set Host (URL) to the address above.",
-      "Under Identification, enter any username, your phone token as the password, and a device name. The device name labels this source.",
+      "Under Identification, enter any username, your device token as the password, and a device name. The device name labels this source.",
     ],
   },
   {
@@ -266,7 +266,7 @@ export const TRACKERS = [
     platform: "iOS",
     path: "/api/ingest/overland?token=YOUR_PHONE_TOKEN",
     steps: [
-      "In Overland settings, set Receiver Endpoint to the address above, with your phone token in place of YOUR_PHONE_TOKEN.",
+      "In Overland settings, set Receiver Endpoint to the address above, with your device token in place of YOUR_PHONE_TOKEN.",
       "Overland sends batches and clears them only once GeoLogs confirms, so nothing is lost offline.",
     ],
   },
@@ -276,7 +276,7 @@ export const TRACKERS = [
     platform: "iOS and Android",
     path: "/api/ingest/osmand?token=YOUR_PHONE_TOKEN",
     steps: [
-      "Set the server URL to the address above, with your phone token.",
+      "Set the server URL to the address above, with your device token.",
       "The device identifier labels this source.",
     ],
   },
@@ -301,6 +301,8 @@ export const TRACKERS = [
 
 const HA_BLUEPRINT_PATH = "/ha/geologs-location.yaml";
 const HA_ADDRESS_KEY = "geologs-ha-address";
+// A token made from the Home Assistant steps, shown in them until the page reloads.
+let haToken = "";
 
 // The address Home Assistant uses for GeoLogs, which may differ from the one in this browser.
 function haAddress() {
@@ -345,7 +347,7 @@ function haSnippets(address) {
     payload: >-
       {"source": "{{ source }}", "timestamp": "{{ timestamp }}", "external_id": "{{ timestamp }}",
        "lat": {{ lat }}, "lon": {{ lon }}, "accuracy": {{ accuracy }}}`;
-  const secret = 'geologs_authorization: "Bearer YOUR_PHONE_TOKEN"';
+  const secret = `geologs_authorization: "Bearer ${haToken || "YOUR_PHONE_TOKEN"}"`;
   const automation = `alias: Send locations to GeoLogs
 mode: queued
 max: 50
@@ -365,7 +367,7 @@ ${HA_SEND}`;
     "https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=" + encodeURIComponent(base + HA_BLUEPRINT_PATH);
   return `<ol class="steps rich">
     <li><span>Add this to <code>configuration.yaml</code>:</span>${copyBlock("REST command for configuration.yaml", command)}</li>
-    <li><span>Add your phone token to <code>secrets.yaml</code>:</span>${copyBlock("Line for secrets.yaml", secret)}</li>
+    <li><span>Add a device token to <code>secrets.yaml</code>${haToken ? " (this one was just created for Home Assistant; it won't be shown again)" : ""}:</span>${copyBlock("Line for secrets.yaml", secret)}${haToken ? "" : '<button type="button" class="button secondary small ha-token" data-ha-token>Create a token for Home Assistant</button>'}</li>
     <li><span>Restart Home Assistant, or reload <strong>REST commands</strong> under Developer tools → YAML.</span></li>
     <li><span>Add the automation. In Home Assistant, open <a href="https://my.home-assistant.io/redirect/automations/" target="_blank" rel="noopener">Automations</a>, choose <strong>Create automation</strong> → <strong>Create new automation</strong>, then <strong>⋮</strong> → <strong>Edit in YAML</strong>, paste this, and put your trackers in place of <code>device_tracker.your_phone</code>:</span>${copyBlock("Automation YAML", automation)}
       <span class="help">Or import it as a blueprint and pick trackers from a list. Home Assistant downloads it from <a href="${safe(base + HA_BLUEPRINT_PATH)}" target="_blank" rel="noopener">${safe(base + HA_BLUEPRINT_PATH)}</a>, so that address must work from Home Assistant; “Unknown error” means it couldn't.</span>
@@ -392,8 +394,120 @@ function wireHomeAssistantSetup() {
       else localStorage.removeItem(HA_ADDRESS_KEY);
     } catch (_error) {}
     $("ha-address-warning").hidden = !isLoopback(address);
-    $("ha-snippets").innerHTML = haSnippets(address);
-    onEach($("ha-snippets"), "copy-text", (text) => copyText(text, "Copied"));
+    renderHaSnippets(address);
+  };
+  wireHaToken();
+}
+
+function renderHaSnippets(address) {
+  $("ha-snippets").innerHTML = haSnippets(address);
+  onEach($("ha-snippets"), "copy-text", (text) => copyText(text, "Copied"));
+  wireHaToken();
+}
+
+function wireHaToken() {
+  const button = document.querySelector("#ha-snippets [data-ha-token]");
+  if (!button) return;
+  button.onclick = async () => {
+    button.disabled = true;
+    try {
+      const created = await post("/api/ingest-tokens", { name: "Home Assistant", source: "home_assistant:" });
+      haToken = created.token;
+      renderHaSnippets($("ha-address").value.trim() || location.origin);
+      await refreshTokens();
+      toast("Token created for Home Assistant. Copy the secrets.yaml line now.");
+    } catch (error) {
+      button.disabled = false;
+      toast(error.message);
+    }
+  };
+}
+
+// What a token may send as: one tracker, every tracker of an app, or anything.
+const TOKEN_LOCKS = [
+  ["", "Any tracker"],
+  ["home_assistant:", "Any Home Assistant tracker"],
+  ["owntracks:", "Any OwnTracks device"],
+  ["overland:", "Any Overland device"],
+  ["osmand:", "Any Traccar or OsmAnd device"],
+  ["generic:", "Any GPSLogger, Tasker, or Shortcuts device"],
+];
+
+function lockLabel(source) {
+  if (!source) return "any tracker";
+  const kind = TOKEN_LOCKS.find(([value]) => value === source);
+  return kind ? kind[1][0].toLowerCase() + kind[1].slice(1) : trackerLabel(source);
+}
+
+function renderTokens() {
+  const data = state.ingestTokens;
+  if (!data) return;
+  const tokens = data.tokens || [];
+  const rows = tokens.map((token) => {
+    const used = token.last_used_at
+      ? `last used ${ago(token.last_used_at)}${token.last_source ? ` as ${trackerLabel(token.last_source)}` : ""}`
+      : "never used";
+    const details = [`Can send as ${lockLabel(token.source)}`, `${token.hint}…`, `created ${new Date(token.created_at).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric", ...zoneOptions() })}`, used];
+    return `<li class="list-item"><div class="place-main"><span class="health-dot ${token.last_used_at && Date.now() - Date.parse(token.last_used_at) < 86400e3 ? "success" : "neutral"}" aria-hidden="true"></span><div><strong>${safe(token.name)}</strong><small>${safe(details.join(" · "))}</small></div></div><button type="button" class="button secondary small danger-text" data-revoke-token="${token.id}">Revoke</button></li>`;
+  });
+  if (data.env_token)
+    rows.push(
+      `<li class="list-item"><div class="place-main"><span class="health-dot neutral" aria-hidden="true"></span><div><strong>From .env <span class="muted">· GEOLOGS_INGEST_TOKEN</span></strong><small>Shared by every device that has it, and can't be revoked here. Remove it from .env once each device has its own token.</small></div></div></li>`,
+    );
+  $("token-list").innerHTML =
+    rows.join("") ||
+    '<li class="empty-block"><strong>No device tokens yet</strong><span>Until you create one, apps need your main access token, which can also read your whole history.</span></li>';
+  onEach($("token-list"), "revoke-token", async (id) => {
+    const token = tokens.find((item) => item.id === +id);
+    if (!confirm(`Revoke “${token?.name}”? Devices using it stop getting through at once. This can't be undone.`)) return;
+    try {
+      await post("/api/ingest-tokens/delete", { id: +id });
+      await refreshTokens();
+      toast("Token revoked");
+    } catch (error) {
+      toast(error.message);
+    }
+  });
+  const chosen = $("token-source").value;
+  const trackers = (state.sources?.sources || []).map((item) => item.source);
+  $("token-source").innerHTML =
+    TOKEN_LOCKS.map(([value, label]) => `<option value="${safe(value)}">${safe(label)}</option>`).join("") +
+    (trackers.length
+      ? `<optgroup label="Only this tracker">${trackers.map((source) => `<option value="${safe(source)}">${safe(trackerLabel(source))}</option>`).join("")}</optgroup>`
+      : "");
+  $("token-source").value = chosen;
+  const count = tokens.length;
+  $("ingest-token-note").hidden = !!(count || data.env_token);
+  $("access-ingest-badge").innerHTML = configState(
+    !!(count || data.env_token),
+    count ? plural(count, "token") : data.env_token ? "From .env" : "None yet",
+  );
+}
+
+export async function refreshTokens() {
+  state.ingestTokens = await api("/api/ingest-tokens");
+  renderTokens();
+}
+
+function initTokens() {
+  $("token-form").onsubmit = async (event) => {
+    event.preventDefault();
+    const name = $("token-name").value.trim();
+    if (!name) return;
+    try {
+      const created = await post("/api/ingest-tokens", { name, source: $("token-source").value });
+      $("token-name").value = "";
+      $("token-reveal").hidden = false;
+      $("token-reveal").innerHTML = `<strong>Copy the token for ${safe(created.name)} now</strong><span>It is shown only once. Put it where the app asks for a token or password.</span><div class="copy-field"><input class="input mono" readonly value="${safe(created.token)}" aria-label="New token"><button type="button" class="button secondary small" data-copy-new-token>Copy</button><button type="button" class="button ghost small" data-hide-token>Done</button></div>`;
+      $("token-reveal").querySelector("[data-copy-new-token]").onclick = () => copyText(created.token, "Token copied");
+      $("token-reveal").querySelector("[data-hide-token]").onclick = () => {
+        $("token-reveal").hidden = true;
+        $("token-reveal").innerHTML = "";
+      };
+      await refreshTokens();
+    } catch (error) {
+      toast(error.message);
+    }
   };
 }
 
@@ -633,8 +747,7 @@ export function renderSources() {
     if (!byKind.has(kind)) byKind.set(kind, []);
     byKind.get(kind).push(device);
   }
-  $("ingest-token-note").hidden = !!data.ingest_token;
-  $("access-ingest-badge").innerHTML = configState(!!data.ingest_token, data.ingest_token ? "Set" : "Not set");
+  renderTokens();
   // The 30 s refresh must not wipe what you are typing (the Home Assistant address).
   if ($("tracker-endpoints").contains(document.activeElement) && document.activeElement.matches("input")) {
     renderPriority();
@@ -671,7 +784,7 @@ export function renderSources() {
 }
 
 export async function refreshSources() {
-  state.sources = await api("/api/sources");
+  [state.sources, state.ingestTokens] = await Promise.all([api("/api/sources"), api("/api/ingest-tokens")]);
   renderSources();
 }
 
@@ -695,6 +808,7 @@ export function updateSpeedSettingsVisibility() {
 
 export function initSettings() {
   initPriorityDrag();
+  initTokens();
   for (const [mode] of SPEED_FIELDS)
     $(`speed-${mode}-name`).innerHTML = `${modeIcon(mode)}${safe(modeInfo[mode].noun)}`;
   document.querySelectorAll(".settings-tab").forEach((tab) => (tab.onclick = () => showSettingsPage(tab.dataset.settingsPage)));

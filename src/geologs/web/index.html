@@ -200,9 +200,15 @@
               <ol id="priority-list" class="priority-list" aria-label="Trackers, most trusted first" aria-live="polite"></ol>
               <div id="priority-note" class="empty-block" hidden><strong>No trackers yet</strong><span>Locations appear here as soon as a device sends one. Connect an app below.</span></div>
             </div>
+            <div class="card" id="tokens-card">
+              <div class="card-head"><div><h3>Device tokens</h3><p>Each phone or app sends locations with its own token. A token can't read anything, and revoking one leaves the others working.</p></div></div>
+              <div id="token-reveal" class="callout success token-reveal" role="status" hidden></div>
+              <ul id="token-list" class="list rows token-list"></ul>
+              <form id="token-form" class="token-form"><label class="field"><span>Name</span><input id="token-name" class="input" maxlength="60" placeholder="Karun's iPhone" required autocomplete="off"></label><label class="field"><span>Can send as</span><select id="token-source" class="input"></select></label><button class="button primary">Create token</button></form>
+            </div>
             <div class="card">
               <div class="card-head"><div><h3>Connect a tracker app</h3><p>Phones send locations straight here, with no polling. Use an address your phone can reach, such as HTTPS or a private network like Tailscale.</p></div></div>
-              <p id="ingest-token-note" class="callout warning" hidden><strong>Give phones their own token</strong><span>Set GEOLOGS_INGEST_TOKEN in .env. Until then, apps need your main access token, which can also read your whole history.</span></p>
+              <p id="ingest-token-note" class="callout warning" hidden><strong>Give each device its own token</strong><span>Create one under Device tokens above. Until then, apps need your main access token, which can also read your whole history.</span></p>
               <div id="tracker-endpoints" class="tracker-list"></div>
             </div>
           </section>
@@ -267,7 +273,7 @@
             <div class="section-intro"><h2 id="access-title">Access</h2><p>How this browser and your devices sign in.</p></div>
             <div class="card">
               <div class="setting-row static"><span class="setting-label"><strong>This browser</strong><small id="access-browser">Signed in with the access token for 30 days.</small></span><button id="sign-out" class="button secondary" type="button">Sign out</button></div>
-              <div class="setting-row static"><span class="setting-label"><strong>Phone token</strong><small id="access-ingest">GEOLOGS_INGEST_TOKEN lets devices send locations without being able to read anything.</small></span><span id="access-ingest-badge"></span></div>
+              <div class="setting-row static"><span class="setting-label"><strong>Device tokens</strong><small id="access-ingest">Phones and apps send locations with their own tokens, which can't read anything. Manage them under Devices.</small></span><span id="access-ingest-badge"></span></div>
               <div class="setting-row static"><span class="setting-label"><strong>Access token</strong><small>Change GEOLOGS_TOKEN in .env to sign every browser out.</small></span></div>
             </div>
           </section>
