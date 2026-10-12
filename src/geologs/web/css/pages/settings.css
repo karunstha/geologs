@@ -639,3 +639,12 @@
     margin-left: auto;
   }
 }
+.ha-address {
+  margin-bottom: 12px;
+}
+.ha-address + .callout {
+  margin-bottom: 12px;
+}
+.steps.rich .help {
+  margin: 0;
+}

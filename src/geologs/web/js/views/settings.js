@@ -300,13 +300,44 @@ export const TRACKERS = [
 ];
 
 const HA_BLUEPRINT_PATH = "/ha/geologs-location.yaml";
+const HA_ADDRESS_KEY = "geologs-ha-address";
 
-// One REST command and a blueprint: no polling, and positions arrive as Home Assistant sees them.
-function homeAssistantSetup() {
-  const origin = location.origin;
+// The address Home Assistant uses for GeoLogs, which may differ from the one in this browser.
+function haAddress() {
+  let saved = "";
+  try {
+    saved = localStorage.getItem(HA_ADDRESS_KEY) || "";
+  } catch (_error) {}
+  return saved || location.origin;
+}
+
+function isLoopback(address) {
+  try {
+    const host = new URL(address).hostname.replace(/^\[|\]$/g, "");
+    return host === "localhost" || host.endsWith(".localhost") || host === "::1" || /^127\./.test(host);
+  } catch (_error) {
+    return false;
+  }
+}
+
+function copyBlock(label, text) {
+  return `<div class="code-block"><pre class="mono" aria-label="${safe(label)}">${safe(text)}</pre><button type="button" class="button secondary small" data-copy-text="${safe(text)}">Copy</button></div>`;
+}
+
+// What Home Assistant sends: the same for the blueprint and the pasted automation.
+const HA_SEND = `  - service: rest_command.geologs_location
+    data:
+      source: "home_assistant:{{ trigger.entity_id }}"
+      timestamp: "{{ trigger.to_state.last_updated.isoformat() }}"
+      lat: "{{ trigger.to_state.attributes.latitude }}"
+      lon: "{{ trigger.to_state.attributes.longitude }}"
+      accuracy: "{{ trigger.to_state.attributes.gps_accuracy | default('null', true) }}"`;
+
+function haSnippets(address) {
+  const base = address.replace(/\/+$/, "");
   const command = `rest_command:
   geologs_location:
-    url: "${origin}/api/ingest/generic"
+    url: "${base}/api/ingest/generic"
     method: post
     headers:
       authorization: !secret geologs_authorization
@@ -315,18 +346,55 @@ function homeAssistantSetup() {
       {"source": "{{ source }}", "timestamp": "{{ timestamp }}", "external_id": "{{ timestamp }}",
        "lat": {{ lat }}, "lon": {{ lon }}, "accuracy": {{ accuracy }}}`;
   const secret = 'geologs_authorization: "Bearer YOUR_PHONE_TOKEN"';
+  const automation = `alias: Send locations to GeoLogs
+mode: queued
+max: 50
+trigger:
+  - platform: state
+    entity_id:
+      - device_tracker.your_phone
+condition:
+  - condition: template
+    value_template: >-
+      {{ trigger.to_state is not none
+         and trigger.to_state.attributes.latitude is number
+         and trigger.to_state.attributes.longitude is number }}
+action:
+${HA_SEND}`;
   const importUrl =
-    "https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=" + encodeURIComponent(origin + HA_BLUEPRINT_PATH);
-  const block = (label, text) =>
-    `<div class="code-block"><pre class="mono" aria-label="${safe(label)}">${safe(text)}</pre><button type="button" class="button secondary small" data-copy-text="${safe(text)}">Copy</button></div>`;
+    "https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=" + encodeURIComponent(base + HA_BLUEPRINT_PATH);
   return `<ol class="steps rich">
-    <li><span>Add this to <code>configuration.yaml</code>:</span>${block("REST command for configuration.yaml", command)}</li>
-    <li><span>Add your phone token to <code>secrets.yaml</code>:</span>${block("Line for secrets.yaml", secret)}</li>
+    <li><span>Add this to <code>configuration.yaml</code>:</span>${copyBlock("REST command for configuration.yaml", command)}</li>
+    <li><span>Add your phone token to <code>secrets.yaml</code>:</span>${copyBlock("Line for secrets.yaml", secret)}</li>
     <li><span>Restart Home Assistant, or reload <strong>REST commands</strong> under Developer tools → YAML.</span></li>
-    <li><span>Import the automation, then choose <strong>Create automation</strong> and pick your trackers:</span>
-      <a class="button primary small ha-import" href="${safe(importUrl)}" target="_blank" rel="noopener">Import into Home Assistant</a></li>
+    <li><span>Add the automation. In Home Assistant, open <a href="https://my.home-assistant.io/redirect/automations/" target="_blank" rel="noopener">Automations</a>, choose <strong>Create automation</strong> → <strong>Create new automation</strong>, then <strong>⋮</strong> → <strong>Edit in YAML</strong>, paste this, and put your trackers in place of <code>device_tracker.your_phone</code>:</span>${copyBlock("Automation YAML", automation)}
+      <span class="help">Or import it as a blueprint and pick trackers from a list. Home Assistant downloads it from <a href="${safe(base + HA_BLUEPRINT_PATH)}" target="_blank" rel="noopener">${safe(base + HA_BLUEPRINT_PATH)}</a>, so that address must work from Home Assistant; “Unknown error” means it couldn't.</span>
+      <a class="button secondary small ha-import" href="${safe(importUrl)}" target="_blank" rel="noopener">Import blueprint into Home Assistant</a></li>
   </ol>
-  <p class="help">Home Assistant fetches the blueprint from <a href="${safe(HA_BLUEPRINT_PATH)}" target="_blank" rel="noopener">${safe(origin + HA_BLUEPRINT_PATH)}</a>, so it must be able to reach this address; if it can't, download that file and import it by hand. Positions arrive under the same names as <code>./geologs poll-ha</code>, so history continues: stop that cron job once this works.</p>`;
+  <p class="help">Positions arrive under the same names as <code>./geologs poll-ha</code>, so history continues: stop that cron job once this works.</p>`;
+}
+
+// One REST command and an automation: no polling, and positions arrive as Home Assistant sees them.
+function homeAssistantSetup() {
+  const address = haAddress();
+  return `<label class="field ha-address"><span>GeoLogs address, as Home Assistant reaches it</span><input id="ha-address" class="input mono" type="url" value="${safe(address)}" spellcheck="false" autocomplete="off"></label>
+  <p id="ha-address-warning" class="callout warning"${isLoopback(address) ? "" : " hidden"}><strong>Home Assistant can't reach localhost</strong><span>This browser opened GeoLogs as ${safe(new URL(location.origin).host)}, which on Home Assistant's machine means Home Assistant itself. Use the address it can reach, such as http://192.168.1.20:8766 or your Tailscale name.</span></p>
+  <div id="ha-snippets">${haSnippets(address)}</div>`;
+}
+
+function wireHomeAssistantSetup() {
+  const input = $("ha-address");
+  if (!input) return;
+  input.oninput = () => {
+    const address = input.value.trim() || location.origin;
+    try {
+      if (input.value.trim() && input.value.trim() !== location.origin) localStorage.setItem(HA_ADDRESS_KEY, address);
+      else localStorage.removeItem(HA_ADDRESS_KEY);
+    } catch (_error) {}
+    $("ha-address-warning").hidden = !isLoopback(address);
+    $("ha-snippets").innerHTML = haSnippets(address);
+    onEach($("ha-snippets"), "copy-text", (text) => copyText(text, "Copied"));
+  };
 }
 
 function failing(device) {
@@ -567,6 +635,11 @@ export function renderSources() {
   }
   $("ingest-token-note").hidden = !!data.ingest_token;
   $("access-ingest-badge").innerHTML = configState(!!data.ingest_token, data.ingest_token ? "Set" : "Not set");
+  // The 30 s refresh must not wipe what you are typing (the Home Assistant address).
+  if ($("tracker-endpoints").contains(document.activeElement) && document.activeElement.matches("input")) {
+    renderPriority();
+    return;
+  }
   const open = new Set(
     [...document.querySelectorAll("#tracker-endpoints details[open]")].map((item) => item.dataset.kind),
   );
@@ -583,6 +656,7 @@ export function renderSources() {
   }).join("");
   onEach($("tracker-endpoints"), "copy-endpoint", (url) => copyText(url, "Address copied"));
   onEach($("tracker-endpoints"), "copy-text", (text) => copyText(text, "Copied"));
+  wireHomeAssistantSetup();
   onEach($("tracker-endpoints"), "forget-device", async (value) => {
     const [kind, device] = JSON.parse(value);
     try {
