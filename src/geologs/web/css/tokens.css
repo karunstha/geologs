@@ -35,35 +35,34 @@
   --panel-h: clamp(480px, calc(100vh - 250px), 780px);
   color-scheme: light;
 }
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #0e1113;
-    --surface: #161a1d;
-    --surface-2: #1a1f23;
-    --surface-3: #222a2f;
-    --border: #283036;
-    --border-strong: #36404a;
-    --text: #e7eaed;
-    --text-2: #a9b1ba;
-    --text-3: #78828c;
-    --accent: #27a99a;
-    --accent-hover: #36bcac;
-    --accent-soft: #11302c;
-    --accent-text: #5ed1c2;
-    --on-accent: #04201c;
-    --success: #4ccf7f;
-    --success-soft: #12301e;
-    --warning: #eda94b;
-    --warning-soft: #33260f;
-    --danger: #f17b70;
-    --danger-soft: #3a1916;
-    --neutral: #8f99a3;
-    --neutral-soft: #242b30;
-    --shadow-sm: 0 1px 2px rgb(0 0 0/0.3);
-    --shadow-md: 0 6px 18px rgb(0 0 0/0.35);
-    --shadow-lg: 0 24px 64px rgb(0 0 0/0.55);
-    color-scheme: dark;
-  }
+/* Dark theme: set on <html> from your choice in Settings → Appearance, or your system (see index.html). */
+:root[data-theme="dark"] {
+  --bg: #0e1113;
+  --surface: #161a1d;
+  --surface-2: #1a1f23;
+  --surface-3: #222a2f;
+  --border: #283036;
+  --border-strong: #36404a;
+  --text: #e7eaed;
+  --text-2: #a9b1ba;
+  --text-3: #78828c;
+  --accent: #27a99a;
+  --accent-hover: #36bcac;
+  --accent-soft: #11302c;
+  --accent-text: #5ed1c2;
+  --on-accent: #04201c;
+  --success: #4ccf7f;
+  --success-soft: #12301e;
+  --warning: #eda94b;
+  --warning-soft: #33260f;
+  --danger: #f17b70;
+  --danger-soft: #3a1916;
+  --neutral: #8f99a3;
+  --neutral-soft: #242b30;
+  --shadow-sm: 0 1px 2px rgb(0 0 0/0.3);
+  --shadow-md: 0 6px 18px rgb(0 0 0/0.35);
+  --shadow-lg: 0 24px 64px rgb(0 0 0/0.55);
+  color-scheme: dark;
 }
 @media (max-width: 760px) {
   :root {

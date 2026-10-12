@@ -478,10 +478,6 @@ function renderTokens() {
   $("token-source").value = chosen;
   const count = tokens.length;
   $("ingest-token-note").hidden = !!(count || data.env_token);
-  $("access-ingest-badge").innerHTML = configState(
-    !!(count || data.env_token),
-    count ? plural(count, "token") : data.env_token ? "From .env" : "None yet",
-  );
 }
 
 export async function refreshTokens() {

@@ -338,16 +338,16 @@ async function refreshRawPage() {
 }
 
 export function initDayDetails() {
-  document.querySelectorAll(".detail-tab").forEach((button) => {
+  document.querySelectorAll("#history-details .detail-tab").forEach((button) => {
     button.onclick = () => {
       const name = button.dataset.panel;
-      document.querySelectorAll(".detail-tab").forEach((tab) => {
+      document.querySelectorAll("#history-details .detail-tab").forEach((tab) => {
         const active = tab === button;
         tab.classList.toggle("active", active);
         tab.setAttribute("aria-selected", String(active));
       });
       document
-        .querySelectorAll(".detail-panel")
+        .querySelectorAll("#history-details .detail-panel")
         .forEach((panel) => panel.classList.toggle("active", panel.dataset.panelView === name));
     };
   });

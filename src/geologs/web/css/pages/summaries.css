@@ -464,6 +464,21 @@
 .summary-lower-grid > .summary-content-section:first-child {
   border-right: 1px solid var(--border);
 }
+/* Without reminder activity, Places has the row to itself. */
+.summary-lower-grid.single {
+  grid-template-columns: 1fr;
+}
+.summary-lower-grid.single > .summary-content-section:first-child {
+  border-right: 0;
+}
+.summary-record-meta {
+  margin-bottom: 12px;
+  color: var(--text-2);
+  font-size: 12.5px;
+}
+.summary-stale-note .button {
+  margin-top: 6px;
+}
 .summary-place-list,
 .summary-reminder-list {
   display: grid;

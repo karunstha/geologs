@@ -128,11 +128,9 @@
   text-underline-offset: 3px;
   cursor: pointer;
 }
-@media (prefers-color-scheme: dark) {
-  #toast {
-    background: #e8ebee;
-    color: #14181d;
-  }
+:root[data-theme="dark"] #toast {
+  background: #e8ebee;
+  color: #14181d;
 }
 @media (max-width: 760px) {
   .dialog-head,

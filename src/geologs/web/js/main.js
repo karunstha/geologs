@@ -4,6 +4,7 @@ import { $ } from "./core/dom.js";
 import { localDateKey } from "./core/format.js";
 import { state } from "./core/state.js";
 import { initMap } from "./map/map.js";
+import { initTheme } from "./ui/theme.js";
 import { initAuth } from "./views/auth.js";
 import { initHistory, refreshCurrent, refreshExplore } from "./views/history.js";
 import { refreshInsights } from "./views/patterns.js";
@@ -15,6 +16,7 @@ import { initShell } from "./views/shell.js";
 import { initStayEdits } from "./views/stay-edits.js";
 import { initSummaries } from "./views/summaries.js";
 
+initTheme();
 initShell();
 initAuth();
 initHistory();

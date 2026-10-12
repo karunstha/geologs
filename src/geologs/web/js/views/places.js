@@ -72,16 +72,18 @@ function renderVisitedPlaces() {
   const places = state.visitedPlaces;
   $("visited-place-count").textContent = places.length ? places.length.toLocaleString() : "";
   const box = $("all-visited-places");
+  // A thin bar shows each place's time against the place you spend most time at.
+  const most = Math.max(1, ...places.map((place) => place.observed_minutes || 0));
   box.innerHTML =
     places
       .map((place, index) => {
         const details = [
           zoneText(place.zone, place.display_name),
           plural(place.visits, "visit"),
-          durationText(place.observed_minutes),
           `last ${ago(place.last_seen)}`,
         ].filter(Boolean);
-        return `<div class="list-item"><div class="place-main">${placeIcon(place)}<div><strong>${safe(place.display_name)}</strong><small title="${safe(formatTime(place.last_seen))}">${safe(details.join(" · "))}</small></div></div>${rowActions(
+        const share = Math.max(2, Math.round(((place.observed_minutes || 0) / most) * 100));
+        return `<div class="list-item"><div class="place-main">${placeIcon(place)}<div class="place-text"><div class="place-line"><strong>${safe(place.display_name)}</strong><b class="place-time">${safe(durationText(place.observed_minutes))}</b></div><small title="${safe(formatTime(place.last_seen))}">${safe(details.join(" · "))}</small><div class="time-bar" aria-hidden="true"><i style="width:${share}%"></i></div></div></div>${rowActions(
           [
             { icon: "map", label: "Show on map", data: `data-map-visited="${index}"` },
             { icon: "edit", label: "Rename this place", data: `data-rename-visited="${index}"` },
@@ -101,27 +103,40 @@ export function renderPlaces() {
   renderVisitedPlaces();
 }
 
-function renderVisitResults(result) {
+function showResults(html) {
   const box = $("visit-results");
+  box.hidden = !html;
+  box.innerHTML = html;
+}
+
+function renderVisitResults(result) {
   if (!result.visits.length) {
-    box.innerHTML = `<p class="empty">No visits matched “${safe(result.query)}”. Try a brand, a kind of place such as supermarket or park, or a street name.</p>`;
+    showResults(
+      `<div class="results-head"><div><h2>No visits matched “${safe(result.query)}”</h2><p>Try a brand, a kind of place such as supermarket or park, or a street name.</p></div></div>`,
+    );
     return;
   }
-  const names = result.places.map((place) => safe(place.name)).join(", ");
-  const shown = result.total_visits > result.visits.length ? ` · latest ${result.visits.length} shown` : "";
-  box.innerHTML = `<p class="result-summary"><strong>${plural(result.total_visits, "visit")}</strong> to ${names}${shown}</p><ul class="visit-list">${result.visits
+  // The place is named on each row only when the search matched more than one.
+  const several = result.places.length > 1;
+  const title = several
+    ? `${plural(result.total_visits, "visit")} to ${plural(result.places.length, "place")}`
+    : `${plural(result.total_visits, "visit")} to ${result.places[0].name}`;
+  const summary = [
+    several ? result.places.map((place) => place.name).join(", ") : result.places[0].address,
+    result.total_visits > result.visits.length ? `latest ${result.visits.length} shown` : "",
+  ].filter(Boolean);
+  showResults(`<div class="results-head"><div><h2>${safe(title)}</h2>${summary.length ? `<p>${safe(summary.join(" · "))}</p>` : ""}</div></div><ul class="visit-list">${result.visits
     .map((visit, index) => {
       const details = [
-        zoneText(visit.zone, visit.place),
+        several ? visit.place : zoneText(visit.zone, visit.place),
         `${clock(visit.started_at)} – ${clock(visit.ended_at)}`,
         durationText(visit.observed_minutes),
         visit.activity ? modeName(visit.activity) : "",
-        visit.ongoing ? "now" : "",
       ].filter(Boolean);
-      return `<li><div class="visit-date"><strong>${safe(dateLabel(visit.date))}</strong><span>${safe(visit.weekday)}</span></div><div class="visit-info"><strong>${safe(visit.place)}</strong><small>${safe(details.join(" · "))}</small></div><button type="button" class="button secondary small" data-visit-day="${index}">Open day</button></li>`;
+      return `<li><button type="button" class="visit-row" data-visit-day="${index}" aria-label="Open ${safe(dateLabel(visit.date))} in History"><span class="visit-date"><strong>${safe(dateLabel(visit.date))}</strong><span>${safe(visit.weekday)}${visit.ongoing ? " · now" : ""}</span></span><span class="visit-info">${safe(details.join(" · "))}</span><span class="row-chevron" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m9.5 6 6 6-6 6"/></svg></span></button></li>`;
     })
-    .join("")}</ul>`;
-  onEach(box, "visit-day", (index) => openVisitDay(result.visits[+index]));
+    .join("")}</ul>`);
+  onEach($("visit-results"), "visit-day", (index) => openVisitDay(result.visits[+index]));
 }
 
 function openVisitDay(visit) {
@@ -153,21 +168,32 @@ export function initPlaces() {
   $("visit-search-form").onsubmit = async (event) => {
     event.preventDefault();
     const query = $("visit-search").value.trim();
-    const box = $("visit-results");
     if (!query) {
-      box.innerHTML = "";
+      showResults("");
       return;
     }
-    box.innerHTML = '<p class="empty">Searching…</p>';
+    showResults('<p class="empty">Searching…</p>');
     try {
       renderVisitResults(await api("/api/visits?" + new URLSearchParams({ q: query, limit: 50 })));
     } catch (error) {
-      box.innerHTML = "";
+      showResults("");
       toast(error.message);
     }
   };
   // Clearing the search box clears its results.
+  const clear = () => {
+    $("visit-search").value = "";
+    $("visit-search-clear").hidden = true;
+    showResults("");
+    $("visit-search").focus();
+  };
+  $("visit-search-clear").onclick = clear;
   $("visit-search").addEventListener("input", () => {
-    if (!$("visit-search").value.trim()) $("visit-results").innerHTML = "";
+    const empty = !$("visit-search").value.trim();
+    $("visit-search-clear").hidden = empty;
+    if (empty) showResults("");
+  });
+  $("visit-search").addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && $("visit-search").value) clear();
   });
 }

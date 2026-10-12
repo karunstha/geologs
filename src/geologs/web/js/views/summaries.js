@@ -14,7 +14,7 @@ import {
 } from "../core/format.js";
 import { state } from "../core/state.js";
 import { actionIcon } from "../ui/actions.js";
-import { modeIcon, modeInfo, modeName, placeIcon, statusPill, summaryIcons, zoneText } from "../ui/icons.js";
+import { modeIcon, modeInfo, modeName, placeIcon, summaryIcons, zoneText } from "../ui/icons.js";
 import { refreshExplore } from "./history.js";
 import { showView } from "./shell.js";
 
@@ -256,8 +256,7 @@ function remindersMarkup(value) {
 
 function coverageMarkup(value) {
   const gaps = value.coverage_gaps || [];
-  if (!gaps.length)
-    return '<section class="summary-coverage complete"><span class="summary-coverage-icon" aria-hidden="true">✓</span><div><strong>Covered all day</strong><p>No stretch longer than 30 minutes without a location.</p></div></section>';
+  if (!gaps.length) return ""; // full coverage is the normal case; only gaps are worth a word
   const missing = gaps.reduce((sum, gap) => sum + gap.minutes, 0);
   return `<section class="summary-coverage has-gaps"><span class="summary-coverage-icon" aria-hidden="true">!</span><div><strong>${safe(durationText(missing))} without location, in ${plural(gaps.length, "gap")}</strong><p>${gaps.map((gap) => `${safe(clock(gap.start))} – ${safe(clock(gap.end))}`).join(" · ")}. Where no samples arrived, GeoLogs can't say where you were.</p></div></section>`;
 }
@@ -279,26 +278,15 @@ export function renderSummaryDetail(record) {
     return;
   }
   const homeReturn = value.home_return?.summary;
-  // The brief's summary is the same facts in plain sentences.
-  const overviewText = record.brief?.summary || value.overview || "";
-  const overview =
-    homeReturn && overviewText.endsWith(` ${homeReturn}`)
-      ? overviewText.slice(0, -homeReturn.length - 1)
-      : overviewText;
   const facts = [
     ["Distance", `${Number(totals.distance_km || 0).toFixed(1)} km`, "distance"],
     ["Time moving", durationText((totals.moving_hours || 0) * 60), "time"],
     ["Trips", totals.trips ?? 0, "trips"],
     ["Places", totals.places ?? 0, "places"],
   ];
-  const secondary = [
-    ["Sampled distance", `${Number(totals.sampled_distance_km || 0).toFixed(1)} km`],
-    [
-      "Location fixes",
-      `${(totals.timeline_fixes ?? 0).toLocaleString()} key of ${(totals.raw_fixes ?? 0).toLocaleString()}`,
-    ],
-    ["Reminders", `${totals.reminders_triggered ?? 0} fired · ${totals.reminders_created ?? 0} added`],
-  ];
+  const reminderActivity =
+    (value.reminders_triggered || []).length + (value.reminders_created || []).length +
+    (value.reminders_cancelled || []).length + (value.active_reminders_at_end || []).length;
   const activity = Object.entries(value.activity_totals || {})
     .filter(([mode, item]) => item.count && modeInfo[mode])
     .map(
@@ -314,17 +302,16 @@ export function renderSummaryDetail(record) {
   const { older, newer } = neighbours(record.date);
   const box = $("summary-detail");
   box.removeAttribute("aria-busy");
-  box.innerHTML = `<div class="summary-hero"><div class="summary-head"><div class="summary-title"><div class="summary-status-line">${record.stale ? statusPill("warning", "Needs refresh") : statusPill("success", "Saved")}<span title="${safe(formatTime(record.updated_at))}">Updated ${safe(ago(record.updated_at))} · ${safe(record.timezone)}</span></div><h2>${safe(longDate(record.date))}</h2></div>
-      <div class="summary-actions"><div class="day-step"><button type="button" class="icon-button bordered" id="summary-older" aria-label="Older day" title="Older day"${older ? "" : " disabled"}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14.5 6-6 6 6 6"/></svg></button><button type="button" class="icon-button bordered" id="summary-newer" aria-label="Newer day" title="Newer day"${newer ? "" : " disabled"}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9.5 6 6 6-6 6"/></svg></button></div><button type="button" class="button secondary" id="summary-refresh">Refresh</button><button type="button" class="button primary" id="summary-history">Open in History</button></div></div>
-      ${overview ? `<p class="summary-overview">${safe(overview)}</p>` : ""}${homeReturn ? `<div class="summary-home-return"><span aria-hidden="true">⌂</span><div><small>Home after midnight</small><strong>${safe(homeReturn)}</strong></div></div>` : ""}</div>
-    ${record.stale ? '<div class="summary-stale-note"><span aria-hidden="true">!</span><div><strong>Newer location data has arrived for this day</strong><p>Refresh to include it.</p></div></div>' : ""}
+  box.innerHTML = `<div class="summary-hero"><div class="summary-head"><div class="summary-title"><h2>${safe(longDate(record.date))}</h2></div>
+      <div class="summary-actions"><div class="day-step"><button type="button" class="icon-button bordered" id="summary-older" aria-label="Older day" title="Older day"${older ? "" : " disabled"}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14.5 6-6 6 6 6"/></svg></button><button type="button" class="icon-button bordered" id="summary-newer" aria-label="Newer day" title="Newer day"${newer ? "" : " disabled"}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9.5 6 6 6-6 6"/></svg></button></div><button type="button" class="button primary" id="summary-history">Open in History</button></div></div>
+      ${homeReturn ? `<div class="summary-home-return"><span aria-hidden="true">⌂</span><div><small>Home after midnight</small><strong>${safe(homeReturn)}</strong></div></div>` : ""}</div>
+    ${record.stale ? '<div class="summary-stale-note"><span aria-hidden="true">!</span><div><strong>Newer location data arrived while you were viewing this day</strong><p><button type="button" class="button secondary small" id="summary-refresh">Update summary</button></p></div></div>' : ""}
     <dl class="summary-facts">${facts.map(([label, text, icon]) => metric(label, text, icon)).join("")}</dl>
-    <dl class="summary-secondary-facts">${secondary.map(([label, text]) => `<div><dt>${safe(label)}</dt><dd>${safe(text)}</dd></div>`).join("")}</dl>
     ${activity ? `<section class="summary-content-section summary-activity"><div class="summary-section-head"><h3>Activity</h3></div><div class="activity-chips">${activity}</div></section>` : ""}
     <section class="summary-content-section"><div class="summary-section-head"><h3>Timeline</h3></div>${timelineMarkup(value)}</section>
-    <div class="summary-lower-grid"><section class="summary-content-section"><div class="summary-section-head"><h3>Places</h3></div>${placesMarkup(value.places || [])}</section><section class="summary-content-section"><div class="summary-section-head"><h3>Reminders</h3></div>${remindersMarkup(value)}</section></div>
+    <div class="summary-lower-grid${reminderActivity ? "" : " single"}"><section class="summary-content-section"><div class="summary-section-head"><h3>Places</h3></div>${placesMarkup(value.places || [])}</section>${reminderActivity ? `<section class="summary-content-section"><div class="summary-section-head"><h3>Reminders</h3></div>${remindersMarkup(value)}</section>` : ""}</div>
     ${coverageMarkup(value)}
-    <details class="summary-technical"><summary><span><strong>For AI tools and developers</strong><small>The compact brief, its size, and the stored record</small></span><span class="summary-disclosure" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></span></summary><div class="summary-technical-body">${briefBlock}<details class="summary-json"><summary>Stored record <small>JSON · schema ${safe(value.schema_version ?? "?")}</small></summary><pre>${safe(JSON.stringify(value, null, 2))}</pre></details></div></details>`;
+    <details class="summary-technical"><summary><span><strong>For AI tools and developers</strong><small>The compact brief, its size, and the stored record</small></span><span class="summary-disclosure" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></span></summary><div class="summary-technical-body"><p class="summary-record-meta">Saved ${safe(ago(record.updated_at))} (${safe(formatTime(record.updated_at))}) · ${safe(record.timezone)} · ${(totals.timeline_fixes ?? 0).toLocaleString()} key fixes of ${(totals.raw_fixes ?? 0).toLocaleString()} raw · sampled distance ${Number(totals.sampled_distance_km || 0).toFixed(1)} km</p>${briefBlock}<details class="summary-json"><summary>Stored record <small>JSON · schema ${safe(value.schema_version ?? "?")}</small></summary><pre>${safe(JSON.stringify(value, null, 2))}</pre></details></div></details>`;
   $("summary-history").onclick = () => {
     state.focusPlace = null;
     state.followToday = record.date === localDateKey();
@@ -332,7 +319,7 @@ export function renderSummaryDetail(record) {
     showView("explore");
     refreshExplore().catch((error) => toast(error.message));
   };
-  $("summary-refresh").onclick = async () => {
+  if (record.stale) $("summary-refresh").onclick = async () => {
     try {
       await api("/api/daily-summary?" + new URLSearchParams({ date: record.date }));
       await refreshSummaries();
@@ -352,5 +339,10 @@ export function initSummaries() {
     event.preventDefault();
     const date = $("summary-date").value;
     if (date) openSummary(date, true);
+  };
+  // Picking a date opens it; there is no separate button to press.
+  $("summary-date").onchange = () => {
+    const date = $("summary-date").value;
+    if (date && date !== state.summaryDate) openSummary(date, true);
   };
 }

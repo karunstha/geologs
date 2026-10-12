@@ -178,34 +178,32 @@ td small {
   color: var(--text-2);
   font-size: 12.5px;
 }
-@media (prefers-color-scheme: dark) {
-  .place-icon.home {
-    --kind: #9fb3c4;
-  }
-  .place-icon.shopping {
-    --kind: #6fa8e6;
-  }
-  .place-icon.salon {
-    --kind: #e28ab9;
-  }
-  .place-icon.water {
-    --kind: #5cc0e6;
-  }
-  .place-icon.education {
-    --kind: #a893ec;
-  }
-  .place-icon.bar {
-    --kind: #e0a46a;
-  }
-  .place-icon.park {
-    --kind: #7cc883;
-  }
-  .place-icon.food {
-    --kind: #f09a63;
-  }
-  .place-icon.health {
-    --kind: #f08080;
-  }
+:root[data-theme="dark"] .place-icon.home {
+  --kind: #9fb3c4;
+}
+:root[data-theme="dark"] .place-icon.shopping {
+  --kind: #6fa8e6;
+}
+:root[data-theme="dark"] .place-icon.salon {
+  --kind: #e28ab9;
+}
+:root[data-theme="dark"] .place-icon.water {
+  --kind: #5cc0e6;
+}
+:root[data-theme="dark"] .place-icon.education {
+  --kind: #a893ec;
+}
+:root[data-theme="dark"] .place-icon.bar {
+  --kind: #e0a46a;
+}
+:root[data-theme="dark"] .place-icon.park {
+  --kind: #7cc883;
+}
+:root[data-theme="dark"] .place-icon.food {
+  --kind: #f09a63;
+}
+:root[data-theme="dark"] .place-icon.health {
+  --kind: #f08080;
 }
 @media (max-width: 760px) {
   /* Icon actions and pills fit beside the text, so rows stay on one line. */
