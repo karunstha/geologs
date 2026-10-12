@@ -18,7 +18,7 @@ from urllib.parse import parse_qs, urlparse
 from .ingest import FORMATS as INGEST_FORMATS, claimed_source
 
 from .core import PLACES_PROVIDERS, Store, token_allows_source, configured_places_providers, current_location, deliver_webhook, geocode, nearby_places, place_details, places_provider, reverse_geocode, save_place_label
-from .analysis import daily_briefs, daily_overview, day_summary, delete_samples, delete_source, fuel_costs, insights, place_overview, stored_daily_record, place_patterns, predict_next, resolve_place_patterns, save_scheduled_summaries, search_visits, stays, transitions, visited_places
+from .analysis import daily_briefs, daily_overview, day_summary, delete_samples, delete_source, fuel_cost_windows, insights, place_overview, stored_daily_record, place_patterns, predict_next, resolve_place_patterns, save_scheduled_summaries, search_visits, stays, transitions, visited_places
 from .fuel import fuel_status, refresh_prices, set_manual_price
 from .mcp import SUPPORTED_VERSIONS, dispatch
 from .postgres import INTEGRITY_ERRORS
@@ -373,7 +373,8 @@ class Handler(BaseHTTPRequestHandler):
             elif url.path == "/api/ingest-tokens":
                 value = {"tokens": store.ingest_tokens(), "env_token": bool(ingest_token())}
             elif url.path == "/api/fuel":
-                value = {**fuel_status(store), "last_7_days": fuel_costs(store, 7), "last_30_days": fuel_costs(store, 30)}
+                costs = fuel_cost_windows(store, (7, 30))
+                value = {**fuel_status(store), "last_7_days": costs[7], "last_30_days": costs[30]}
             elif url.path == "/api/stay-edits": value = store.stay_edits(q.get("start"), q.get("end"), q.get("source"))
             elif url.path == "/api/mode-overrides": value = store.mode_overrides()
             elif url.path == "/api/reminders": value = store.reminders()
@@ -493,9 +494,12 @@ class Handler(BaseHTTPRequestHandler):
                 store.save_settings(fields)
                 if payload.get("price_per_l") not in (None, ""):
                     set_manual_price(store, payload["price_per_l"])
-                refreshed = refresh_prices(store, force=True) if store.settings()["fuel_price_source"] == "auto" else None
-                result = {**fuel_status(store), "refresh": refreshed, "last_7_days": fuel_costs(store, 7),
-                          "last_30_days": fuel_costs(store, 30)}
+                try:
+                    refreshed = refresh_prices(store, force=store.settings()["fuel_price_source"] == "auto")
+                except Exception as exc:  # the EIA being down shouldn't lose your saved settings
+                    refreshed = {"fetched": 0, "reason": "error", "error": str(exc)}
+                costs = fuel_cost_windows(store, (7, 30))
+                result = {**fuel_status(store), "refresh": refreshed, "last_7_days": costs[7], "last_30_days": costs[30]}
             elif path == "/api/ingest-tokens/delete":
                 result = store.delete_ingest_token(payload["id"])
             elif path == "/api/sources/delete":

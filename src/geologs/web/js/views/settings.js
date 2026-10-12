@@ -19,7 +19,9 @@ import {
   toLengthUnit,
   toPerVolume,
   toSpeedUnit,
-  toVolumeUnit,
+  volumeText,
+  currencyCode,
+  currencyOptions,
   volumeUnit,
   zoneOptions,
 } from "../core/format.js";
@@ -202,6 +204,14 @@ export function showSettingsPage(id) {
   const pages = [...document.querySelectorAll(".settings-section")];
   if (!pages.some((page) => page.id === id)) id = pages[0].id;
   for (const page of pages) page.hidden = page.id !== id;
+  // The page's category: its sidebar group, and on narrow screens the category switch and its row of pages.
+  const group = document.querySelector(`.settings-tab[data-settings-page="${id}"]`)?.closest(".settings-group");
+  document.querySelectorAll(".settings-group").forEach((item) => item.classList.toggle("active", item === group));
+  document.querySelectorAll("[data-settings-group]").forEach((button) => {
+    const active = button.dataset.settingsGroup === group?.dataset.group;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
   document.querySelectorAll(".settings-tab").forEach((tab) => {
     const active = tab.dataset.settingsPage === id;
     tab.classList.toggle("active", active);
@@ -211,7 +221,7 @@ export function showSettingsPage(id) {
   try {
     sessionStorage.setItem(SETTINGS_PAGE_KEY, id);
   } catch (_error) {}
-  if (id === "settings-car" && state.settings) refreshFuel().catch((error) => toast(error.message));
+  if (id === "settings-car" && state.settings) refreshFuel(true).catch((error) => toast(error.message));
   document.querySelector(".settings-tab.active")?.scrollIntoView({ block: "nearest", inline: "nearest" });
 }
 
@@ -840,32 +850,47 @@ function renderUnitsChoice() {
 
 const GRADE_LABELS = { regular: "regular", midgrade: "midgrade", premium: "premium", diesel: "diesel" };
 
-// Car & fuel: the form, the price status, and what you spent lately.
-function renderFuel() {
-  const data = state.fuel;
-  if (!data || !state.settings) return;
+const weekOf = (day) => new Date(day + "T12:00").toLocaleDateString(undefined, { month: "short", day: "numeric" });
+
+// Car & fuel: put the saved settings in the form (on open and after saving, never while you're choosing).
+function fillFuelForm() {
   const settings = state.settings;
+  if (!settings) return;
+  const economy = toEconomyUnit(settings.fuel_economy_l100km);
+  $("fuel-economy").value = economy ? round1(economy) : "";
+  $("fuel-grade").value = settings.fuel_grade;
+  if (!$("fuel-currency").options.length || $("fuel-currency").dataset.saved !== settings.currency) {
+    $("fuel-currency").innerHTML = currencyOptions(settings.currency);
+    $("fuel-currency").dataset.saved = settings.currency;
+  }
+  $("fuel-currency").value = currencyCode(settings.currency);
+  if (!$("fuel-currency").value) $("fuel-currency").value = settings.currency;
+  document.querySelectorAll('input[name="fuel-price-source"]').forEach((input) => (input.checked = input.value === settings.fuel_price_source));
+}
+
+// The price status and what you spent lately; works from the settings alone until /api/fuel answers.
+function renderFuel() {
+  const settings = state.settings;
+  if (!settings) return;
+  const data = state.fuel;
   $("fuel-economy-unit").textContent = economyUnit();
   $("fuel-economy").placeholder = settings.units === "imperial" ? "e.g. 30" : "e.g. 8";
-  const economy = toEconomyUnit(settings.fuel_economy_l100km);
-  if (!$("car-form").contains(document.activeElement)) {
-    $("fuel-economy").value = economy ? round1(economy) : "";
-    $("fuel-grade").value = settings.fuel_grade;
-    $("fuel-currency").value = settings.currency;
-    document.querySelectorAll('input[name="fuel-price-source"]').forEach((input) => (input.checked = input.value === settings.fuel_price_source));
-    $("fuel-price").value = settings.fuel_price_source === "manual" && data.price_per_l ? (Math.round(toPerVolume(data.price_per_l) * 1000) / 1000) : "";
-  }
   $("fuel-price-unit").textContent = `per ${volumeUnit()}`;
   const auto = (document.querySelector('input[name="fuel-price-source"]:checked')?.value || settings.fuel_price_source) === "auto";
-  const priceText = data.price_per_l
-    ? `${moneyText(toPerVolume(data.price_per_l), data.currency)}/${volumeUnit()} ${GRADE_LABELS[settings.fuel_grade]}, week of ${new Date(data.price_date + "T12:00").toLocaleDateString(undefined, { month: "short", day: "numeric" })}`
+  $("fuel-area-row").hidden = !auto;
+  if (!data) {
+    $("fuel-auto-note").textContent = "Loading the latest weekly price…";
+    return;
+  }
+  const eia = data.eia || {};
+  const eiaText = eia.price_per_l
+    ? `${moneyText(toPerVolume(eia.price_per_l), data.currency)}/${volumeUnit()} ${GRADE_LABELS[settings.fuel_grade]}, week of ${weekOf(eia.price_date)}`
     : "";
   $("fuel-auto-note").textContent = !data.eia_key
     ? "Needs a free EIA key: register at eia.gov/opendata, add EIA_API_KEY to .env, and restart. US only."
     : data.area
-      ? `${data.area_label}${data.state ? ` (from ${data.state})` : ""}${auto && priceText ? `: ${priceText}` : ""}. Updated weekly by the US Energy Information Administration.`
+      ? `${data.area_label}${data.state ? ` (from ${data.state})` : ""}: ${eiaText || "fetching this week's price…"}. Updated weekly by the US Energy Information Administration.`
       : "The weekly US average for your region; choose the region below if it can't be found from your location.";
-  $("fuel-area-row").hidden = !auto;
   const areas = Object.entries(data.areas || {});
   $("fuel-area").innerHTML =
     `<option value="">Automatic${data.area && !settings.fuel_area ? ` (${data.area_label})` : ""}</option>` +
@@ -877,13 +902,24 @@ function renderFuel() {
   spend.hidden = !month?.configured;
   if (month?.configured) {
     const block = (label, costs) =>
-      `<div><span>${label}</span><strong>${moneyText(costs.cost, costs.currency)}</strong><small>${plural(costs.drives, "drive")} · ${distanceText(costs.driving_km)} · ${(Math.round(toVolumeUnit(costs.litres) * 10) / 10).toLocaleString()} ${volumeUnit()}</small></div>`;
-    spend.innerHTML = `<div class="fuel-stats"><div class="fuel-average"><span>Average per day</span><strong>${moneyText(month.cost_per_day, month.currency)}</strong><small>over the last ${plural(month.covered_days, "day")}</small></div>${block("Last 7 days", week)}${block("Last 30 days", month)}</div>${auto && priceText ? `<p class="help">At ${priceText}.</p>` : ""}`;
+      `<div><span>${label}</span><strong>${moneyText(costs.cost, costs.currency)}</strong><small>${plural(costs.drives, "drive")} · ${distanceText(costs.driving_km)} · ${volumeText(costs.litres)}</small></div>`;
+    const inUse = data.price_per_l
+      ? `At ${moneyText(toPerVolume(data.price_per_l), data.currency)}/${volumeUnit()}${settings.fuel_price_source === "auto" ? ` ${GRADE_LABELS[settings.fuel_grade]}, week of ${weekOf(data.price_date)}` : ", your price"}.`
+      : "";
+    spend.innerHTML = `<div class="fuel-stats"><div class="fuel-average"><span>Average per day</span><strong>${moneyText(month.cost_per_day, month.currency)}</strong><small>over the last ${plural(month.covered_days, "day")}</small></div>${block("Last 7 days", week)}${block("Last 30 days", month)}</div>${inUse ? `<p class="help">${inUse}</p>` : ""}`;
   }
 }
 
-export async function refreshFuel() {
+// fill: the page was just opened, so show the saved settings straight away rather than after the costs add up.
+export async function refreshFuel(fill = false) {
+  if (fill) {
+    $("fuel-price").value = "";
+    fillFuelForm();
+  }
+  renderFuel();
   state.fuel = await api("/api/fuel");
+  const manual = state.fuel.manual?.price_per_l;
+  if (manual && !$("fuel-price").value) $("fuel-price").value = Math.round(toPerVolume(manual) * 1000) / 1000;
   renderFuel();
 }
 
@@ -901,7 +937,7 @@ function readFuelForm() {
   let error = "";
   if (economy && !(+economy > 0)) error = "Enter your car's fuel economy as a number.";
   else if (source === "manual" && !(+price > 0)) error = `Enter what you pay per ${volumeUnit() === "gal" ? "gallon" : "litre"}.`;
-  else if (!payload.currency) error = "Enter a currency, such as $.";
+  else if (!payload.currency) error = "Choose a currency.";
   if (source === "manual" && +price > 0) payload.price_per_l = Math.round(fromPerVolume(+price) * 10000) / 10000;
   $("fuel-error").textContent = error;
   $("fuel-error").hidden = !error;
@@ -926,11 +962,16 @@ function initFuel() {
       state.settings = await api("/api/settings");
       state.fuel = result;
       document.activeElement?.blur();
+      $("fuel-price").value = "";
+      fillFuelForm();
+      if (result.manual?.price_per_l) $("fuel-price").value = Math.round(toPerVolume(result.manual.price_per_l) * 1000) / 1000;
       renderFuel();
       const refresh = result.refresh;
       toast(
         refresh?.reason === "no_key"
           ? "Saved. Automatic prices need EIA_API_KEY in .env."
+          : refresh?.reason === "error" && payload.fuel_price_source === "auto"
+            ? "Saved, but the EIA price couldn't be fetched: " + refresh.error
           : refresh?.reason === "no_area"
             ? "Saved. Choose a price region: your location isn't in a US region."
             : "Fuel settings saved",
@@ -949,7 +990,7 @@ function initFuel() {
         try {
           state.settings = await post("/api/settings", { units: input.value });
           await refreshAll();
-          await refreshFuel();
+          await refreshFuel(true);
           toast(input.value === "imperial" ? "Showing miles, mph, feet, and gallons" : "Showing kilometres, km/h, metres, and litres");
         } catch (error) {
           toast(error.message);
@@ -985,6 +1026,20 @@ export function initSettings() {
   for (const [mode] of SPEED_FIELDS)
     $(`speed-${mode}-name`).innerHTML = `${modeIcon(mode)}${safe(modeInfo[mode].noun)}`;
   document.querySelectorAll(".settings-tab").forEach((tab) => (tab.onclick = () => showSettingsPage(tab.dataset.settingsPage)));
+  // A category opens its first page.
+  document.querySelectorAll("[data-settings-group]").forEach(
+    (button) =>
+      (button.onclick = () =>
+        showSettingsPage(document.querySelector(`.settings-group[data-group="${button.dataset.settingsGroup}"] .settings-tab`).dataset.settingsPage)),
+  );
+  // Each page says which category it belongs to.
+  document.querySelectorAll(".settings-group").forEach((group) => {
+    const label = group.querySelector(".settings-group-label").textContent;
+    group.querySelectorAll(".settings-tab").forEach((tab) => {
+      const intro = document.querySelector(`#${tab.dataset.settingsPage} .section-intro`);
+      if (intro && !intro.querySelector(".section-eyebrow")) intro.insertAdjacentHTML("afterbegin", `<span class="section-eyebrow">${safe(label)}</span>`);
+    });
+  });
   let page = "";
   try {
     page = sessionStorage.getItem(SETTINGS_PAGE_KEY) || "";

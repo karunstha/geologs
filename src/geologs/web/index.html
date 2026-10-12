@@ -146,37 +146,16 @@
     <section id="reminders-view" class="view" aria-labelledby="reminders-title">
       <div class="page-head">
         <div class="page-title"><h1 id="reminders-title">Reminders</h1><p class="page-subtitle">One-time notes that appear when you arrive somewhere.</p></div>
-        <button id="notifications" class="button secondary" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 16.5h12l-1.6-2.6V10a4.4 4.4 0 0 0-8.8 0v3.9Z"/><path d="M10 19.5h4"/></svg><span id="notifications-label">Enable browser alerts</span></button>
+        <div class="page-actions"><button id="notifications" class="button secondary" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 16.5h12l-1.6-2.6V10a4.4 4.4 0 0 0-8.8 0v3.9Z"/><path d="M10 19.5h4"/></svg><span id="notifications-label">Enable browser alerts</span></button><button id="new-reminder" class="button primary" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span>New reminder</span></button></div>
       </div>
-      <div class="reminders-layout">
-        <section class="card reminder-composer" aria-labelledby="new-reminder-title"><div class="card-head"><div><h2 id="new-reminder-title">New reminder</h2><p>What to remember, and where.</p></div></div>
-          <form id="reminder-form" class="form-stack">
-            <label class="field"><span>Remind me to</span><input id="reminder-text" class="input" required maxlength="500" placeholder="Pick up salt"></label>
-            <fieldset class="field choice-field"><legend>When I arrive at</legend>
-              <div class="segmented choice" role="radiogroup" aria-label="Kind of place">
-                <label><input type="radio" name="reminder-kind" value="saved" checked><span>A saved place</span></label>
-                <label><input type="radio" name="reminder-kind" value="named"><span>A place by name</span></label>
-                <label><input type="radio" name="reminder-kind" value="location"><span>A location</span></label>
-              </div>
-            </fieldset>
-            <div id="reminder-saved-place" class="form-stack"><label class="field"><span class="sr-only">Saved place</span><select id="reminder-place" class="input" required></select></label><p id="reminder-no-places" class="help" hidden>Save a place on the Places page first, or choose a place by name or a location.</p></div>
-            <div id="reminder-named-place" class="form-stack" hidden><label class="field"><span class="sr-only">Place name</span><input id="reminder-match-name" class="input" maxlength="120" placeholder="Starbucks, Walgreens, a library…" autocomplete="off"></label></div>
-            <div id="reminder-custom-place" class="form-stack subpanel" hidden>
-              <div class="search-row"><input id="reminder-place-search" class="input" placeholder="Search for an address or place" aria-label="Search for the reminder's location"><button id="reminder-search-button" class="button secondary" type="button">Search</button></div>
-              <div id="reminder-search-results" class="result-list"></div>
-              <label class="field"><span>Place name</span><input id="reminder-place-name" class="input" maxlength="120" placeholder="Walmart"></label>
-              <div class="form-pair"><label class="field"><span>Latitude</span><input id="reminder-lat" class="input" type="number" step="any" min="-90" max="90"></label><label class="field"><span>Longitude</span><input id="reminder-lon" class="input" type="number" step="any" min="-180" max="180"></label></div>
-              <div class="inline-actions"><button id="reminder-use-current" class="button ghost small" type="button">Use my current location</button><button id="reminder-reverse" class="button ghost small" type="button">Look up these coordinates</button></div>
-              <label class="field"><span>Arrival radius (<span class="length-unit">m</span>)</span><input id="reminder-radius" class="input" type="number" min="20" max="5000" value="150"></label>
-              <input id="reminder-address" type="hidden"><input id="reminder-category" type="hidden"><input id="reminder-provider-id" type="hidden">
-            </div>
-            <p id="reminder-hint" class="help"></p>
-            <div class="form-actions"><button class="button primary">Create reminder</button></div>
-          </form>
-        </section>
-        <section class="card reminder-active" aria-labelledby="active-reminders-title"><div class="card-head"><div><h2 id="active-reminders-title">Waiting</h2><p>Each fires once when you get there.</p></div><span id="active-reminder-count" class="badge"></span></div><div id="reminders-list" class="list rows"></div></section>
-      </div>
-      <section class="card arrival-inbox" aria-labelledby="reminder-history-title"><div class="card-head"><div><h2 id="reminder-history-title">History</h2><p>Reminders that fired or were cancelled.</p></div><span id="reminder-history-count" class="badge"></span></div><div id="reminder-history" class="list rows"></div></section>
+      <section class="card flush reminders-card" aria-label="Your reminders">
+        <div class="tabs" role="tablist" aria-label="Reminders">
+          <button type="button" class="detail-tab active" role="tab" id="reminder-tab-waiting" data-reminder-tab="waiting" aria-selected="true" aria-controls="reminders-list">Waiting <span id="active-reminder-count" class="badge"></span></button>
+          <button type="button" class="detail-tab" role="tab" id="reminder-tab-history" data-reminder-tab="history" aria-selected="false" aria-controls="reminder-history">History <span id="reminder-history-count" class="badge"></span></button>
+        </div>
+        <div id="reminders-list" class="list rows reminder-rows" role="tabpanel" aria-labelledby="reminder-tab-waiting"></div>
+        <div id="reminder-history" class="list rows reminder-rows" role="tabpanel" aria-labelledby="reminder-tab-history" hidden></div>
+      </section>
     </section>
 
     <section id="summaries-view" class="view" aria-labelledby="summaries-title">
@@ -193,15 +172,22 @@
     <section id="settings-view" class="view" aria-labelledby="settings-title">
       <div class="page-head"><div class="page-title"><h1 id="settings-title">Settings</h1><p class="page-subtitle">Connect your devices and tune how GeoLogs reads and names your history.</p></div></div>
       <div class="settings-layout">
-        <nav class="settings-nav" aria-label="Settings pages">
-          <button type="button" class="settings-tab" data-settings-page="settings-sources"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="2.5" width="10" height="19" rx="2.5"/><path d="M11 18.5h2"/></svg><span>Devices</span></button>
-          <button type="button" class="settings-tab" data-settings-page="settings-stays"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21s-6.5-5.4-6.5-11a6.5 6.5 0 0 1 13 0c0 5.6-6.5 11-6.5 11Z"/><circle cx="12" cy="10" r="2.3"/></svg><span>Stays &amp; stops</span></button>
-          <button type="button" class="settings-tab" data-settings-page="settings-movement"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 16a8 8 0 1 1 16 0"/><path d="m12 16 4-5"/><path d="M4 19.5h16"/></svg><span>Movement</span></button>
-          <button type="button" class="settings-tab" data-settings-page="settings-car"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 11l1.6-4.2A2 2 0 0 1 8.5 5.5h7a2 2 0 0 1 1.9 1.3L19 11"/><path d="M3.5 11h17v5.5h-17z"/><path d="M6 16.5v2M18 16.5v2"/></svg><span>Car &amp; fuel</span></button>
-          <button type="button" class="settings-tab" data-settings-page="settings-places"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6.5 9 4l6 2.5L20 4v13.5L15 20l-6-2.5L4 20Z"/><path d="M9 4v13.5M15 6.5V20"/></svg><span>Place names</span></button>
-          <button type="button" class="settings-tab" data-settings-page="settings-summaries"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="15.5" rx="2"/><path d="M3.5 9.5h17M8 3v4M16 3v4M8 13.5h4M8 16.5h7"/></svg><span>Days &amp; summaries</span></button>
-          <button type="button" class="settings-tab" data-settings-page="settings-appearance"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 3.5v17a8.5 8.5 0 0 0 0-17Z" fill="currentColor"/></svg><span>Appearance</span></button>
-          <button type="button" class="settings-tab" data-settings-page="settings-access"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/></svg><span>Access</span></button>
+        <nav class="settings-nav" aria-label="Settings">
+          <div class="settings-cats segmented" role="group" aria-label="Settings categories"><button type="button" data-settings-group="tracking">Tracking</button><button type="button" data-settings-group="timeline">Timeline</button><button type="button" data-settings-group="preferences">Preferences</button></div>
+          <div class="settings-group" data-group="tracking" role="group" aria-labelledby="settings-group-tracking"><p id="settings-group-tracking" class="settings-group-label">Tracking</p>
+            <button type="button" class="settings-tab" data-settings-page="settings-sources"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="2.5" width="10" height="19" rx="2.5"/><path d="M11 18.5h2"/></svg><span>Devices</span></button>
+            <button type="button" class="settings-tab" data-settings-page="settings-access"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/></svg><span>Access</span></button>
+          </div>
+          <div class="settings-group" data-group="timeline" role="group" aria-labelledby="settings-group-timeline"><p id="settings-group-timeline" class="settings-group-label">Timeline</p>
+            <button type="button" class="settings-tab" data-settings-page="settings-stays"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21s-6.5-5.4-6.5-11a6.5 6.5 0 0 1 13 0c0 5.6-6.5 11-6.5 11Z"/><circle cx="12" cy="10" r="2.3"/></svg><span>Stays &amp; stops</span></button>
+            <button type="button" class="settings-tab" data-settings-page="settings-movement"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 16a8 8 0 1 1 16 0"/><path d="m12 16 4-5"/><path d="M4 19.5h16"/></svg><span>Movement</span></button>
+            <button type="button" class="settings-tab" data-settings-page="settings-places"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6.5 9 4l6 2.5L20 4v13.5L15 20l-6-2.5L4 20Z"/><path d="M9 4v13.5M15 6.5V20"/></svg><span>Place names</span></button>
+            <button type="button" class="settings-tab" data-settings-page="settings-summaries"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="15.5" rx="2"/><path d="M3.5 9.5h17M8 3v4M16 3v4M8 13.5h4M8 16.5h7"/></svg><span>Days &amp; summaries</span></button>
+          </div>
+          <div class="settings-group" data-group="preferences" role="group" aria-labelledby="settings-group-preferences"><p id="settings-group-preferences" class="settings-group-label">Preferences</p>
+            <button type="button" class="settings-tab" data-settings-page="settings-car"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 11l1.6-4.2A2 2 0 0 1 8.5 5.5h7a2 2 0 0 1 1.9 1.3L19 11"/><path d="M3.5 11h17v5.5h-17z"/><path d="M6 16.5v2M18 16.5v2"/></svg><span>Car &amp; fuel</span></button>
+            <button type="button" class="settings-tab" data-settings-page="settings-appearance"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 3.5v17a8.5 8.5 0 0 0 0-17Z" fill="currentColor"/></svg><span>Units &amp; theme</span></button>
+          </div>
         </nav>
         <div class="settings-sections">
           <section id="settings-sources" class="settings-section" aria-labelledby="sources-title">
@@ -264,7 +250,7 @@
                 </div>
               </fieldset>
               <label id="fuel-area-row" class="setting-row"><span class="setting-label"><strong>Price region</strong><small id="fuel-area-note">Found from your Home place, else your latest location.</small></span><select id="fuel-area" class="input"></select></label>
-              <label class="setting-row"><span class="setting-label"><strong>Currency</strong><small>A symbol such as $ or €, or a code such as NPR.</small></span><input id="fuel-currency" class="input" maxlength="5" required></label>
+              <label class="setting-row"><span class="setting-label"><strong>Currency</strong><small>What fuel costs are shown in. Type a currency's name to jump to it.</small></span><select id="fuel-currency" class="input" required></select></label>
               <p id="fuel-error" class="field-error" role="alert" hidden></p>
               <div class="card-foot"><button class="button primary">Save changes</button></div>
             </form>
@@ -295,7 +281,7 @@
           </section>
 
           <section id="settings-appearance" class="settings-section" aria-labelledby="appearance-title" hidden>
-            <div class="section-intro"><h2 id="appearance-title">Appearance</h2><p>Units for everyone using GeoLogs, and how it looks in this browser.</p></div>
+            <div class="section-intro"><h2 id="appearance-title">Units &amp; theme</h2><p>Units for everyone using GeoLogs, and how it looks in this browser.</p></div>
             <div class="card settings-form">
               <fieldset class="setting-group"><legend class="setting-label"><strong>Units</strong><small>For distances, speeds, and fuel everywhere in GeoLogs. AI tools always get metric.</small></legend>
                 <div class="choice-cards">
@@ -365,6 +351,33 @@
       <p id="stop-error" class="field-error" role="alert" hidden></p>
       <div class="dialog-actions"><button type="button" id="cancel-stop" class="button secondary">Cancel</button><button class="button primary">Add stay</button></div>
     </form></section>
+  </dialog>
+
+  <dialog id="reminder-dialog" class="dialog" aria-labelledby="reminder-dialog-title">
+    <div class="dialog-head"><div><h2 id="reminder-dialog-title">New reminder</h2><p>What to remember, and where. It fires once, when you get there.</p></div><button id="close-reminder-dialog" class="icon-button" type="button" aria-label="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
+    <section class="dialog-section"><form id="reminder-form" class="form-stack">
+            <label class="field"><span>Remind me to</span><input id="reminder-text" class="input" required autofocus maxlength="500" placeholder="Pick up salt"></label>
+            <fieldset class="field choice-field"><legend>When I arrive at</legend>
+              <div class="segmented choice" role="radiogroup" aria-label="Kind of place">
+                <label><input type="radio" name="reminder-kind" value="saved" checked><span>A saved place</span></label>
+                <label><input type="radio" name="reminder-kind" value="named"><span>A place by name</span></label>
+                <label><input type="radio" name="reminder-kind" value="location"><span>A location</span></label>
+              </div>
+            </fieldset>
+            <div id="reminder-saved-place" class="form-stack"><label class="field"><span class="sr-only">Saved place</span><select id="reminder-place" class="input" required></select></label><p id="reminder-no-places" class="help" hidden>Save a place on the Places page first, or choose a place by name or a location.</p></div>
+            <div id="reminder-named-place" class="form-stack" hidden><label class="field"><span class="sr-only">Place name</span><input id="reminder-match-name" class="input" maxlength="120" placeholder="Starbucks, Walgreens, a library…" autocomplete="off"></label></div>
+            <div id="reminder-custom-place" class="form-stack subpanel" hidden>
+              <div class="search-row"><input id="reminder-place-search" class="input" placeholder="Search for an address or place" aria-label="Search for the reminder's location"><button id="reminder-search-button" class="button secondary" type="button">Search</button></div>
+              <div id="reminder-search-results" class="result-list"></div>
+              <label class="field"><span>Place name</span><input id="reminder-place-name" class="input" maxlength="120" placeholder="Walmart"></label>
+              <div class="form-pair"><label class="field"><span>Latitude</span><input id="reminder-lat" class="input" type="number" step="any" min="-90" max="90"></label><label class="field"><span>Longitude</span><input id="reminder-lon" class="input" type="number" step="any" min="-180" max="180"></label></div>
+              <div class="inline-actions"><button id="reminder-use-current" class="button ghost small" type="button">Use my current location</button><button id="reminder-reverse" class="button ghost small" type="button">Look up these coordinates</button></div>
+              <label class="field"><span>Arrival radius (<span class="length-unit">m</span>)</span><input id="reminder-radius" class="input" type="number" min="20" max="5000" value="150"></label>
+              <input id="reminder-address" type="hidden"><input id="reminder-category" type="hidden"><input id="reminder-provider-id" type="hidden">
+            </div>
+            <p id="reminder-hint" class="help"></p>
+            <div class="dialog-actions"><button type="button" id="cancel-reminder" class="button secondary">Cancel</button><button class="button primary">Create reminder</button></div>
+          </form></section>
   </dialog>
 
   <dialog id="delete-samples-dialog" class="dialog narrow" aria-labelledby="delete-samples-title" aria-describedby="delete-samples-summary">

@@ -10,11 +10,9 @@ import {
   durationText,
   formatTime,
   localDateKey,
-  moneyText,
+  fuelText,
   plural,
   shiftDateKey,
-  toVolumeUnit,
-  volumeUnit,
   zonedMidnight,
 } from "../core/format.js";
 import { state } from "../core/state.js";
@@ -46,8 +44,8 @@ function renderStats(day) {
   $("stat-trips").textContent = day.trips.length.toLocaleString();
   $("stat-fuel-cell").hidden = !day.fuel;
   if (day.fuel) {
-    $("stat-fuel").textContent = moneyText(day.fuel.cost, day.fuel.currency);
-    $("stat-fuel").title = `${(Math.round(toVolumeUnit(day.fuel.litres) * 10) / 10).toLocaleString()} ${volumeUnit()} over ${plural(day.fuel.drives, "drive")}`;
+    $("stat-fuel").textContent = fuelText(day.fuel.cost, day.fuel.litres, day.fuel.currency);
+    $("stat-fuel").title = `Over ${plural(day.fuel.drives, "drive")}`;
   }
   const activity = Object.entries(day.activity_totals)
     .filter(([, totals]) => totals.count)

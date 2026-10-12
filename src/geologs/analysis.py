@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -1671,6 +1672,16 @@ def _brief_duration(minutes):
     return f"{hours} h {rest} min" if rest else f"{hours} h"
 
 
+_CURRENCY_SYMBOLS = {"USD": "$", "EUR": "€", "GBP": "£", "JPY": "¥", "INR": "₹"}
+
+
+def money_text(amount, currency):
+    """$4.20 for a symbol or a well-known code, 4.20 NPR for any other code."""
+    currency = currency or "USD"
+    symbol = _CURRENCY_SYMBOLS.get(currency, currency)
+    return f"{amount:.2f} {currency}" if re.fullmatch(r"[A-Za-z]{2,}", symbol) else f"{symbol}{amount:.2f}"
+
+
 def _brief_move(mode, distance_km):
     return BRIEF_MOVES.get(mode, mode + " {}").format(f"{distance_km or 0:.1f} km")
 
@@ -1715,7 +1726,7 @@ def daily_brief(overview):
             joined = ", ".join(moves)
             summary += " " + joined[0].upper() + joined[1:] + "."
         if totals.get("fuel_cost") is not None:
-            summary += f" Fuel about {totals.get('currency') or '$'}{totals['fuel_cost']:.2f}."
+            summary += f" Fuel about {money_text(totals['fuel_cost'], totals.get('currency'))}."
         brief["summary"] = summary
     timeline = []
     for visit in overview["visits"]:
@@ -1918,29 +1929,46 @@ def fuel_costs(store, days=30, now=None):
     The average counts every calendar day in the window from your first
     recorded day on, so quiet days lower it as they would your spending.
     """
+    return fuel_cost_windows(store, (days,), now)[int(days)]
+
+
+def fuel_cost_windows(store, windows=(7, 30), now=None):
+    """fuel_costs for several windows at once, finding the trips of the longest only once."""
     context = fuel.fuel_context(store)
     settings = store.settings()
     zone = ZoneInfo(settings["timezone"])
     today = (now or datetime.now(timezone.utc)).astimezone(zone).date()
-    first = today - timedelta(days=int(days) - 1)
-    start = datetime.combine(first, datetime.min.time(), zone).astimezone(timezone.utc)
-    end = datetime.combine(today + timedelta(days=1), datetime.min.time(), zone).astimezone(timezone.utc) - timedelta(microseconds=1)
+    windows = sorted({int(days) for days in windows})
     earliest = store.db.execute("SELECT MIN(timestamp) AS t FROM point_observations").fetchone()["t"]
-    if earliest:
-        first = max(first, datetime.fromisoformat(earliest).astimezone(zone).date())
-    totals = {"days": int(days), "covered_days": max(0, (today - first).days + 1), "drives": 0, "driving_km": 0.0,
-              "litres": 0.0, "cost": 0.0, "currency": settings["currency"], "configured": context is not None}
-    if context is None or not earliest:
-        return {**totals, "cost_per_day": None}
-    for trip in anchored_trips(store, start.isoformat(), end.isoformat()):
-        if trip.get("mode") != "driving":
-            continue
-        day = datetime.fromisoformat(trip["start"]).astimezone(zone).date().isoformat()
-        cost = fuel.trip_fuel(context, trip, day)
-        if cost:
-            totals["drives"] += 1
-            totals["driving_km"] += trip["distance_km"]
-            totals["litres"] += cost["litres"]
-            totals["cost"] += cost["cost"]
-    totals.update(driving_km=round(totals["driving_km"], 1), litres=round(totals["litres"], 1), cost=round(totals["cost"], 2))
-    return {**totals, "cost_per_day": round(totals["cost"] / totals["covered_days"], 2) if totals["covered_days"] else None}
+    earliest_day = datetime.fromisoformat(earliest).astimezone(zone).date() if earliest else None
+    results = {}
+    for days in windows:
+        first = today - timedelta(days=days - 1)
+        if earliest_day:
+            first = max(first, earliest_day)
+        results[days] = {"days": days, "covered_days": max(0, (today - first).days + 1), "drives": 0, "driving_km": 0.0,
+                         "litres": 0.0, "cost": 0.0, "currency": settings["currency"], "configured": context is not None,
+                         "first": first.isoformat()}
+    if context is not None and earliest:
+        first = today - timedelta(days=windows[-1] - 1)
+        start = datetime.combine(first, datetime.min.time(), zone).astimezone(timezone.utc)
+        end = datetime.combine(today + timedelta(days=1), datetime.min.time(), zone).astimezone(timezone.utc) - timedelta(microseconds=1)
+        for trip in anchored_trips(store, start.isoformat(), end.isoformat()):
+            if trip.get("mode") != "driving":
+                continue
+            day = datetime.fromisoformat(trip["start"]).astimezone(zone).date()
+            cost = fuel.trip_fuel(context, trip, day.isoformat())
+            if not cost:
+                continue
+            for days, totals in results.items():
+                if day >= today - timedelta(days=days - 1):
+                    totals["drives"] += 1
+                    totals["driving_km"] += trip["distance_km"]
+                    totals["litres"] += cost["litres"]
+                    totals["cost"] += cost["cost"]
+    for totals in results.values():
+        totals.pop("first")
+        configured = totals["configured"] and earliest
+        totals.update(driving_km=round(totals["driving_km"], 1), litres=round(totals["litres"], 1), cost=round(totals["cost"], 2),
+                      cost_per_day=round(totals["cost"] / totals["covered_days"], 2) if configured and totals["covered_days"] else None)
+    return results

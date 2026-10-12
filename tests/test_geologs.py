@@ -2149,7 +2149,7 @@ class StoreTests(unittest.TestCase):
 
     def test_fuel_cost_of_drives_with_your_own_price(self):
         from geologs.fuel import set_manual_price
-        from geologs.analysis import fuel_costs
+        from geologs.analysis import fuel_cost_windows, fuel_costs
         self.fuel_day()
         self.assertIsNone(day_summary(self.store, "2026-09-27", "UTC")["fuel"])  # no economy yet
         self.store.save_settings({"fuel_economy_l100km": 8, "fuel_price_source": "manual", "currency": "$"})
@@ -2168,6 +2168,9 @@ class StoreTests(unittest.TestCase):
         self.assertIn("Fuel about $", daily_brief(overview)["summary"])
         costs = fuel_costs(self.store, 7, now=datetime(2026, 9, 28, 12, tzinfo=timezone.utc))
         self.assertEqual((costs["drives"], costs["covered_days"]), (2, 2))
+        both = fuel_cost_windows(self.store, (7, 30), now=datetime(2026, 9, 28, 12, tzinfo=timezone.utc))
+        self.assertEqual(both[7], costs)
+        self.assertEqual((both[30]["drives"], both[30]["days"]), (2, 30))
         self.assertAlmostEqual(costs["cost_per_day"], costs["cost"] / 2, delta=0.01)
         for bad in ({"fuel_economy_l100km": 0.5}, {"fuel_grade": "jet"}, {"units": "nautical"}, {"currency": ""},
                     {"fuel_area": "MARS"}):
@@ -2199,6 +2202,11 @@ class StoreTests(unittest.TestCase):
         # $3.785/gal is $1/L from Sept 28; this Sept 27 day uses the week before: $2/L.
         day = day_summary(self.store, "2026-09-27", "UTC")
         self.assertAlmostEqual(day["fuel"]["cost"], day["fuel"]["litres"] * 2, delta=0.02)
+        # Using your own price still shows what Automatic would charge.
+        self.store.save_settings({"fuel_price_source": "manual"})
+        with patch.dict(os.environ, {"EIA_API_KEY": "key"}):
+            status = fuel_status(self.store)
+        self.assertEqual((status["eia"]["price_per_l"], status["price_per_l"]), (1.0, None))
 
     def test_search_visits_finds_named_places_by_word(self):
         costco, club = shifted(HOME, 5000, 0), shifted(HOME, -5000, 0)

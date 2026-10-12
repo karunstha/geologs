@@ -44,7 +44,7 @@ SUMMARY_SCHEDULES = ("nightly", "interval")
 DEFAULT_SETTINGS = {"speed_strategy": "reported", "reported_speed_offset_kmh": 0.0, "timezone": "UTC",
                     "places_provider": "", **ANALYSIS_DEFAULTS,
                     "summary_schedule": "nightly", "summary_interval_hours": 3, "source_priority": [],
-                    **{"units": "metric", "currency": "$", "fuel_economy_l100km": None, "fuel_grade": "regular",
+                    **{"units": "metric", "currency": "USD", "fuel_economy_l100km": None, "fuel_grade": "regular",
                        "fuel_price_source": "auto", "fuel_area": ""}}
 # Display units; everything is stored metric. Fuel economy is kept in L/100 km and
 # prices per litre, whatever you entered them in.

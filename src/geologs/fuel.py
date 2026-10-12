@@ -62,11 +62,16 @@ def eia_key():
     return os.environ.get("EIA_API_KEY", "").strip()
 
 
+def eia_series(settings, area):
+    """The EIA series for an area and your grade."""
+    return f"eia:{area}:{EIA_PRODUCTS[settings['fuel_grade']]}" if area else None
+
+
 def price_key(settings, area):
     """Which price series applies: yours, or the EIA's for an area and grade."""
     if settings["fuel_price_source"] == "manual":
         return "manual"
-    return f"eia:{area}:{EIA_PRODUCTS[settings['fuel_grade']]}" if area else None
+    return eia_series(settings, area)
 
 
 def _today(store):
@@ -148,18 +153,17 @@ def _save_state(store, value):
 def refresh_prices(store, force=False):
     """Fetch the EIA's weekly prices for your area and grade (five years the first time).
 
-    Does nothing for your own price, without EIA_API_KEY, outside the US, or
-    within EIA_REFRESH of the last fetch unless forced. Returns what happened.
+    Runs while you use your own price too, so Settings can show what Automatic
+    would charge. Does nothing without EIA_API_KEY, outside the US, or within
+    EIA_REFRESH of the last fetch unless forced. Returns what happened.
     """
     settings = store.settings()
-    if settings["fuel_price_source"] != "auto":
-        return {"fetched": 0, "reason": "manual"}
     if not eia_key():
         return {"fetched": 0, "reason": "no_key"}
     area, _state_code = _area(store, settings)
     if not area:
         return {"fetched": 0, "reason": "no_area"}
-    key = price_key(settings, area)
+    key = eia_series(settings, area)
     state = _state(store)
     last = state.get("fetched", {}).get(key)
     if not force and last and datetime.now(timezone.utc) - datetime.fromisoformat(last) < EIA_REFRESH:
@@ -220,14 +224,22 @@ def trip_fuel(context, trip, day):
 
 
 def fuel_status(store):
-    """Everything the Car & fuel settings show."""
+    """Everything the Car & fuel settings show: the price in use, and both sources' latest prices."""
     settings = store.settings()
+    saved = _state(store)
     area, state = (settings["fuel_area"], None) if settings["fuel_area"] else (
-        (_state(store).get("detected") or {}).get("area"), (_state(store).get("detected") or {}).get("state"))
-    key = price_key(settings, area)
-    table = price_table(store, key)
+        (saved.get("detected") or {}).get("area"), (saved.get("detected") or {}).get("state"))
     today = _today(store)
-    current = price_on(table, today) if table else None
+
+    def latest(key):
+        table = price_table(store, key)
+        found = price_on(table, today) if table else None
+        return {"price_per_l": found[1] if found else None, "price_date": found[0] if found else None}
+
+    eia = eia_series(settings, area)
+    manual = latest("manual")
+    automatic = {**latest(eia), "fetched_at": (saved.get("fetched") or {}).get(eia)}
+    current = manual if settings["fuel_price_source"] == "manual" else automatic
     return {"eia_key": bool(eia_key()), "area": area, "area_label": EIA_AREAS.get(area), "state": state,
-            "areas": EIA_AREAS, "price_per_l": current[1] if current else None, "price_date": current[0] if current else None,
-            "fetched_at": (_state(store).get("fetched") or {}).get(key), "currency": settings["currency"]}
+            "areas": EIA_AREAS, **current, "manual": manual, "eia": automatic,
+            "fetched_at": automatic["fetched_at"], "currency": settings["currency"]}

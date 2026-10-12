@@ -2,11 +2,11 @@
 import { refreshMeta } from "../app/refresh.js";
 import { api, post } from "../core/api.js";
 import { $, safe, toast } from "../core/dom.js";
-import { ago, formatTime, fromLengthUnit } from "../core/format.js";
+import { ago, formatTime, fromLengthUnit, lengthText } from "../core/format.js";
 import { state } from "../core/state.js";
 import { onEach, rowActions } from "../ui/actions.js";
 import { placeResultsMarkup, resolvePlace, searchPlaces } from "../ui/place-search.js";
-import { placeIcon, statusPill } from "../ui/icons.js";
+import { statusPill } from "../ui/icons.js";
 
 function destinationKind() {
   return document.querySelector('input[name="reminder-kind"]:checked')?.value || "saved";
@@ -42,6 +42,15 @@ function reminderWhere(reminder) {
   return reminder.match_name ? `Any place named “${reminder.match_name}”` : reminder.place_name;
 }
 
+// Where a reminder fires, with an icon for the kind: a saved place or location, or any place with a name.
+function whereMarkup(reminder) {
+  const icon = reminder.match_name
+    ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 12.2V4.5a1 1 0 0 1 1-1h7.7l8.3 8.3-8.7 8.7Z"/><circle cx="8" cy="8" r="1.4"/></svg>'
+    : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 10c0 4.6-7 10-7 10S5 14.6 5 10a7 7 0 0 1 14 0Z"/><circle cx="12" cy="10" r="2.4"/></svg>';
+  const zone = !reminder.match_name && reminder.radius_m ? ` · within ${lengthText(reminder.radius_m)}` : "";
+  return `<span class="reminder-where" title="${safe(reminder.place_address || reminder.destination_address || "")}">${icon}${safe(reminderWhere(reminder) + zone)}</span>`;
+}
+
 function setReminderDestination(place) {
   $("reminder-place-name").value = (place.name || place.place_name || "").slice(0, 120);
   $("reminder-lat").value = place.lat ?? "";
@@ -53,21 +62,18 @@ function setReminderDestination(place) {
 }
 
 export function renderReminders() {
-  $("active-reminder-count").textContent = state.reminders.length
-    ? state.reminders.length.toLocaleString()
-    : "";
-  $("reminder-history-count").textContent = state.reminderHistory.length
-    ? state.reminderHistory.length.toLocaleString()
-    : "";
+  $("active-reminder-count").textContent = state.reminders.length ? state.reminders.length.toLocaleString() : "";
+  $("reminder-history-count").textContent = state.reminderHistory.length ? state.reminderHistory.length.toLocaleString() : "";
   const waiting = $("reminders-list");
   waiting.innerHTML =
     state.reminders
       .map(
         (reminder) =>
-          `<div class="list-item"><div class="place-main">${placeIcon(reminder)}<div><strong>${safe(reminder.text)}</strong><small title="${safe(formatTime(reminder.created_at))}">${safe(reminder.match_name ? reminderWhere(reminder) : "At " + reminder.place_name)} · added ${safe(ago(reminder.created_at))}</small></div></div>${rowActions([{ icon: "cancel", label: "Cancel reminder", data: `data-cancel-reminder="${reminder.id}"`, tone: "danger" }])}</div>`,
+          `<div class="list-item reminder-row"><div class="reminder-main"><strong>${safe(reminder.text)}</strong><small>${whereMarkup(reminder)}<span title="${safe(formatTime(reminder.created_at))}">Added ${safe(ago(reminder.created_at))}</span></small></div>${rowActions([{ icon: "cancel", label: "Cancel reminder", data: `data-cancel-reminder="${reminder.id}"`, tone: "danger" }])}</div>`,
       )
       .join("") ||
-    '<div class="empty-block"><strong>Nothing waiting</strong><span>Reminders you create appear here until they fire.</span></div>';
+    '<div class="empty-block"><strong>Nothing waiting</strong><span>Add a note for the next time you get somewhere: pick up salt at Walmart, water the plants at home.</span><button type="button" class="button primary small" data-new-reminder>New reminder</button></div>';
+  waiting.querySelector("[data-new-reminder]")?.addEventListener("click", openReminderDialog);
   onEach(waiting, "cancel-reminder", async (id) => {
     try {
       await post("/api/reminders/cancel", { id: +id });
@@ -82,10 +88,31 @@ export function renderReminders() {
       .map((item) => {
         const fired = item.status === "triggered";
         const at = fired ? item.triggered_at : item.cancelled_at || item.created_at;
-        return `<div class="list-item"><div class="place-main">${placeIcon(item)}<div><strong>${safe(item.text)}</strong><small title="${safe(formatTime(at))}">${safe(reminderWhere(item))} · ${safe(ago(at))}</small></div></div>${statusPill(fired ? "success" : "neutral", fired ? "Fired" : "Cancelled")}</div>`;
+        return `<div class="list-item reminder-row"><div class="reminder-main"><strong>${safe(item.text)}</strong><small>${whereMarkup(item)}<span title="${safe(formatTime(at))}">${fired ? "Fired" : "Cancelled"} ${safe(ago(at))}</span></small></div>${statusPill(fired ? "success" : "neutral", fired ? "Fired" : "Cancelled")}</div>`;
       })
       .join("") ||
     '<div class="empty-block"><strong>No history yet</strong><span>Reminders that fire or are cancelled are kept here.</span></div>';
+}
+
+function showReminderTab(tab) {
+  document.querySelectorAll("[data-reminder-tab]").forEach((button) => {
+    const active = button.dataset.reminderTab === tab;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", String(active));
+  });
+  $("reminders-list").hidden = tab !== "waiting";
+  $("reminder-history").hidden = tab !== "history";
+}
+
+function openReminderDialog() {
+  toggleReminderDestination();
+  $("reminder-dialog").showModal();
+}
+
+function closeReminderDialog() {
+  $("reminder-dialog").close();
+  $("reminder-form").reset();
+  $("reminder-search-results").innerHTML = "";
 }
 
 // The alerts button says what the browser allows rather than always offering to enable.
@@ -143,6 +170,10 @@ export function initReminders() {
     .querySelectorAll('input[name="reminder-kind"]')
     .forEach((input) => (input.onchange = toggleReminderDestination));
   $("reminder-search-button").onclick = searchDestination;
+  $("new-reminder").onclick = openReminderDialog;
+  $("close-reminder-dialog").onclick = closeReminderDialog;
+  $("cancel-reminder").onclick = closeReminderDialog;
+  document.querySelectorAll("[data-reminder-tab]").forEach((button) => (button.onclick = () => showReminderTab(button.dataset.reminderTab)));
   $("reminder-place-search").addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
       event.preventDefault();
@@ -195,9 +226,8 @@ export function initReminders() {
           : { text, place_id: +$("reminder-place").value };
     try {
       await post("/api/reminders", payload);
-      $("reminder-form").reset();
-      $("reminder-search-results").innerHTML = "";
-      toggleReminderDestination();
+      closeReminderDialog();
+      showReminderTab("waiting");
       await refreshMeta();
       toast("Reminder created");
     } catch (error) {

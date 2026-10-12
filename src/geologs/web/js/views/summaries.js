@@ -10,8 +10,10 @@ import {
   formatTime,
   localDateKey,
   longDate,
+  fuelText,
   moneyText,
   plural,
+  volumeText,
 } from "../core/format.js";
 import { state } from "../core/state.js";
 import { actionIcon } from "../ui/actions.js";
@@ -65,7 +67,7 @@ async function renderFuelSpend() {
     const month = (await api("/api/fuel")).last_30_days;
     box.hidden = !month.configured || !month.drives;
     if (!box.hidden)
-      box.innerHTML = `<span>Fuel, last 30 days</span><strong>${safe(moneyText(month.cost, month.currency))}</strong><small>${safe(moneyText(month.cost_per_day, month.currency))} a day on average · ${plural(month.drives, "drive")}</small>`;
+      box.innerHTML = `<span>Fuel, last 30 days</span><strong>${safe(moneyText(month.cost, month.currency))}</strong><small>${safe(moneyText(month.cost_per_day, month.currency))} a day on average · ${plural(month.drives, "drive")} · ${safe(volumeText(month.litres))}</small>`;
   } catch (_error) {
     box.hidden = true;
   }
@@ -196,7 +198,7 @@ function timelineMarkup(value) {
       detail: [
         `${modeName(trip.mode)} ${distanceText(trip.distance_km)}`,
         durationText(trip.duration_minutes),
-        trip.fuel_cost != null ? `${moneyText(trip.fuel_cost, value.totals?.currency || undefined)} fuel` : "",
+        trip.fuel_cost != null ? `${fuelText(trip.fuel_cost, trip.fuel_litres, value.totals?.currency || undefined)} fuel` : "",
         trip.coverage_complete ? "" : "partly unrecorded",
       ]
         .filter(Boolean)
@@ -303,7 +305,7 @@ export function renderSummaryDetail(record) {
     ["Time moving", durationText((totals.moving_hours || 0) * 60), "time"],
     ["Trips", totals.trips ?? 0, "trips"],
     ["Places", totals.places ?? 0, "places"],
-    ...(totals.fuel_cost != null ? [["Fuel", moneyText(totals.fuel_cost, totals.currency || undefined), "trips"]] : []),
+    ...(totals.fuel_cost != null ? [["Fuel", fuelText(totals.fuel_cost, totals.fuel_litres, totals.currency || undefined), "trips"]] : []),
   ];
   const reminderActivity =
     (value.reminders_triggered || []).length + (value.reminders_created || []).length +

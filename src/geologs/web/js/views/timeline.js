@@ -1,7 +1,7 @@
 // The History day timeline and its travel-mode corrections.
 import { post } from "../core/api.js";
 import { $, safe, toast } from "../core/dom.js";
-import { clock, distanceText, durationText, lengthText, moneyText } from "../core/format.js";
+import { clock, distanceText, durationText, fuelText, lengthText } from "../core/format.js";
 import { state } from "../core/state.js";
 import { selectItem, selectedItem, stayColor, tripKey } from "../map/map.js";
 import { modeIcon, modeInfo, modeName, pinBadge, zoneText } from "../ui/icons.js";
@@ -180,7 +180,7 @@ export function renderTimeline(day) {
         const trip = item.trip,
           info = modeInfo[trip.mode] || { label: "Trip", color: "#6f7b76" };
         const notes = [`${clock(trip.start)} – ${clock(trip.end)}`, durationText(trip.duration_minutes)];
-        if (trip.fuel) notes.push(`${moneyText(trip.fuel.cost)} fuel`);
+        if (trip.fuel) notes.push(`${fuelText(trip.fuel.cost, trip.fuel.litres)} fuel`);
         if (!trip.coverage_complete) notes.push("coverage gap");
         if (trip.mode_corrected) notes.push("set by you");
         // A trip that ends where it began left and came back; say so rather than implying travel to where you already were.

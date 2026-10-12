@@ -104,9 +104,56 @@ export const volumeUnit = () => (imperial() ? "gal" : "L");
 export const toVolumeUnit = (litres) => (imperial() ? litres / LITRES_PER_GALLON : litres);
 export const toPerVolume = (perLitre) => (imperial() ? perLitre * LITRES_PER_GALLON : perLitre);
 export const fromPerVolume = (value) => (imperial() ? value / LITRES_PER_GALLON : value);
+export const volumeText = (litres) => `${(Math.round(toVolumeUnit(litres || 0) * 10) / 10).toLocaleString()} ${volumeUnit()}`;
 
-export function moneyText(amount, currency = state.settings?.currency || "$") {
+const COMMON_CURRENCIES = ["USD", "EUR", "GBP", "CAD", "AUD", "INR", "JPY", "CNY", "NPR"];
+// Symbols saved before currencies were chosen from a list.
+const LEGACY_SYMBOLS = { $: "USD", "€": "EUR", "£": "GBP", "¥": "JPY", "₹": "INR", "₨": "NPR" };
+
+export const currencyCode = (value) => LEGACY_SYMBOLS[value] || value;
+
+// <option>s for every currency this browser knows, the common ones first, labelled "US Dollar (USD, $)".
+export function currencyOptions(selected) {
+  let codes = COMMON_CURRENCIES;
+  try {
+    codes = Intl.supportedValuesOf("currency");
+  } catch (_error) {}
+  let names = null;
+  try {
+    names = new Intl.DisplayNames(undefined, { type: "currency" });
+  } catch (_error) {}
+  const label = (code) => {
+    const symbol = (() => {
+      try {
+        return new Intl.NumberFormat(undefined, { style: "currency", currency: code }).formatToParts(0).find((part) => part.type === "currency")?.value;
+      } catch (_error) {
+        return "";
+      }
+    })();
+    const name = names?.of(code) || code;
+    return symbol && symbol !== code ? `${name} (${code}, ${symbol})` : `${name} (${code})`;
+  };
+  const option = (code) => `<option value="${code}">${label(code).replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`)}</option>`;
+  const common = COMMON_CURRENCIES.filter((code) => codes.includes(code));
+  const rest = codes.filter((code) => !common.includes(code)).sort((a, b) => label(a).localeCompare(label(b)));
+  const known = codes.includes(currencyCode(selected));
+  const custom = selected && !known ? `<option value="${selected.replace(/"/g, "&quot;")}">${selected.replace(/</g, "&lt;")} (saved earlier)</option>` : "";
+  return `${custom}<optgroup label="Common">${common.map(option).join("")}</optgroup><optgroup label="All currencies">${rest.map(option).join("")}</optgroup>`;
+}
+
+// A fuel cost with the fuel it bought beside it: "$4.20 · 1.2 gal".
+export function fuelText(cost, litres, currency) {
+  return litres == null ? moneyText(cost, currency) : `${moneyText(cost, currency)} · ${volumeText(litres)}`;
+}
+
+export function moneyText(amount, currency = state.settings?.currency || "USD") {
   if (amount == null) return "—";
+  // An ISO code is formatted the way this browser writes that currency ($12.40, €12.40, CA$12.40, NPR 12.40).
+  if (/^[A-Z]{3}$/.test(currency)) {
+    try {
+      return new Intl.NumberFormat(undefined, { style: "currency", currency }).format(amount);
+    } catch (_error) {}
+  }
   const value = Number(amount).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   // A symbol goes in front ($12.40); a code goes after (12.40 EUR).
   return /^[A-Za-z]{2,}$/.test(currency) ? `${value} ${currency}` : `${currency}${value}`;
