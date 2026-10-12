@@ -2,7 +2,28 @@
 import { refreshMeta } from "../app/refresh.js";
 import { api, openAuth, post, setConnection } from "../core/api.js";
 import { $, copyText, safe, toast } from "../core/dom.js";
-import { ago, formatTime, localDateKey, plural, zoneOptions } from "../core/format.js";
+import {
+  ago,
+  distanceText,
+  economyUnit,
+  formatTime,
+  fromEconomyUnit,
+  fromPerVolume,
+  fromSpeedUnit,
+  lengthUnit,
+  localDateKey,
+  moneyText,
+  plural,
+  speedUnit,
+  toEconomyUnit,
+  toLengthUnit,
+  toPerVolume,
+  toSpeedUnit,
+  toVolumeUnit,
+  volumeUnit,
+  zoneOptions,
+} from "../core/format.js";
+import { refreshAll } from "../app/refresh.js";
 import { state } from "../core/state.js";
 import { actionIcon, onEach } from "../ui/actions.js";
 import { modeIcon, modeInfo, sourceName, statusPill } from "../ui/icons.js";
@@ -75,7 +96,7 @@ function fillStays(values) {
 }
 
 function fillSpeeds(values) {
-  for (const [mode, key] of SPEED_FIELDS) $(`speed-${mode}`).value = values[key];
+  for (const [mode, key] of SPEED_FIELDS) $(`speed-${mode}`).value = round1(toSpeedUnit(values[key]));
   readSpeeds();
 }
 
@@ -102,23 +123,36 @@ function readStays() {
   return error ? { error } : { stay_min_minutes: stay, quick_stop_minutes: quick };
 }
 
-function speedText(kmh) {
-  return Number.isFinite(kmh) ? kmh.toLocaleString(undefined, { maximumFractionDigits: 1 }) : "…";
+function speedNumber(value) {
+  return Number.isFinite(value) ? value.toLocaleString(undefined, { maximumFractionDigits: 1 }) : "…";
+}
+
+const round1 = (value) => Math.round(value * 10) / 10;
+
+// A speed field shown in your units, read back in km/h. Untouched, it keeps the stored
+// value exactly, so saving never nudges 6.5 km/h to 6.4 through 4.0 mph.
+function speedFromField(id, stored) {
+  const shown = parseFloat($(id).value);
+  if (!Number.isFinite(shown)) return NaN;
+  return stored != null && round1(toSpeedUnit(stored)) === shown ? stored : round1(fromSpeedUnit(shown));
 }
 
 // Reads the speeds, shows each mode's range and the speed bar, and returns the values or an error.
 function readSpeeds() {
-  const speeds = Object.fromEntries(SPEED_FIELDS.map(([mode, key]) => [key, parseFloat($(`speed-${mode}`).value)]));
+  const speeds = Object.fromEntries(
+    SPEED_FIELDS.map(([mode, key]) => [key, speedFromField(`speed-${mode}`, state.settings?.[key])]),
+  );
   const { walking_max_kmh: walk, running_max_kmh: run, cycling_max_kmh: ride, driving_min_kmh: drive } = speeds;
-  $("speed-running-from").textContent = `Above ${speedText(walk)}, up to`;
-  $("speed-cycling-from").textContent = `Above ${speedText(run)}, up to`;
-  $("speed-driving-from").textContent = `Above ${speedText(ride)}, or stretches from`;
+  const shown = (kmhValue) => speedNumber(round1(toSpeedUnit(kmhValue)));
+  $("speed-running-from").textContent = `Above ${shown(walk)}, up to`;
+  $("speed-cycling-from").textContent = `Above ${shown(run)}, up to`;
+  $("speed-driving-from").textContent = `Above ${shown(ride)}, or stretches from`;
   const fields = SPEED_FIELDS.map(([mode]) => `speed-${mode}`);
   const invalid = new Set(fields.filter((id, index) => {
     const value = speeds[SPEED_FIELDS[index][1]];
     return !Number.isFinite(value) || value < 1 || value > 200;
   }));
-  let error = invalid.size ? "Speeds must be between 1 and 200 km/h." : "";
+  let error = invalid.size ? `Speeds must be between ${shown(1)} and ${shown(200)} ${speedUnit()}.` : "";
   if (!error) {
     // The modes must rise in order; flag the first one that doesn't.
     const broken = [
@@ -177,6 +211,7 @@ export function showSettingsPage(id) {
   try {
     sessionStorage.setItem(SETTINGS_PAGE_KEY, id);
   } catch (_error) {}
+  if (id === "settings-car" && state.settings) refreshFuel().catch((error) => toast(error.message));
   document.querySelector(".settings-tab.active")?.scrollIntoView({ block: "nearest", inline: "nearest" });
 }
 
@@ -784,12 +819,153 @@ export async function refreshSources() {
   renderSources();
 }
 
+// Unit words in labels across the app, and the radius fields' ranges, follow the Units setting.
+function applyUnitLabels() {
+  document.querySelectorAll(".speed-unit").forEach((item) => (item.textContent = speedUnit()));
+  document.querySelectorAll(".length-unit").forEach((item) => (item.textContent = lengthUnit()));
+  $("speed-offset-unit").textContent = speedUnit();
+  for (const id of ["place-radius", "reminder-radius"]) {
+    $(id).min = Math.round(toLengthUnit(20));
+    $(id).max = Math.round(toLengthUnit(5000));
+  }
+  // The reminder form's default radius (150 m) until you type your own; the place dialog fills its own.
+  const reminder = $("reminder-radius");
+  if (!reminder.dataset.edited) reminder.value = Math.round(toLengthUnit(150));
+  reminder.oninput = () => (reminder.dataset.edited = "1");
+}
+
+function renderUnitsChoice() {
+  document.querySelectorAll('input[name="units"]').forEach((input) => (input.checked = input.value === (state.settings.units || "metric")));
+}
+
+const GRADE_LABELS = { regular: "regular", midgrade: "midgrade", premium: "premium", diesel: "diesel" };
+
+// Car & fuel: the form, the price status, and what you spent lately.
+function renderFuel() {
+  const data = state.fuel;
+  if (!data || !state.settings) return;
+  const settings = state.settings;
+  $("fuel-economy-unit").textContent = economyUnit();
+  $("fuel-economy").placeholder = settings.units === "imperial" ? "e.g. 30" : "e.g. 8";
+  const economy = toEconomyUnit(settings.fuel_economy_l100km);
+  if (!$("car-form").contains(document.activeElement)) {
+    $("fuel-economy").value = economy ? round1(economy) : "";
+    $("fuel-grade").value = settings.fuel_grade;
+    $("fuel-currency").value = settings.currency;
+    document.querySelectorAll('input[name="fuel-price-source"]').forEach((input) => (input.checked = input.value === settings.fuel_price_source));
+    $("fuel-price").value = settings.fuel_price_source === "manual" && data.price_per_l ? (Math.round(toPerVolume(data.price_per_l) * 1000) / 1000) : "";
+  }
+  $("fuel-price-unit").textContent = `per ${volumeUnit()}`;
+  const auto = (document.querySelector('input[name="fuel-price-source"]:checked')?.value || settings.fuel_price_source) === "auto";
+  const priceText = data.price_per_l
+    ? `${moneyText(toPerVolume(data.price_per_l), data.currency)}/${volumeUnit()} ${GRADE_LABELS[settings.fuel_grade]}, week of ${new Date(data.price_date + "T12:00").toLocaleDateString(undefined, { month: "short", day: "numeric" })}`
+    : "";
+  $("fuel-auto-note").textContent = !data.eia_key
+    ? "Needs a free EIA key: register at eia.gov/opendata, add EIA_API_KEY to .env, and restart. US only."
+    : data.area
+      ? `${data.area_label}${data.state ? ` (from ${data.state})` : ""}${auto && priceText ? `: ${priceText}` : ""}. Updated weekly by the US Energy Information Administration.`
+      : "The weekly US average for your region; choose the region below if it can't be found from your location.";
+  $("fuel-area-row").hidden = !auto;
+  const areas = Object.entries(data.areas || {});
+  $("fuel-area").innerHTML =
+    `<option value="">Automatic${data.area && !settings.fuel_area ? ` (${data.area_label})` : ""}</option>` +
+    areas.map(([code, label]) => `<option value="${code}">${safe(label)}</option>`).join("");
+  $("fuel-area").value = settings.fuel_area || "";
+  const spend = $("fuel-spend");
+  const month = data.last_30_days,
+    week = data.last_7_days;
+  spend.hidden = !month?.configured;
+  if (month?.configured) {
+    const block = (label, costs) =>
+      `<div><span>${label}</span><strong>${moneyText(costs.cost, costs.currency)}</strong><small>${plural(costs.drives, "drive")} · ${distanceText(costs.driving_km)} · ${(Math.round(toVolumeUnit(costs.litres) * 10) / 10).toLocaleString()} ${volumeUnit()}</small></div>`;
+    spend.innerHTML = `<div class="fuel-stats"><div class="fuel-average"><span>Average per day</span><strong>${moneyText(month.cost_per_day, month.currency)}</strong><small>over the last ${plural(month.covered_days, "day")}</small></div>${block("Last 7 days", week)}${block("Last 30 days", month)}</div>${auto && priceText ? `<p class="help">At ${priceText}.</p>` : ""}`;
+  }
+}
+
+export async function refreshFuel() {
+  state.fuel = await api("/api/fuel");
+  renderFuel();
+}
+
+function readFuelForm() {
+  const economy = $("fuel-economy").value.trim();
+  const source = document.querySelector('input[name="fuel-price-source"]:checked')?.value || "auto";
+  const price = $("fuel-price").value.trim();
+  const payload = {
+    fuel_economy_l100km: economy ? Math.round(fromEconomyUnit(+economy) * 1000) / 1000 : null,
+    fuel_grade: $("fuel-grade").value,
+    fuel_price_source: source,
+    fuel_area: $("fuel-area").value,
+    currency: $("fuel-currency").value.trim(),
+  };
+  let error = "";
+  if (economy && !(+economy > 0)) error = "Enter your car's fuel economy as a number.";
+  else if (source === "manual" && !(+price > 0)) error = `Enter what you pay per ${volumeUnit() === "gal" ? "gallon" : "litre"}.`;
+  else if (!payload.currency) error = "Enter a currency, such as $.";
+  if (source === "manual" && +price > 0) payload.price_per_l = Math.round(fromPerVolume(+price) * 10000) / 10000;
+  $("fuel-error").textContent = error;
+  $("fuel-error").hidden = !error;
+  return error ? null : payload;
+}
+
+function initFuel() {
+  document.querySelectorAll('input[name="fuel-price-source"]').forEach((input) => (input.onchange = renderFuel));
+  $("fuel-price").onfocus = () => {
+    document.querySelector('input[name="fuel-price-source"][value="manual"]').checked = true;
+    renderFuel();
+  };
+  $("car-form").onsubmit = async (event) => {
+    event.preventDefault();
+    const payload = readFuelForm();
+    if (!payload) return;
+    const button = $("car-form").querySelector(".button.primary");
+    button.disabled = true;
+    button.textContent = "Saving…";
+    try {
+      const result = await post("/api/fuel", payload);
+      state.settings = await api("/api/settings");
+      state.fuel = result;
+      document.activeElement?.blur();
+      renderFuel();
+      const refresh = result.refresh;
+      toast(
+        refresh?.reason === "no_key"
+          ? "Saved. Automatic prices need EIA_API_KEY in .env."
+          : refresh?.reason === "no_area"
+            ? "Saved. Choose a price region: your location isn't in a US region."
+            : "Fuel settings saved",
+      );
+      await refreshExplore(false);
+    } catch (error) {
+      toast(error.message);
+    } finally {
+      button.disabled = false;
+      button.textContent = "Save changes";
+    }
+  };
+  document.querySelectorAll('input[name="units"]').forEach(
+    (input) =>
+      (input.onchange = async () => {
+        try {
+          state.settings = await post("/api/settings", { units: input.value });
+          await refreshAll();
+          await refreshFuel();
+          toast(input.value === "imperial" ? "Showing miles, mph, feet, and gallons" : "Showing kilometres, km/h, metres, and litres");
+        } catch (error) {
+          toast(error.message);
+        }
+      }),
+  );
+}
+
 export function renderSettings() {
   if (!state.settings) return;
   renderPlacesProvider();
   populateTimezones(state.settings.timezone);
   $("speed-strategy").value = state.settings.speed_strategy;
-  $("speed-offset").value = state.settings.reported_speed_offset_kmh;
+  $("speed-offset").value = round1(toSpeedUnit(state.settings.reported_speed_offset_kmh));
+  applyUnitLabels();
+  renderUnitsChoice();
   updateSpeedSettingsVisibility();
   fillStays(state.settings);
   fillSpeeds(state.settings);
@@ -804,6 +980,7 @@ export function updateSpeedSettingsVisibility() {
 
 export function initSettings() {
   initPriorityDrag();
+  initFuel();
   initTokens();
   for (const [mode] of SPEED_FIELDS)
     $(`speed-${mode}-name`).innerHTML = `${modeIcon(mode)}${safe(modeInfo[mode].noun)}`;
@@ -835,7 +1012,7 @@ export function initSettings() {
     // Speed source and adjustment apply to new samples only, so they never recalculate.
     saveAnalysis($("movement-form"), values, {
       speed_strategy: $("speed-strategy").value,
-      reported_speed_offset_kmh: +$("speed-offset").value,
+      reported_speed_offset_kmh: speedFromField("speed-offset", state.settings.reported_speed_offset_kmh) || 0,
     });
   };
   // Choosing an interval implies saving throughout the day.

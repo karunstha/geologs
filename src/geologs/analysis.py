@@ -7,6 +7,7 @@ import math
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from . import fuel
 from .core import (ANALYSIS_DEFAULTS, MAX_CONNECTED_GAP_SECONDS, MAX_QUIET_STAY_SECONDS, QUIET_DEPARTURE_SPEED_MPS, MODE_OVERRIDE_MIN_OVERLAP, MAX_PLAUSIBLE_SPEED_MPS, MAX_SAMPLE_GAP_SECONDS, MOVEMENT_MODES,
                    _label_place, classify_motion, is_excursion, is_home_place, label_at, place_in_zone, zone_at, mode_override_for, went_elsewhere_between, windows_overlap, metres, name_matches, named_place_near,
                    nearby_places,
@@ -1346,8 +1347,8 @@ def day_summary(store, date, timezone_name="UTC", source=None):
     end = (day_end - timedelta(microseconds=1)).isoformat()
     # Switching the places provider in Settings re-resolves every day's names.
     provider = places_provider_identity(store)
-    cache_identity = json.dumps(["day-v16", date, timezone_name, source, provider, store.settings()["source_priority"]],
-                                separators=(",", ":"))
+    cache_identity = json.dumps(["day-v17", date, timezone_name, source, provider, store.settings()["source_priority"],
+                                 fuel.fuel_signature(store)], separators=(",", ":"))
     cache_key = "day:" + hashlib.sha256(cache_identity.encode()).hexdigest()
     watermark = store.analysis_watermark(start, end, source)
     cached = store.cached_analysis(cache_key, watermark)
@@ -1445,6 +1446,13 @@ def day_summary(store, date, timezone_name="UTC", source=None):
                                                    lookup=place_for_coordinate).get("name") or None
         kept_trips.append(trip)
     trips = kept_trips
+    # Fuel for each drive at that day's price; a day's total only from drives that could be costed.
+    fuel_context = fuel.fuel_context(store)
+    for trip in trips:
+        trip["fuel"] = fuel.trip_fuel(fuel_context, trip, date)
+    costed = [trip["fuel"] for trip in trips if trip.get("fuel")]
+    day_fuel = ({"litres": round(sum(item["litres"] for item in costed), 2), "cost": round(sum(item["cost"] for item in costed), 2),
+                 "currency": fuel_context["currency"], "drives": len(costed)} if costed else None)
     day_stays = merge_split_visits(day_stays, lambda stay: stay.get("cluster_id"), internal_moves)
     day_stays = _join_source_handoffs(day_stays, trips)
     for stay in day_stays:
@@ -1486,7 +1494,7 @@ def day_summary(store, date, timezone_name="UTC", source=None):
             "movement_km": round(sum(totals["distance_km"] for totals in activity_totals.values()), 2),
             "coverage_gaps": _coverage_gaps(points, trips, day_stays), "timeline_sources": timeline_sources,
             "samples_by_source": samples_by_source,
-            "stay_edits": edits, "possible_stops": possible_stops,
+            "stay_edits": edits, "possible_stops": possible_stops, "fuel": day_fuel,
             "visited_places": visited_places, "places_including_home": places_including_home,
             "first_fix": points[-1]["timestamp"] if points else None,
             "last_fix": points[0]["timestamp"] if points else None,
@@ -1593,7 +1601,8 @@ def daily_overview(store, date, timezone_name=None, source=None):
                       "to": trip.get("to_name") or endpoint_name([trip["to_lon"], trip["to_lat"]]),
                       "round_trip": bool(trip.get("loop")), "via": (trip.get("turnaround") or {}).get("name") if trip.get("loop") else None,
                       "mode_corrected": bool(trip.get("mode_corrected")),
-                      "coverage_complete": trip["coverage_complete"]})
+                      "coverage_complete": trip["coverage_complete"],
+                      "fuel_cost": (trip.get("fuel") or {}).get("cost"), "fuel_litres": (trip.get("fuel") or {}).get("litres")})
     visits = [{"place": stay.get("display_name") or stay.get("place_name"), "zone": stay.get("zone"),
                "arrival": stay["started_at"], "departure": stay["ended_at"],
                "observed_minutes": stay["observed_minutes"], "kind": stay["kind"],
@@ -1622,7 +1631,9 @@ def daily_overview(store, date, timezone_name=None, source=None):
               "trips": len(trips), "places": len(places),
               "reminders_created": len(reminders_created), "reminders_triggered": len(reminder_events),
               "reminders_cancelled": len(reminders_cancelled),
-              "active_reminders_at_end": len(reminders_active_at_end)}
+              "active_reminders_at_end": len(reminders_active_at_end),
+              "fuel_cost": (day.get("fuel") or {}).get("cost"), "fuel_litres": (day.get("fuel") or {}).get("litres"),
+              "currency": (day.get("fuel") or {}).get("currency")}
     activities = [f"{mode} {values['minutes']:.0f} min ({values['distance_km']:.1f} km)"
                   for mode, values in day["activity_totals"].items() if values["count"]]
     overview = (f"{len(trips)} trips covering {totals['distance_km']:.2f} km; "
@@ -1703,6 +1714,8 @@ def daily_brief(overview):
         if moves:
             joined = ", ".join(moves)
             summary += " " + joined[0].upper() + joined[1:] + "."
+        if totals.get("fuel_cost") is not None:
+            summary += f" Fuel about {totals.get('currency') or '$'}{totals['fuel_cost']:.2f}."
         brief["summary"] = summary
     timeline = []
     for visit in overview["visits"]:
@@ -1897,3 +1910,37 @@ def delete_source(store, source, confirm=False):
     for date in dates:
         daily_overview(store, date, timezone_name)
     return {**preview, "deleted": True}
+
+
+def fuel_costs(store, days=30, now=None):
+    """Fuel spent on drives over the last `days` local days, and the average per day.
+
+    The average counts every calendar day in the window from your first
+    recorded day on, so quiet days lower it as they would your spending.
+    """
+    context = fuel.fuel_context(store)
+    settings = store.settings()
+    zone = ZoneInfo(settings["timezone"])
+    today = (now or datetime.now(timezone.utc)).astimezone(zone).date()
+    first = today - timedelta(days=int(days) - 1)
+    start = datetime.combine(first, datetime.min.time(), zone).astimezone(timezone.utc)
+    end = datetime.combine(today + timedelta(days=1), datetime.min.time(), zone).astimezone(timezone.utc) - timedelta(microseconds=1)
+    earliest = store.db.execute("SELECT MIN(timestamp) AS t FROM point_observations").fetchone()["t"]
+    if earliest:
+        first = max(first, datetime.fromisoformat(earliest).astimezone(zone).date())
+    totals = {"days": int(days), "covered_days": max(0, (today - first).days + 1), "drives": 0, "driving_km": 0.0,
+              "litres": 0.0, "cost": 0.0, "currency": settings["currency"], "configured": context is not None}
+    if context is None or not earliest:
+        return {**totals, "cost_per_day": None}
+    for trip in anchored_trips(store, start.isoformat(), end.isoformat()):
+        if trip.get("mode") != "driving":
+            continue
+        day = datetime.fromisoformat(trip["start"]).astimezone(zone).date().isoformat()
+        cost = fuel.trip_fuel(context, trip, day)
+        if cost:
+            totals["drives"] += 1
+            totals["driving_km"] += trip["distance_km"]
+            totals["litres"] += cost["litres"]
+            totals["cost"] += cost["cost"]
+    totals.update(driving_km=round(totals["driving_km"], 1), litres=round(totals["litres"], 1), cost=round(totals["cost"], 2))
+    return {**totals, "cost_per_day": round(totals["cost"] / totals["covered_days"], 2) if totals["covered_days"] else None}

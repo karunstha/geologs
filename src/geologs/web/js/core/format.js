@@ -56,12 +56,60 @@ export function durationText(minutes) {
   return hours ? `${hours} h${rest ? ` ${rest} min` : ""}` : `${rest} min`;
 }
 
+// Units: everything is stored metric; Settings → Appearance chooses what you read.
+const KM_PER_MILE = 1.609344;
+const FEET_PER_METRE = 3.28084;
+const LITRES_PER_GALLON = 3.785411784;
+
+export function imperial() {
+  return state.settings?.units === "imperial";
+}
+
 export function distanceText(km) {
+  if (imperial()) {
+    const miles = km / KM_PER_MILE;
+    return miles >= 10 ? `${miles.toFixed(0)} mi` : miles >= 0.1 ? `${miles.toFixed(1)} mi` : `${Math.round((km * 1000 * FEET_PER_METRE) / 10) * 10} ft`;
+  }
   return km >= 10 ? `${km.toFixed(0)} km` : km >= 0.1 ? `${km.toFixed(1)} km` : `${Math.round(km * 1000)} m`;
 }
 
+// A short length such as a radius or an accuracy: metres or feet.
+export function lengthText(metres) {
+  if (metres == null) return "—";
+  return imperial() ? `${Math.round(metres * FEET_PER_METRE).toLocaleString()} ft` : `${Math.round(metres).toLocaleString()} m`;
+}
+
+export const lengthUnit = () => (imperial() ? "ft" : "m");
+export const toLengthUnit = (metres) => (imperial() ? metres * FEET_PER_METRE : metres);
+export const fromLengthUnit = (value) => (imperial() ? value / FEET_PER_METRE : value);
+
+export const speedUnit = () => (imperial() ? "mph" : "km/h");
+export const toSpeedUnit = (kmhValue) => (imperial() ? kmhValue / KM_PER_MILE : kmhValue);
+export const fromSpeedUnit = (value) => (imperial() ? value * KM_PER_MILE : value);
+
+// A speed given in km/h, in your units.
+export function speedText(kmhValue, digits = 0) {
+  return kmhValue == null ? "—" : `${toSpeedUnit(kmhValue).toFixed(digits)} ${speedUnit()}`;
+}
+
 export function kmh(point) {
-  return point?.speed_mps == null ? "—" : `${(point.speed_mps * 3.6).toFixed(1)} km/h`;
+  return point?.speed_mps == null ? "—" : speedText(point.speed_mps * 3.6, 1);
+}
+
+// Fuel: economy is stored in L/100 km and prices per litre.
+export const economyUnit = () => (imperial() ? "mpg" : "L/100 km");
+export const toEconomyUnit = (l100km) => (l100km ? (imperial() ? 235.214583 / l100km : l100km) : null);
+export const fromEconomyUnit = (value) => (value ? (imperial() ? 235.214583 / value : value) : null);
+export const volumeUnit = () => (imperial() ? "gal" : "L");
+export const toVolumeUnit = (litres) => (imperial() ? litres / LITRES_PER_GALLON : litres);
+export const toPerVolume = (perLitre) => (imperial() ? perLitre * LITRES_PER_GALLON : perLitre);
+export const fromPerVolume = (value) => (imperial() ? value / LITRES_PER_GALLON : value);
+
+export function moneyText(amount, currency = state.settings?.currency || "$") {
+  if (amount == null) return "—";
+  const value = Number(amount).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  // A symbol goes in front ($12.40); a code goes after (12.40 EUR).
+  return /^[A-Za-z]{2,}$/.test(currency) ? `${value} ${currency}` : `${currency}${value}`;
 }
 
 export function localDateKey(date = new Date()) {

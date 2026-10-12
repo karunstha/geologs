@@ -2,7 +2,7 @@
 import { refreshMeta } from "../app/refresh.js";
 import { api, post } from "../core/api.js";
 import { $, safe, toast } from "../core/dom.js";
-import { clock, coordinateText, metresBetween } from "../core/format.js";
+import { clock, coordinateText, distanceText, fromLengthUnit, lengthText, metresBetween, toLengthUnit } from "../core/format.js";
 import { state } from "../core/state.js";
 import { map, searchLayer } from "../map/map.js";
 import { onEach } from "../ui/actions.js";
@@ -23,7 +23,7 @@ export function openPlaceDialog(place = {}) {
   $("place-name").value = place.name || "";
   $("place-lat").value = place.lat ?? "";
   $("place-lon").value = place.lon ?? "";
-  $("place-radius").value = place.radius_m || 150;
+  $("place-radius").value = Math.round(toLengthUnit(place.radius_m || 150));
   $("place-address").value = place.address || "";
   $("place-dialog-title").textContent = place.id ? "Edit place" : "Add place";
   $("place-dialog").showModal();
@@ -87,7 +87,7 @@ export function editVisitedPlace(place, visits = []) {
     $("scope-visit-detail").textContent =
       visitTimes(visits) + (visits.length === 1 ? "" : ` (${visits.length} visits)`);
   }
-  $("scope-spot-detail").textContent = `Past and future visits within ${target.radius_m} m`;
+  $("scope-spot-detail").textContent = `Past and future visits within ${lengthText(target.radius_m)}`;
   const scope = !visits.length || (current && !current.started_at) ? "spot" : "visit";
   document.querySelector(`input[name="label-scope"][value="${scope}"]`).checked = true;
   // With no particular visit there is only one choice, so say it instead of offering it.
@@ -114,13 +114,13 @@ export async function loadNearbyPlaces(target) {
     );
     if (request !== loadNearbyPlaces.request) return;
     $("nearby-note").textContent = places.length
-      ? `${places.length} within ${radius >= 1000 ? (radius / 1000).toFixed(1) + " km" : radius + " m"}`
+      ? `${places.length} within ${radius >= 1000 ? distanceText(radius / 1000) : lengthText(radius)}`
       : "";
     box.innerHTML =
       places
         .map(
           (place, index) =>
-            `<div class="result-item"><div class="place-main">${placeIcon(place)}<div><strong>${safe(place.name)}</strong><span>${safe([place.distance_m != null ? place.distance_m + " m away" : "", place.address && place.address !== place.name ? place.address : ""].filter(Boolean).join(" · "))}</span></div></div><button type="button" data-nearby="${index}">Use</button></div>`,
+            `<div class="result-item"><div class="place-main">${placeIcon(place)}<div><strong>${safe(place.name)}</strong><span>${safe([place.distance_m != null ? lengthText(place.distance_m) + " away" : "", place.address && place.address !== place.name ? place.address : ""].filter(Boolean).join(" · "))}</span></div></div><button type="button" data-nearby="${index}">Use</button></div>`,
         )
         .join("") || '<p class="empty">No named places nearby. Type the name below.</p>';
     box.querySelectorAll("[data-nearby]").forEach(
@@ -205,7 +205,7 @@ export function initPlaceDialogs() {
         name: $("place-name").value,
         lat: +$("place-lat").value,
         lon: +$("place-lon").value,
-        radius_m: +$("place-radius").value,
+        radius_m: Math.round(fromLengthUnit(+$("place-radius").value)),
         address: $("place-address").value,
         category: $("place-category").value,
         provider_place_id: $("place-provider-id").value,

@@ -2141,6 +2141,65 @@ class StoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.save_settings({"quick_stop_minutes": 15})
 
+    def fuel_day(self):
+        """Home, a 10 km drive (50 km/h), half an hour there, and home again: 20 km driven."""
+        away = shifted(HOME, 10000, 0)
+        self.store.ingest(minute_fixes([still(HOME, 30), line(HOME, away, 12), still(away, 30), line(away, HOME, 12), still(HOME, 30)]))
+        return away
+
+    def test_fuel_cost_of_drives_with_your_own_price(self):
+        from geologs.fuel import set_manual_price
+        from geologs.analysis import fuel_costs
+        self.fuel_day()
+        self.assertIsNone(day_summary(self.store, "2026-09-27", "UTC")["fuel"])  # no economy yet
+        self.store.save_settings({"fuel_economy_l100km": 8, "fuel_price_source": "manual", "currency": "$"})
+        set_manual_price(self.store, 1.10, "2026-09-01")
+        day = day_summary(self.store, "2026-09-27", "UTC")
+        drives = [trip for trip in day["trips"] if trip["mode"] == "driving"]
+        self.assertEqual(len(drives), 2)
+        litres = sum(trip["distance_km"] for trip in drives) * 8 / 100
+        self.assertAlmostEqual(day["fuel"]["litres"], litres, delta=0.02)
+        self.assertAlmostEqual(day["fuel"]["cost"], litres * 1.10, delta=0.02)
+        # A later price applies from its date on; this day keeps the price it had.
+        set_manual_price(self.store, 2.00, "2026-10-01")
+        self.assertAlmostEqual(day_summary(self.store, "2026-09-27", "UTC")["fuel"]["cost"], litres * 1.10, delta=0.02)
+        overview = daily_overview(self.store, "2026-09-27", "UTC")
+        self.assertAlmostEqual(overview["totals"]["fuel_cost"], litres * 1.10, delta=0.02)
+        self.assertIn("Fuel about $", daily_brief(overview)["summary"])
+        costs = fuel_costs(self.store, 7, now=datetime(2026, 9, 28, 12, tzinfo=timezone.utc))
+        self.assertEqual((costs["drives"], costs["covered_days"]), (2, 2))
+        self.assertAlmostEqual(costs["cost_per_day"], costs["cost"] / 2, delta=0.01)
+        for bad in ({"fuel_economy_l100km": 0.5}, {"fuel_grade": "jet"}, {"units": "nautical"}, {"currency": ""},
+                    {"fuel_area": "MARS"}):
+            with self.assertRaises(ValueError, msg=bad):
+                self.store.save_settings(bad)
+
+    def test_fuel_prices_from_the_eia_for_your_region(self):
+        from geologs.fuel import refresh_prices, state_from_address, fuel_status
+        self.assertEqual(state_from_address("16801 Chenal Pkwy, Little Rock, Arkansas 72223, United States"), "AR")
+        self.assertEqual(state_from_address("16801 Chenal Pkwy, Little Rock, AR 72223, United States of America"), "AR")
+        self.assertIsNone(state_from_address("10 Downing St, London SW1A 2AA, United Kingdom"))
+        self.fuel_day()
+        self.store.save_place({"name": "Home", "lat": HOME[0], "lon": HOME[1], "address": "12 Oak St, Little Rock, AR 72223, United States"})
+        self.store.save_settings({"fuel_economy_l100km": 8})
+        with patch.dict(os.environ, {"EIA_API_KEY": ""}):
+            self.assertEqual(refresh_prices(self.store)["reason"], "no_key")
+        weeks = {"response": {"data": [{"period": "2026-09-28", "value": "3.785411784"}, {"period": "2026-09-21", "value": "7.570823568"}]}}
+        response = Mock()
+        response.read.return_value = json.dumps(weeks).encode()
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        with patch.dict(os.environ, {"EIA_API_KEY": "key"}), patch("geologs.fuel.urllib.request.urlopen", return_value=response) as fetch:
+            self.assertEqual(refresh_prices(self.store)["fetched"], 2)
+            self.assertIn("facets%5Bduoarea%5D%5B%5D=R30", fetch.call_args.args[0])  # Arkansas is Gulf Coast
+            self.assertIn("facets%5Bproduct%5D%5B%5D=EPMR", fetch.call_args.args[0])
+            self.assertEqual(refresh_prices(self.store)["reason"], "fresh")  # weekly data, fetched at most twice a day
+            status = fuel_status(self.store)
+        self.assertEqual((status["area"], status["area_label"], status["state"]), ("R30", "Gulf Coast", "AR"))
+        # $3.785/gal is $1/L from Sept 28; this Sept 27 day uses the week before: $2/L.
+        day = day_summary(self.store, "2026-09-27", "UTC")
+        self.assertAlmostEqual(day["fuel"]["cost"], day["fuel"]["litres"] * 2, delta=0.02)
+
     def test_search_visits_finds_named_places_by_word(self):
         costco, club = shifted(HOME, 5000, 0), shifted(HOME, -5000, 0)
         for day, place in ((25, costco), (26, club), (27, costco)):

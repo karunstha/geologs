@@ -2,7 +2,7 @@
 import { refreshMeta } from "../app/refresh.js";
 import { api, post } from "../core/api.js";
 import { $, safe, toast } from "../core/dom.js";
-import { ago, formatTime } from "../core/format.js";
+import { ago, formatTime, fromLengthUnit } from "../core/format.js";
 import { state } from "../core/state.js";
 import { onEach, rowActions } from "../ui/actions.js";
 import { placeResultsMarkup, resolvePlace, searchPlaces } from "../ui/place-search.js";
@@ -187,7 +187,7 @@ export function initReminders() {
               place_name: $("reminder-place-name").value,
               lat: +$("reminder-lat").value,
               lon: +$("reminder-lon").value,
-              radius_m: +$("reminder-radius").value,
+              radius_m: Math.round(fromLengthUnit(+$("reminder-radius").value)),
               address: $("reminder-address").value,
               category: $("reminder-category").value,
               provider_place_id: $("reminder-provider-id").value,

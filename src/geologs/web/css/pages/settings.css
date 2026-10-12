@@ -690,3 +690,36 @@
     flex-wrap: wrap;
   }
 }
+/* Car & fuel: what you spent lately, and the price field inside its choice. */
+.fuel-spend {
+  margin-bottom: 16px;
+}
+.fuel-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+}
+.fuel-stats > div {
+  display: grid;
+  gap: 2px;
+}
+.fuel-stats span,
+.fuel-stats small {
+  color: var(--text-2);
+  font-size: 12.5px;
+}
+.fuel-stats strong {
+  font-size: 22px;
+  font-weight: 650;
+}
+.fuel-spend .help {
+  margin-top: 12px;
+}
+.fuel-price-field .input {
+  width: 110px;
+}
+@media (max-width: 760px) {
+  .fuel-stats {
+    grid-template-columns: 1fr;
+  }
+}

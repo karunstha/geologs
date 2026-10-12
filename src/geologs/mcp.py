@@ -3,7 +3,7 @@ import json
 import sqlite3
 
 from .core import current_location, deliver_webhook, geocode, nearby_places, reverse_geocode, save_place_label
-from .analysis import daily_briefs, daily_overview, day_summary, place_patterns, predict_next, resolve_place_patterns, search_visits, stays, transitions, visited_places
+from .analysis import daily_briefs, daily_overview, day_summary, fuel_costs, place_patterns, predict_next, resolve_place_patterns, search_visits, stays, transitions, visited_places
 from .postgres import INTEGRITY_ERRORS
 
 DB_INPUT_ERRORS = (ValueError, KeyError, TypeError, sqlite3.IntegrityError) + INTEGRITY_ERRORS
@@ -36,6 +36,7 @@ TOOLS = [
     {"name": "get_time_at_place", "description": "Observed visit count and sampled duration inside a saved place (a zone, across its buildings); unobserved gaps are excluded.", "inputSchema": schema({"place_id": INTEGER, "start": STRING, "end": STRING}, ["place_id"])},
     {"name": "get_day_summary", "description": "Detailed daily fixes, stays (stationary and area), trips between them, activity totals, observed visited places excluding Home, and coverage for a local calendar day.", "inputSchema": schema({"date": STRING, "timezone": STRING, "source": STRING}, ["date"])},
     {"name": "get_daily_overview", "description": "Compact persisted overview for one local day: chronological visits, places including Home and time at each, trips, distances, activity totals (walking, running, cycling, driving), fixes, and reminder activity. Designed for efficient LLM retrieval.", "inputSchema": schema({"date": STRING, "timezone": STRING, "source": STRING}, ["date"])},
+    {"name": "get_fuel_costs", "description": "Fuel spent on drives over the last N days (default 30): drives, distance in km, litres, cost in the configured currency, and the average cost per day. Uses the car's fuel economy and the fuel price in Settings (your own, or the US EIA weekly average for your region). configured is false until both are set.", "inputSchema": schema({"days": INTEGER})},
     {"name": "get_daily_brief", "description": "Cheapest way to read what happened on one or more local days (date to end_date, at most 31): plain-text lines for the day's summary, a chronological timeline of stays, trips, and data gaps with local HH:MM times, places with time spent, and reminders set or triggered. Use get_daily_overview when exact timestamps, coordinates, or per-trip fields are needed.", "inputSchema": schema({"date": STRING, "end_date": STRING}, ["date"])},
     {"name": "list_daily_overviews", "description": "List persisted daily overview records and totals without loading every full summary.", "inputSchema": schema({"start": STRING, "end": STRING, "limit": INTEGER})},
     {"name": "get_place_transitions", "description": "Observed transitions between stop clusters, counted by source and grouped across visits.", "inputSchema": schema({"limit": INTEGER})},
@@ -82,6 +83,8 @@ def call_tool(store, name, args):
         return store.place_visits(args["place_id"], args.get("start"), args.get("end"))
     if name == "get_stays":
         return stays(store, args.get("start"), args.get("end"), args.get("source"), args.get("limit", 500))
+    if name == "get_fuel_costs":
+        return fuel_costs(store, min(max(int(args.get("days", 30)), 1), 366))
     if name == "search_visits":
         return search_visits(store, args["query"], args.get("start"), args.get("end"), args.get("limit", 50), args.get("timezone"))
     if name == "get_frequent_places":

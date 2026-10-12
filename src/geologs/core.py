@@ -22,6 +22,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from .fuel import EIA_AREAS
+
 from .postgres import PostgresConnection
 
 
@@ -41,7 +43,13 @@ SUMMARY_SCHEDULES = ("nightly", "interval")
 # same time, the first one with data wins. Unlisted sources follow, busiest first.
 DEFAULT_SETTINGS = {"speed_strategy": "reported", "reported_speed_offset_kmh": 0.0, "timezone": "UTC",
                     "places_provider": "", **ANALYSIS_DEFAULTS,
-                    "summary_schedule": "nightly", "summary_interval_hours": 3, "source_priority": []}
+                    "summary_schedule": "nightly", "summary_interval_hours": 3, "source_priority": [],
+                    **{"units": "metric", "currency": "$", "fuel_economy_l100km": None, "fuel_grade": "regular",
+                       "fuel_price_source": "auto", "fuel_area": ""}}
+# Display units; everything is stored metric. Fuel economy is kept in L/100 km and
+# prices per litre, whatever you entered them in.
+UNIT_SYSTEMS = ("metric", "imperial")
+FUEL_GRADES = ("regular", "midgrade", "premium", "diesel")
 # A higher-priority tracker's latest fix stands for where you are while it is
 # this close to the newest fix from any tracker.
 PRIORITY_FRESH_SECONDS = 900
@@ -537,6 +545,10 @@ class Store:
             started_at TEXT NOT NULL, ended_at TEXT NOT NULL, mode TEXT NOT NULL,
             created_at TEXT NOT NULL, updated_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS fuel_prices (
+            id INTEGER PRIMARY KEY, source TEXT NOT NULL, effective_date TEXT NOT NULL, price_per_l REAL NOT NULL,
+            fetched_at TEXT NOT NULL, UNIQUE(source, effective_date)
+        );
         CREATE TABLE IF NOT EXISTS ingest_tokens (
             id INTEGER PRIMARY KEY, name TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, hint TEXT NOT NULL,
             source TEXT, created_at TEXT NOT NULL, last_used_at TEXT, last_source TEXT
@@ -828,12 +840,36 @@ class Store:
         if not isinstance(priority, list) or len(priority) > 100:
             raise ValueError("source_priority must be a list of at most 100 source names")
         priority = list(dict.fromkeys(str(name).strip()[:80] for name in priority if str(name).strip()))
+        units = str(raw.get("units", current["units"]))
+        if units not in UNIT_SYSTEMS:
+            raise ValueError("units must be metric or imperial")
+        currency = str(raw.get("currency", current["currency"]) or "").strip()
+        if not currency or len(currency) > 5:
+            raise ValueError("currency must be a symbol or code of 1 to 5 characters, such as $ or EUR")
+        economy = raw.get("fuel_economy_l100km", current["fuel_economy_l100km"])
+        if economy not in (None, ""):
+            economy = float(economy)
+            if not math.isfinite(economy) or not 1 <= economy <= 50:
+                raise ValueError("fuel economy must be between 1 and 50 L/100 km (about 5 to 235 mpg)")
+            economy = round(economy, 3)
+        else:
+            economy = None
+        grade = str(raw.get("fuel_grade", current["fuel_grade"]))
+        if grade not in FUEL_GRADES:
+            raise ValueError("fuel_grade must be one of: " + ", ".join(FUEL_GRADES))
+        price_source = str(raw.get("fuel_price_source", current["fuel_price_source"]))
+        if price_source not in ("auto", "manual"):
+            raise ValueError("fuel_price_source must be auto or manual")
+        area = str(raw.get("fuel_area", current["fuel_area"]) or "").strip().upper()
+        if area and area not in EIA_AREAS:
+            raise ValueError("fuel_area must be one of: " + ", ".join(EIA_AREAS))
         values = {"speed_strategy": strategy, "reported_speed_offset_kmh": round(offset, 2),
                   "timezone": timezone_name, "places_provider": provider, "stay_min_minutes": int(stay_minutes),
                   "quick_stop_minutes": int(quick_minutes),
                   **{key: round(value, 1) for key, value in speeds.items()},
                   "summary_schedule": schedule, "summary_interval_hours": int(interval),
-                  "source_priority": priority}
+                  "source_priority": priority, "units": units, "currency": currency,
+                  "fuel_economy_l100km": economy, "fuel_grade": grade, "fuel_price_source": price_source, "fuel_area": area}
         for key, value in values.items():
             self.db.execute("""INSERT INTO app_settings(key,value) VALUES (?,?)
                 ON CONFLICT(key) DO UPDATE SET value=excluded.value""", (key, json.dumps(value)))
@@ -910,7 +946,8 @@ class Store:
         settings = self.settings()
         # Stay length and mode speeds change what a day contains.
         analysis = {key: settings[key] for key in ANALYSIS_DEFAULTS}
-        value = ["stay-trips-v12", modes, stay_edits, analysis, settings["source_priority"], self.analysis_watermark(start, end, source),
+        from .fuel import fuel_signature
+        value = ["stay-trips-v12", modes, stay_edits, analysis, settings["source_priority"], fuel_signature(self), self.analysis_watermark(start, end, source),
                  self.analysis_watermark(context_start, context_end, source),
                  event_row["count"], event_row["max_id"], places, reminders, labels]
         return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()

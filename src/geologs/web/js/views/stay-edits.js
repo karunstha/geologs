@@ -1,7 +1,7 @@
 // Stops you add on a trip and stays you remove, each undoable; kept by source and time window.
 import { post } from "../core/api.js";
 import { $, safe, toast } from "../core/dom.js";
-import { clock, clockPrecise, durationText } from "../core/format.js";
+import { clock, clockPrecise, durationText, speedText } from "../core/format.js";
 import { state } from "../core/state.js";
 import { sourceName } from "../ui/icons.js";
 import { refreshExplore } from "./history.js";
@@ -105,7 +105,7 @@ function openStayDialog({ source, fixes, title, note, from, to }) {
   }
   const options = fixes
     .map((fix, index) => {
-      const kmh = fix.speed_mps == null ? "" : ` · ${Math.round(fix.speed_mps * 3.6)} km/h`;
+      const kmh = fix.speed_mps == null ? "" : ` · ${speedText(fix.speed_mps * 3.6)}`;
       return `<option value="${index}">${safe(clockPrecise(fix.timestamp) + kmh)}</option>`;
     })
     .join("");

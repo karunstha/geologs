@@ -18,7 +18,8 @@ from urllib.parse import parse_qs, urlparse
 from .ingest import FORMATS as INGEST_FORMATS, claimed_source
 
 from .core import PLACES_PROVIDERS, Store, token_allows_source, configured_places_providers, current_location, deliver_webhook, geocode, nearby_places, place_details, places_provider, reverse_geocode, save_place_label
-from .analysis import daily_briefs, daily_overview, day_summary, delete_samples, delete_source, insights, place_overview, stored_daily_record, place_patterns, predict_next, resolve_place_patterns, save_scheduled_summaries, search_visits, stays, transitions, visited_places
+from .analysis import daily_briefs, daily_overview, day_summary, delete_samples, delete_source, fuel_costs, insights, place_overview, stored_daily_record, place_patterns, predict_next, resolve_place_patterns, save_scheduled_summaries, search_visits, stays, transitions, visited_places
+from .fuel import fuel_status, refresh_prices, set_manual_price
 from .mcp import SUPPORTED_VERSIONS, dispatch
 from .postgres import INTEGRITY_ERRORS
 
@@ -371,6 +372,8 @@ class Handler(BaseHTTPRequestHandler):
             elif url.path == "/api/place-labels": value = store.place_labels()
             elif url.path == "/api/ingest-tokens":
                 value = {"tokens": store.ingest_tokens(), "env_token": bool(ingest_token())}
+            elif url.path == "/api/fuel":
+                value = {**fuel_status(store), "last_7_days": fuel_costs(store, 7), "last_30_days": fuel_costs(store, 30)}
             elif url.path == "/api/stay-edits": value = store.stay_edits(q.get("start"), q.get("end"), q.get("source"))
             elif url.path == "/api/mode-overrides": value = store.mode_overrides()
             elif url.path == "/api/reminders": value = store.reminders()
@@ -483,6 +486,16 @@ class Handler(BaseHTTPRequestHandler):
                     self.note_token_use(store, str((last or {}).get("source") or "manual")[:80])
             elif path == "/api/ingest-tokens":
                 result = store.create_ingest_token(payload)
+            elif path == "/api/fuel":
+                # Settings, then your own price (dated today) or a fresh EIA fetch for the new area or grade.
+                fields = {key: payload[key] for key in ("currency", "fuel_economy_l100km", "fuel_grade", "fuel_price_source", "fuel_area")
+                          if key in payload}
+                store.save_settings(fields)
+                if payload.get("price_per_l") not in (None, ""):
+                    set_manual_price(store, payload["price_per_l"])
+                refreshed = refresh_prices(store, force=True) if store.settings()["fuel_price_source"] == "auto" else None
+                result = {**fuel_status(store), "refresh": refreshed, "last_7_days": fuel_costs(store, 7),
+                          "last_30_days": fuel_costs(store, 30)}
             elif path == "/api/ingest-tokens/delete":
                 result = store.delete_ingest_token(payload["id"])
             elif path == "/api/sources/delete":
@@ -529,6 +542,10 @@ def _daily_summary_worker(stop):
         try:
             store = Store()
             save_scheduled_summaries(store)
+            try:
+                refresh_prices(store)  # at most every 12 hours; weekly data
+            except Exception as exc:
+                print("GeoLogs fuel prices: " + str(exc), flush=True)
         except Exception as exc:
             print("GeoLogs daily summary: " + str(exc), flush=True)
         finally:

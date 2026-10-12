@@ -10,6 +10,7 @@ import {
   formatTime,
   localDateKey,
   longDate,
+  moneyText,
   plural,
 } from "../core/format.js";
 import { state } from "../core/state.js";
@@ -21,7 +22,7 @@ import { showView } from "./shell.js";
 export function summaryLine(item) {
   return [
     plural(item.trip_count, "trip"),
-    `${Number(item.distance_km).toFixed(1)} km`,
+    distanceText(Number(item.distance_km)),
     plural(item.place_count, "place"),
     item.reminder_count ? plural(item.reminder_count, "reminder") : "",
   ]
@@ -46,14 +47,32 @@ function catalogMarkup(items) {
         `<section class="summary-month"><h3>${safe(heading)}</h3>${days
           .map((item) => {
             const selected = item.date === state.summaryDate;
-            return `<button type="button" class="summary-day${selected ? " selected" : ""}" data-summary="${safe(item.date)}" aria-current="${selected ? "date" : "false"}" aria-label="${safe(longDate(item.date) + ", " + summaryLine(item))}"><span class="summary-day-calendar"><span>${safe(item.weekday)}</span><strong>${item.day}</strong></span><span class="summary-day-copy"><strong>${Number(item.distance_km).toFixed(1)} km</strong><small>${safe([plural(item.trip_count, "trip"), plural(item.place_count, "place")].join(" · "))}</small></span><span class="summary-day-arrow" aria-hidden="true">${actionIcon("open")}</span></button>`;
+            return `<button type="button" class="summary-day${selected ? " selected" : ""}" data-summary="${safe(item.date)}" aria-current="${selected ? "date" : "false"}" aria-label="${safe(longDate(item.date) + ", " + summaryLine(item))}"><span class="summary-day-calendar"><span>${safe(item.weekday)}</span><strong>${item.day}</strong></span><span class="summary-day-copy"><strong>${safe(distanceText(Number(item.distance_km)))}</strong><small>${safe([plural(item.trip_count, "trip"), plural(item.place_count, "place")].join(" · "))}</small></span><span class="summary-day-arrow" aria-hidden="true">${actionIcon("open")}</span></button>`;
           })
           .join("")}</section>`,
     )
     .join("");
 }
 
+// What driving cost lately, beside the days it adds up from.
+async function renderFuelSpend() {
+  const box = $("summary-fuel");
+  if (!state.settings?.fuel_economy_l100km) {
+    box.hidden = true;
+    return;
+  }
+  try {
+    const month = (await api("/api/fuel")).last_30_days;
+    box.hidden = !month.configured || !month.drives;
+    if (!box.hidden)
+      box.innerHTML = `<span>Fuel, last 30 days</span><strong>${safe(moneyText(month.cost, month.currency))}</strong><small>${safe(moneyText(month.cost_per_day, month.currency))} a day on average · ${plural(month.drives, "drive")}</small>`;
+  } catch (_error) {
+    box.hidden = true;
+  }
+}
+
 export async function refreshSummaries() {
+  renderFuelSpend();
   state.summaryCatalog = await api("/api/daily-summaries?limit=1000");
   $("summary-count").textContent = state.summaryCatalog.length
     ? state.summaryCatalog.length.toLocaleString()
@@ -177,6 +196,7 @@ function timelineMarkup(value) {
       detail: [
         `${modeName(trip.mode)} ${distanceText(trip.distance_km)}`,
         durationText(trip.duration_minutes),
+        trip.fuel_cost != null ? `${moneyText(trip.fuel_cost, value.totals?.currency || undefined)} fuel` : "",
         trip.coverage_complete ? "" : "partly unrecorded",
       ]
         .filter(Boolean)
@@ -279,10 +299,11 @@ export function renderSummaryDetail(record) {
   }
   const homeReturn = value.home_return?.summary;
   const facts = [
-    ["Distance", `${Number(totals.distance_km || 0).toFixed(1)} km`, "distance"],
+    ["Distance", distanceText(Number(totals.distance_km || 0)), "distance"],
     ["Time moving", durationText((totals.moving_hours || 0) * 60), "time"],
     ["Trips", totals.trips ?? 0, "trips"],
     ["Places", totals.places ?? 0, "places"],
+    ...(totals.fuel_cost != null ? [["Fuel", moneyText(totals.fuel_cost, totals.currency || undefined), "trips"]] : []),
   ];
   const reminderActivity =
     (value.reminders_triggered || []).length + (value.reminders_created || []).length +
@@ -311,7 +332,7 @@ export function renderSummaryDetail(record) {
     <section class="summary-content-section"><div class="summary-section-head"><h3>Timeline</h3></div>${timelineMarkup(value)}</section>
     <div class="summary-lower-grid${reminderActivity ? "" : " single"}"><section class="summary-content-section"><div class="summary-section-head"><h3>Places</h3></div>${placesMarkup(value.places || [])}</section>${reminderActivity ? `<section class="summary-content-section"><div class="summary-section-head"><h3>Reminders</h3></div>${remindersMarkup(value)}</section>` : ""}</div>
     ${coverageMarkup(value)}
-    <details class="summary-technical"><summary><span><strong>For AI tools and developers</strong><small>The compact brief, its size, and the stored record</small></span><span class="summary-disclosure" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></span></summary><div class="summary-technical-body"><p class="summary-record-meta">Saved ${safe(ago(record.updated_at))} (${safe(formatTime(record.updated_at))}) · ${safe(record.timezone)} · ${(totals.timeline_fixes ?? 0).toLocaleString()} key fixes of ${(totals.raw_fixes ?? 0).toLocaleString()} raw · sampled distance ${Number(totals.sampled_distance_km || 0).toFixed(1)} km</p>${briefBlock}<details class="summary-json"><summary>Stored record <small>JSON · schema ${safe(value.schema_version ?? "?")}</small></summary><pre>${safe(JSON.stringify(value, null, 2))}</pre></details></div></details>`;
+    <details class="summary-technical"><summary><span><strong>For AI tools and developers</strong><small>The compact brief, its size, and the stored record</small></span><span class="summary-disclosure" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></span></summary><div class="summary-technical-body"><p class="summary-record-meta">Saved ${safe(ago(record.updated_at))} (${safe(formatTime(record.updated_at))}) · ${safe(record.timezone)} · ${(totals.timeline_fixes ?? 0).toLocaleString()} key fixes of ${(totals.raw_fixes ?? 0).toLocaleString()} raw · sampled distance ${safe(distanceText(Number(totals.sampled_distance_km || 0)))}</p>${briefBlock}<details class="summary-json"><summary>Stored record <small>JSON · schema ${safe(value.schema_version ?? "?")}</small></summary><pre>${safe(JSON.stringify(value, null, 2))}</pre></details></div></details>`;
   $("summary-history").onclick = () => {
     state.focusPlace = null;
     state.followToday = record.date === localDateKey();

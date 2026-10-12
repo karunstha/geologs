@@ -1,7 +1,7 @@
 // The detail tabs under the History map: the day's places, speed, samples, and recorded data.
 import { api, post } from "../core/api.js";
 import { $, safe, toast } from "../core/dom.js";
-import { clock, clockPrecise, durationText, formatTime, longDate, plural, zonedMidnight } from "../core/format.js";
+import { clock, clockPrecise, durationText, formatTime, kmh, lengthText, longDate, plural, speedUnit, toSpeedUnit, zonedMidnight } from "../core/format.js";
 import { state } from "../core/state.js";
 import { onEach, rowActions } from "../ui/actions.js";
 import { modeInfo, modeName, pinBadge, sourceName, zoneText } from "../ui/icons.js";
@@ -87,7 +87,7 @@ export function renderSpeedChart(day) {
   const fixes = [...state.timeline]
     .reverse()
     .filter((fix) => fix.speed_mps != null)
-    .map((fix) => ({ time: Date.parse(fix.timestamp), kmh: fix.speed_mps * 3.6 }));
+    .map((fix) => ({ time: Date.parse(fix.timestamp), kmh: toSpeedUnit(fix.speed_mps * 3.6) }));
   if (fixes.length < 2) {
     box.innerHTML = '<p class="empty">Speed shows up once a day has at least two timed fixes.</p>';
     return;
@@ -149,8 +149,8 @@ export function renderSpeedChart(day) {
         `<rect x="${x(Math.max(from, start))}" y="0" width="${(x(Math.min(to, end)) - x(Math.max(from, start))).toFixed(1)}" height="${H}" class="gap-band"/>`,
     )
     .join("");
-  box.innerHTML = `<div class="chart-summary"><div><span>Top speed</span><strong>${Math.round(top)} km/h</strong></div><div><span>Average while moving</span><strong>${moving.length ? Math.round(average) + " km/h" : "—"}</strong></div><div><span>Timed fixes</span><strong>${fixes.length.toLocaleString()}</strong></div></div>
-    <figure class="speed-chart" aria-label="Speed through the day, up to ${Math.round(top)} km/h">
+  box.innerHTML = `<div class="chart-summary"><div><span>Top speed</span><strong>${Math.round(top)} ${speedUnit()}</strong></div><div><span>Average while moving</span><strong>${moving.length ? Math.round(average) + " " + speedUnit() : "—"}</strong></div><div><span>Timed fixes</span><strong>${fixes.length.toLocaleString()}</strong></div></div>
+    <figure class="speed-chart" aria-label="Speed through the day, up to ${Math.round(top)} ${speedUnit()}">
       <div class="chart-y">${ticks
         .slice()
         .reverse()
@@ -160,7 +160,7 @@ export function renderSpeedChart(day) {
         .map((tick) => `<line x1="0" x2="${W}" y1="${y(tick)}" y2="${y(tick)}" class="grid"/>`)
         .join("")}<g class="speed-lines">${lines}</g></svg></div>
       <div class="chart-x">${hours.map((hour) => `<span style="left:${(hour / 24) * 100}%">${safe(hourLabel(hour))}</span>`).join("")}</div>
-      <figcaption>km/h · coloured by travel mode${gaps.length ? " · shaded where location is missing" : ""}</figcaption>
+      <figcaption>${speedUnit()} · coloured by travel mode${gaps.length ? " · shaded where location is missing" : ""}</figcaption>
     </figure>`;
 }
 
@@ -188,7 +188,7 @@ export function renderSamples() {
               ? ' <small title="Device speed with your adjustment">adj.</small>'
               : "";
         const ticked = state.selectedSamples.has(point.id);
-        return `<tr${ticked ? ' class="selected"' : ""}><td class="select-col"><input type="checkbox" data-select-sample="${point.id}" aria-label="Select the sample at ${safe(clockPrecise(point.timestamp))}"${ticked ? " checked" : ""}></td><td title="${safe(formatTime(point.timestamp))}">${safe(clockPrecise(point.timestamp))}</td><td>${safe(timeline ? ROLES[point.role] || "Sample" : "Raw sample")}</td><td title="${safe(point.source)}">${safe(source.device || source.kind)}</td><td>${safe(contextAt(state.day, Date.parse(point.timestamp)))}</td><td class="numeric">${point.speed_mps == null ? "—" : (point.speed_mps * 3.6).toFixed(1) + " km/h"}${origin}</td><td class="mono">${point.lat.toFixed(5)}, ${point.lon.toFixed(5)}</td><td class="numeric">${point.accuracy_m == null ? "—" : Math.round(point.accuracy_m) + " m"}</td><td>${rowActions([
+        return `<tr${ticked ? ' class="selected"' : ""}><td class="select-col"><input type="checkbox" data-select-sample="${point.id}" aria-label="Select the sample at ${safe(clockPrecise(point.timestamp))}"${ticked ? " checked" : ""}></td><td title="${safe(formatTime(point.timestamp))}">${safe(clockPrecise(point.timestamp))}</td><td>${safe(timeline ? ROLES[point.role] || "Sample" : "Raw sample")}</td><td title="${safe(point.source)}">${safe(source.device || source.kind)}</td><td>${safe(contextAt(state.day, Date.parse(point.timestamp)))}</td><td class="numeric">${kmh(point)}${origin}</td><td class="mono">${point.lat.toFixed(5)}, ${point.lon.toFixed(5)}</td><td class="numeric">${lengthText(point.accuracy_m)}</td><td>${rowActions([
           { icon: "map", label: "Show on map", data: `data-sample-map="${index}"` },
           { icon: "delete", label: "Delete this sample", data: `data-delete-sample="${point.id}"`, tone: "danger" },
         ])}</td></tr>`;

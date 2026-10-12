@@ -1,7 +1,7 @@
 // The Leaflet map: recorded paths, places, the current location, and the selected stay or trip.
 import { api } from "../core/api.js";
 import { $, copyText, safe, toast } from "../core/dom.js";
-import { clock, coordinateText, durationText, formatTime, kmh, localDateKey } from "../core/format.js";
+import { clock, coordinateText, durationText, formatTime, kmh, lengthText, localDateKey } from "../core/format.js";
 import { state } from "../core/state.js";
 import { modeInfo, modeName, placeIcons } from "../ui/icons.js";
 import { params } from "../views/history.js";
@@ -63,9 +63,9 @@ export function initMap() {
         rows
           .map(
             (p) =>
-              `<div class="list-item"><div><strong>${safe(formatTime(p.timestamp))}</strong><small>${safe(modeName(p.mode))} · ${safe(kmh(p))} · ${Math.round(p.distance_m)} m away · ${safe(coordinateText(p.lat, p.lon))}</small></div></div>`,
+              `<div class="list-item"><div><strong>${safe(formatTime(p.timestamp))}</strong><small>${safe(modeName(p.mode))} · ${safe(kmh(p))} · ${lengthText(p.distance_m)} away · ${safe(coordinateText(p.lat, p.lon))}</small></div></div>`,
           )
-          .join("") || '<p class="empty">No recorded fixes within 250 m on this day.</p>';
+          .join("") || `<p class="empty">No recorded fixes within ${lengthText(250)} on this day.</p>`;
     } catch (err) {
       toast(err.message);
     }
@@ -193,7 +193,7 @@ export function drawMap(fit = false) {
       .bindPopup(
         pointPopup(
           place.name,
-          ["Saved place · " + Math.round(place.radius_m) + " m zone"],
+          ["Saved place · " + lengthText(place.radius_m) + " zone"],
           place.lat,
           place.lon,
         ),

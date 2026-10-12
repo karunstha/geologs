@@ -1,4 +1,5 @@
 // Searching for a place by name, near where you are, for the reminder and saved-place forms.
+import { distanceText } from "../core/format.js";
 import { api } from "../core/api.js";
 import { safe } from "../core/dom.js";
 import { state } from "../core/state.js";
@@ -16,9 +17,7 @@ export async function searchPlaces(query) {
 
 function distanceLabel(metres) {
   if (metres == null) return "";
-  if (metres < 1000) return `${Math.round(metres)} m away`;
-  const km = metres / 1000;
-  return `${km < 10 ? km.toFixed(1) : Math.round(km).toLocaleString()} km away`;
+  return `${distanceText(metres / 1000)} away`;
 }
 
 // Rows for a result list; each "Use" button carries `attribute` with the result's index.

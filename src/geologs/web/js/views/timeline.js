@@ -1,7 +1,7 @@
 // The History day timeline and its travel-mode corrections.
 import { post } from "../core/api.js";
 import { $, safe, toast } from "../core/dom.js";
-import { clock, distanceText, durationText } from "../core/format.js";
+import { clock, distanceText, durationText, lengthText, moneyText } from "../core/format.js";
 import { state } from "../core/state.js";
 import { selectItem, selectedItem, stayColor, tripKey } from "../map/map.js";
 import { modeIcon, modeInfo, modeName, pinBadge, zoneText } from "../ui/icons.js";
@@ -170,7 +170,7 @@ export function renderTimeline(day) {
       .map((item) => {
         if (item.type === "possible")
           // Found from your samples, but nothing named was close enough to be sure it wasn't traffic.
-          return `<li class="tl-possible"><span class="tl-body"><strong>Possible stop · ${safe(durationText(item.stop.minutes))}</strong><small>${safe(clock(item.stop.started_at))} – ${safe(clock(item.stop.ended_at))} · still, but no named place within 75 m, so it may have been traffic</small></span><button type="button" class="button secondary small" data-keep-stop="${item.index}">Keep</button></li>`;
+          return `<li class="tl-possible"><span class="tl-body"><strong>Possible stop · ${safe(durationText(item.stop.minutes))}</strong><small>${safe(clock(item.stop.started_at))} – ${safe(clock(item.stop.ended_at))} · still, but no named place within ${safe(lengthText(75))}, so it may have been traffic</small></span><button type="button" class="button secondary small" data-keep-stop="${item.index}">Keep</button></li>`;
         if (item.type === "gap")
           return `<li class="tl-gap"><span>No location data</span><small>${safe(clock(item.gap.start))} – ${safe(clock(item.gap.end))} · ${safe(durationText(item.gap.minutes))}</small></li>`;
         if (item.type === "stay") {
@@ -180,6 +180,7 @@ export function renderTimeline(day) {
         const trip = item.trip,
           info = modeInfo[trip.mode] || { label: "Trip", color: "#6f7b76" };
         const notes = [`${clock(trip.start)} – ${clock(trip.end)}`, durationText(trip.duration_minutes)];
+        if (trip.fuel) notes.push(`${moneyText(trip.fuel.cost)} fuel`);
         if (!trip.coverage_complete) notes.push("coverage gap");
         if (trip.mode_corrected) notes.push("set by you");
         // A trip that ends where it began left and came back; say so rather than implying travel to where you already were.
