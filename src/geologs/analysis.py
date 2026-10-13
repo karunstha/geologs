@@ -47,6 +47,10 @@ QUIET_ACCURACY_ALLOWANCE_M = 30
 # Leaving after a quiet stretch, the stay lasts until shortly before the next
 # fix; that estimate is trusted for a quick stop when the fix is this close.
 QUIET_DEPARTURE_MAX_M = 1500
+# A gap at least this long before a departure is quiet, not a fix missed on the move.
+QUIET_DEPARTURE_MIN_SECONDS = 180
+# A fix reported (or reached) faster than this is still on the move.
+MOVING_MPS = 2.5
 # A quick stop backed by a fix at least this often needs nothing more; a
 # sparser one (a phone that went quiet at the pump) is only kept with a named,
 # saved, or corrected place this close: a road or a red light has none.
@@ -164,12 +168,16 @@ def _eligible(point):
     return (point["accuracy_m"] is None or point["accuracy_m"] <= 100)
 
 
-def _new_candidate(point, previous_at=None):
-    arrival_gap = (datetime.fromisoformat(point["timestamp"]) - datetime.fromisoformat(previous_at)).total_seconds() \
-        if previous_at else None
+def _new_candidate(point, previous=None, after_stay=False):
+    """previous is the fix before `point`; after_stay, whether it ended a stay."""
+    arrival_gap = arrival_m = None
+    if previous:
+        arrival_gap = (datetime.fromisoformat(point["timestamp"]) - datetime.fromisoformat(previous["timestamp"])).total_seconds()
+        arrival_m = metres(previous["lat"], previous["lon"], point["lat"], point["lon"])
     return {"start_id": point["id"], "end_id": point["id"], "start": point["timestamp"], "end": point["timestamp"],
             "first_lat": point["lat"], "first_lon": point["lon"], "lat": point["lat"], "lon": point["lon"], "count": 1,
             "reach": 0.0, "worst_accuracy": point["accuracy_m"] or 0, "arrival_gap": arrival_gap,
+            "arrival_m": arrival_m, "after_stay": after_stay, "moving": (reported_speed(point) or 0) > MOVING_MPS,
             "fixes": [[point["lat"], point["lon"], point["accuracy_m"] or 0]],
             "event": point.get("external_id"), "proven_end": point["timestamp"]}
 
@@ -185,8 +193,10 @@ def _candidate_kind(candidate, ongoing, rules):
     A 'stop' has fixes close together within QUICK_STOP_REACH_M; a sparser
     or looser one is a 'pause', kept only where there is a place (stays()).
     """
-    if candidate is None or candidate["count"] < 2:
+    if candidate is None:
         return None
+    if candidate["count"] < 2:
+        return "stationary" if _lone_stay_start(candidate, rules) else None
     if _duration(candidate) >= _stay_seconds(rules):
         return "stationary"
     quick_minutes = (rules or ANALYSIS_DEFAULTS)["quick_stop_minutes"]
@@ -210,6 +220,30 @@ def _candidate_kind(candidate, ongoing, rules):
         return "stop"
     loose = STOP_RADIUS_M + min(candidate["worst_accuracy"], QUIET_ACCURACY_ALLOWANCE_M)
     return "pause" if spread <= loose else None
+
+
+def _lone_stay_start(candidate, rules):
+    """When a candidate's one fix is a stay, its estimated arrival; else None.
+
+    An app that reports only while moving may send a single fix from a place
+    it then stays at. Quiet on both sides makes it a stay, as long as the fix
+    was not reported or reached on the move. You arrived about as soon as you
+    could get there from the fix before (unless that ended a stay, which
+    already claims the quiet), and left about when it takes to reach the next.
+    """
+    left_at, gap, distance = candidate.get("left_at"), candidate["arrival_gap"], candidate.get("arrival_m")
+    if (left_at is None or gap is None or distance is None or candidate.get("moving", True)
+            or candidate["worst_accuracy"] > QUICK_STOP_MAX_ACCURACY_M):
+        return None
+    start = datetime.fromisoformat(candidate["start"])
+    if gap < QUIET_DEPARTURE_MIN_SECONDS:
+        if gap <= 0 or distance / gap > MOVING_MPS:
+            return None
+    elif not candidate.get("after_stay"):
+        start = min(start, start - timedelta(seconds=gap) + timedelta(seconds=distance / QUIET_DEPARTURE_SPEED_MPS))
+    if (datetime.fromisoformat(left_at) - start).total_seconds() < _stay_seconds(rules):
+        return None
+    return start.isoformat(timespec="seconds")
 
 
 def _creeping(candidate):
@@ -248,7 +282,9 @@ def _save_candidate(store, source, candidate, ongoing, rules=None):
         end_observation_id=excluded.end_observation_id,ended_at=excluded.ended_at,
         lat=excluded.lat,lon=excluded.lon,point_count=excluded.point_count,ongoing=excluded.ongoing,
         kind=excluded.kind,activity=NULL,distance_m=NULL,radius_m=NULL""",
-        (source, candidate["start_id"], candidate["end_id"], candidate["start"], candidate.get("left_at") or candidate["end"],
+        (source, candidate["start_id"], candidate["end_id"],
+         candidate["start"] if candidate["count"] >= 2 else _lone_stay_start(candidate, rules),
+         candidate.get("left_at") or candidate["end"],
          candidate["lat"], candidate["lon"], candidate["count"], int(ongoing), kind))
     candidate["saved"] = True
 
@@ -259,18 +295,19 @@ def _stray_fix(point):
                                             "external_id")}
 
 
-def _advance_stay(store, source, candidate, point, rules=None, previous_at=None):
+def _advance_stay(store, source, candidate, point, rules=None, previous=None, after_stay=False):
     """Feed one accurate fix to the stationary-stay candidate and return the new candidate.
 
-    previous_at is the time of the fix before `point` when no candidate is open.
+    previous is the fix before `point` when no candidate is open, and
+    after_stay whether it ended a stay.
     """
     if candidate is None:
-        return _new_candidate(point, previous_at)
+        return _new_candidate(point, previous, after_stay)
     elapsed = (datetime.fromisoformat(point["timestamp"]) - datetime.fromisoformat(candidate["end"])).total_seconds()
     strays = candidate.get("strays") or []
     to_centre = metres(point["lat"], point["lon"], candidate["lat"], candidate["lon"])
     if 0 < elapsed <= MAX_QUIET_STAY_SECONDS:
-        moving = (reported_speed(point) or 0) > 2.5
+        moving = (reported_speed(point) or 0) > MOVING_MPS
         # The first fix anchors the stay so a slow creep cannot drag it along,
         # but it is often you still rolling in: allow for both fixes' accuracy.
         first_accuracy = (candidate.get("fixes") or [[0, 0, 0]])[0][2]
@@ -312,7 +349,7 @@ def _advance_stay(store, source, candidate, point, rules=None, previous_at=None)
     # A real departure (or gap) ends the stay at its last inside fix. The
     # held-back fixes belong to whatever comes next, so replay them.
     candidate["departure_gap"] = elapsed
-    if 180 <= elapsed <= MAX_QUIET_STAY_SECONDS and not strays:
+    if QUIET_DEPARTURE_MIN_SECONDS <= elapsed <= MAX_QUIET_STAY_SECONDS and not strays:
         # Left after a quiet stretch: you were here until about the time it
         # takes to reach the next fix.
         speed = max(reported_speed(point) or 0, QUIET_DEPARTURE_SPEED_MPS)
@@ -320,10 +357,12 @@ def _advance_stay(store, source, candidate, point, rules=None, previous_at=None)
         candidate["left_at"] = max(datetime.fromisoformat(candidate["end"]), left).isoformat(timespec="seconds")
         candidate["departure_m"] = round(to_centre, 1)
     _save_candidate(store, source, candidate, False, rules)
-    previous_at, candidate = candidate["end"], None
+    last = (candidate.get("fixes") or [[candidate["lat"], candidate["lon"]]])[-1]
+    previous = {"timestamp": candidate["end"], "lat": last[0], "lon": last[1]}
+    after_stay, candidate = bool(candidate.get("saved")), None
     for item in strays + [point]:
-        candidate = _advance_stay(store, source, candidate, item, rules, previous_at)
-        previous_at = item["timestamp"]
+        candidate = _advance_stay(store, source, candidate, item, rules, previous, after_stay)
+        previous, after_stay = item, False
     return candidate
 
 
@@ -1312,24 +1351,30 @@ def _join_source_handoffs(day_stays, trips):
 
 
 def _coverage_gaps(points, trips, day_stays=()):
-    """Unobserved stretches over 30 minutes, except inside a trip that already notes
-    them or a stay (an app that reports only while moving is quiet while you stay)."""
+    """Unobserved stretches over 30 minutes, less what a trip that already notes
+    them or a stay covers (an app that reports only while moving is quiet while you stay)."""
     times = sorted({datetime.fromisoformat(point["timestamp"]) for point in points})
     spans = [(datetime.fromisoformat(trip["start"]), datetime.fromisoformat(trip["end"])) for trip in trips]
     spans += [(datetime.fromisoformat(stay["started_at"]), datetime.fromisoformat(stay["ended_at"])) for stay in day_stays]
+    spans.sort()
     gaps = []
     for earlier, later in zip(times, times[1:]):
         if (later - earlier).total_seconds() <= MAX_SAMPLE_GAP_SECONDS:
             continue
-        # Covered end to end by stays and trips together (a stay that ran until you left, then the trip).
-        reached = earlier
-        for start, end in sorted(spans):
-            if start <= reached < end:
-                reached = end
-        if reached >= later:
-            continue
-        gaps.append({"start": earlier.isoformat(), "end": later.isoformat(),
-                     "minutes": round((later - earlier).total_seconds() / 60, 1)})
+        # Only the parts no stay or trip covers are unknown: a stay that ran until
+        # you left leaves just the minute or so it took to reach the next fix.
+        uncovered, reached = [], earlier
+        for start, end in spans:
+            if end <= reached or start >= later:
+                continue
+            if start > reached:
+                uncovered.append((reached, start))
+            reached = end
+        if reached < later:
+            uncovered.append((reached, later))
+        gaps += [{"start": start.isoformat(), "end": end.isoformat(),
+                  "minutes": round((end - start).total_seconds() / 60, 1)}
+                 for start, end in uncovered if (end - start).total_seconds() > MAX_SAMPLE_GAP_SECONDS]
     return gaps
 
 

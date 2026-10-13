@@ -2054,6 +2054,46 @@ class StoreTests(unittest.TestCase):
         day = day_summary(self.store, "2026-09-27", "UTC")
         self.assertEqual(day["coverage_gaps"], [])
 
+    def test_one_fix_between_quiet_stretches_is_a_stay(self):
+        # Real OwnTracks fixes from 2026-10-13 (Chicago time + 5 h): home, a drive, an hour in
+        # one building (one 14 m fix), then a walk to another building 225 m away. The 1 km fixes
+        # neither confirm nor end a stay; 13:28:47 is still driving, reached at 4.6 m/s.
+        source = "owntracks:owntracks/AAECA792-3041-476E-A643-12321E9A9694"
+        rows = [("16:40:00", 34.74314, -92.37475, 5), ("17:11:26", 34.74314, -92.37475, 5),
+                ("18:27:18", 34.74288, -92.37241, 38), ("18:27:20", 34.74288, -92.37243, 27),
+                ("18:28:47", 34.74628, -92.37063, 2), ("18:34:14", 34.72709, -92.34091, 1000),
+                ("18:59:06", 34.72534, -92.34065, 14), ("19:57:26", 34.72534, -92.34065, 1000),
+                ("20:06:43", 34.72341, -92.33989, 14)]
+        self.store.ingest([{"source": source, "external_id": at, "timestamp": f"2026-10-13T{at}+00:00",
+                            "lat": lat, "lon": lon, "accuracy_m": accuracy} for at, lat, lon, accuracy in rows])
+        kept = list(reversed(stays(self.store, limit=None)))
+        # Home until about the time it takes to reach 18:27:18; the building from about the time
+        # it takes to get there from 18:28:47 until about the time it takes to walk to 20:06:43.
+        self.assertEqual([(row["started_at"], row["ended_at"], row["point_count"]) for row in kept],
+                         [("2026-10-13T16:40:00+00:00", "2026-10-13T18:26:52+00:00", 2),
+                          ("2026-10-13T18:35:58+00:00", "2026-10-13T20:06:15+00:00", 1)])
+        day = day_summary(self.store, "2026-10-13", "UTC")
+        self.assertEqual([(trip["start"], trip["end"]) for trip in day["trips"]],
+                         [("2026-10-13T18:26:52+00:00", "2026-10-13T18:35:58+00:00")])
+        self.assertEqual(day["coverage_gaps"], [])
+
+    def test_coverage_gap_is_only_the_time_no_stay_covers(self):
+        # The same morning with nothing yet from the building: Home (quiet since its last fix,
+        # with a Home Assistant fix at 17:22) ran until 26 s before the first fix away.
+        owntracks = "owntracks:owntracks/AAECA792-3041-476E-A643-12321E9A9694"
+        rows = [(owntracks, "16:40:00", 34.74314, -92.37475, 5), (owntracks, "17:11:26", 34.74314, -92.37475, 5),
+                ("home_assistant:device_tracker.phone", "17:22:57", 34.74312, -92.37473, 9),
+                (owntracks, "18:27:18", 34.74288, -92.37241, 38), (owntracks, "18:27:20", 34.74288, -92.37243, 27),
+                (owntracks, "18:28:47", 34.74628, -92.37063, 2), (owntracks, "20:00:00", 34.72534, -92.34065, 14)]
+        self.store.ingest([{"source": source, "external_id": at, "timestamp": f"2026-10-13T{at}+00:00",
+                            "lat": lat, "lon": lon, "accuracy_m": accuracy} for source, at, lat, lon, accuracy in rows])
+        day = day_summary(self.store, "2026-10-13", "UTC")
+        self.assertEqual([(stay["started_at"], stay["ended_at"]) for stay in day["stays"]],
+                         [("2026-10-13T16:40:00+00:00", "2026-10-13T18:26:52+00:00")])
+        # Not 17:22-18:27, which Home covers; the 91 min to 20:00 are unknown.
+        self.assertEqual(day["coverage_gaps"], [{"start": "2026-10-13T18:28:47+00:00",
+                                                 "end": "2026-10-13T20:00:00+00:00", "minutes": 91.2}])
+
     def test_rolling_in_fix_does_not_split_the_stay_it_starts(self):
         # Real Home Assistant (OwnTracks) fixes arriving home on 2026-10-07: the first is still
         # moving at 12 km/h, 53.5 m from where the phone settled at 12 m accuracy.
