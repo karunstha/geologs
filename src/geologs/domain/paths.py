@@ -1,19 +1,10 @@
-"""Known paths: routes learned from well-recorded trips, used to fill the
-unrecorded stretches of sparse ones.
-
-A trip from a dense tracker records where you went. A sparse tracker (an app
-that reports only after you have moved a fair way) leaves most of a trip
-unrecorded, but you usually went the way you have gone before: the same road
-serves trips between many places, so a gap is matched against every known
-path that passes near both of its ends, not only trips between the same two
-stays. A filled stretch is still a guess and is never learned from.
-"""
-import json
+"""Path geometry: simplifying recorded routes and matching gaps against known ones."""
 import math
-from collections import Counter
-from datetime import datetime
 
-from .core import MOVEMENT_MODES, metres
+from .geo import metres
+from .motion import MOVEMENT_MODES
+from collections import Counter
+
 
 # Only trips recorded end to end, with fixes at least this close on average,
 # teach a path (a minute apart at 60 km/h); shorter trips teach little but clutter the library.
@@ -37,15 +28,15 @@ MAX_CANDIDATES = 60
 FILL_MODE_SHARE = .5
 
 
-def _xy(lon, lat, lat0):
+def to_xy(lon, lat, lat0):
     return lon * 111320 * math.cos(math.radians(lat0)), lat * 110574
 
 
-def _lonlat(x, y, lat0):
+def to_lonlat(x, y, lat0):
     return [x / (111320 * math.cos(math.radians(lat0))), y / 110574]
 
 
-def _length(coordinates):
+def path_length(coordinates):
     return sum(metres(a[1], a[0], b[1], b[0]) for a, b in zip(coordinates, coordinates[1:]))
 
 
@@ -54,7 +45,7 @@ def simplify(coordinates, tolerance_m=SIMPLIFY_M):
     if len(coordinates) < 3:
         return [list(point) for point in coordinates]
     lat0 = coordinates[0][1]
-    xy = [_xy(lon, lat, lat0) for lon, lat in coordinates]
+    xy = [to_xy(lon, lat, lat0) for lon, lat in coordinates]
     keep = [False] * len(xy)
     keep[0] = keep[-1] = True
     stack = [(0, len(xy) - 1)]
@@ -85,63 +76,12 @@ def learnable(trip):
             and distance_m / (points - 1) <= LEARN_MAX_SPACING_M)
 
 
-def _bounds(coordinates):
+def path_bounds(coordinates):
     lons, lats = [point[0] for point in coordinates], [point[1] for point in coordinates]
     return min(lats), min(lons), max(lats), max(lons)
 
 
-def learn_paths(store, trips, start, end, source=None):
-    """Keep known_paths in step with the learnable trips that start in [start, end].
-
-    Only rows that differ are written, so learning the same day again changes
-    nothing (and keeps cached days valid). Returns how many trips taught a path.
-    """
-    first, last = datetime.fromisoformat(start), datetime.fromisoformat(end)
-    wanted = {}
-    for trip in trips:
-        if first <= datetime.fromisoformat(trip["start"]) <= last and learnable(trip):
-            coordinates = simplify(trip["route_segments"][0])
-            wanted[(trip["source"], trip["start"])] = {
-                "ended_at": trip["end"], "mode": trip["mode"], "distance_m": round(_length(coordinates), 1),
-                "coordinates": json.dumps(coordinates, separators=(",", ":"))}
-    clauses, args = ["started_at>=?", "started_at<=?"], [start, end]
-    if source:
-        clauses.append("source=?")
-        args.append(source)
-    existing = {(row["source"], row["started_at"]): row
-                for row in store._rows("SELECT * FROM known_paths WHERE " + " AND ".join(clauses), args)}
-    # Rows are compared as stored; a timestamp spelled differently is a different trip.
-    existing = {key: row for key, row in existing.items()
-                if first <= datetime.fromisoformat(row["started_at"]) <= last}
-    changed = False
-    for key, row in existing.items():
-        want = wanted.get(key)
-        if want is None or any(row[field] != want[field] for field in ("ended_at", "mode", "coordinates")):
-            store.db.execute("DELETE FROM known_paths WHERE id=?", (row["id"],))
-            changed = True
-    for (path_source, started_at), want in wanted.items():
-        row = existing.get((path_source, started_at))
-        if row is not None and all(row[field] == want[field] for field in ("ended_at", "mode", "coordinates")):
-            continue
-        min_lat, min_lon, max_lat, max_lon = _bounds(json.loads(want["coordinates"]))
-        store.db.execute("""INSERT INTO known_paths
-            (source,started_at,ended_at,mode,distance_m,min_lat,min_lon,max_lat,max_lon,coordinates)
-            VALUES (?,?,?,?,?,?,?,?,?,?)""",
-            (path_source, started_at, want["ended_at"], want["mode"], want["distance_m"],
-             min_lat, min_lon, max_lat, max_lon, want["coordinates"]))
-        changed = True
-    if changed:
-        store.db.commit()
-    return len(wanted)
-
-
-def signature(store):
-    """Changes whenever the library does, for cache keys of days that use it."""
-    row = store.db.execute("SELECT COUNT(*) AS count,COALESCE(MAX(id),0) AS max_id FROM known_paths").fetchone()
-    return f"{row['count']}:{row['max_id']}"
-
-
-def _project(xy, point):
+def project_onto(xy, point):
     """Nearest point on a polyline: (distance, distance along it, index of its segment, position)."""
     best, along = None, 0.0
     px, py = point
@@ -157,7 +97,7 @@ def _project(xy, point):
     return best
 
 
-def _stretch(xy, a, b):
+def stretch_between(xy, a, b):
     """The part of a polyline between two projections, in the order a to b."""
     reverse = a[1] > b[1]
     if reverse:
@@ -167,7 +107,7 @@ def _stretch(xy, a, b):
     return (points[::-1] if reverse else points), reverse
 
 
-def _samples(points, count):
+def samples_along(points, count):
     """count points spread evenly along a polyline."""
     lengths = [0.0]
     for (ax, ay), (bx, by) in zip(points, points[1:]):
@@ -184,34 +124,36 @@ def _samples(points, count):
     return result
 
 
-def _near(samples, points):
-    return all(_project(points, sample)[0] <= SAME_ROUTE_M for sample in samples) if len(points) > 1 else False
+def follows(samples, points):
+    return all(project_onto(points, sample)[0] <= SAME_ROUTE_M for sample in samples) if len(points) > 1 else False
 
 
-def fill_gap(store, a, b):
-    """The likeliest known route from [lon, lat] a to b, or None.
-
-    Returns {"coordinates", "past_trips", "mode", "distance_m"}: past_trips
-    counts the trips that went this way between these two points.
-    """
-    straight = metres(a[1], a[0], b[1], b[0])
+def search_box(a, b):
+    """(min_lat, max_lat, min_lon, max_lon) that a known path must reach over to pass near both [lon, lat] ends."""
     pad_lat = MATCH_M / 110574
     pad_lon = MATCH_M / (111320 * math.cos(math.radians(a[1])))
-    rows = store._rows("""SELECT mode,started_at,coordinates FROM known_paths
-        WHERE min_lat<=? AND max_lat>=? AND min_lon<=? AND max_lon>=? ORDER BY started_at DESC LIMIT ?""",
-        (min(a[1], b[1]) + pad_lat, max(a[1], b[1]) - pad_lat, min(a[0], b[0]) + pad_lon, max(a[0], b[0]) - pad_lon,
-         MAX_CANDIDATES))
+    return (min(a[1], b[1]) + pad_lat, max(a[1], b[1]) - pad_lat, min(a[0], b[0]) + pad_lon, max(a[0], b[0]) - pad_lon)
+
+
+def best_route(a, b, known):
+    """The likeliest of `known` paths from [lon, lat] a to b, or None.
+
+    `known` holds paths as {"mode", "started_at", "coordinates"}. Returns
+    {"coordinates", "past_trips", "mode", "distance_m"}: past_trips counts
+    the trips that went this way between these two points.
+    """
+    straight = metres(a[1], a[0], b[1], b[0])
     lat0 = a[1]
-    start, end = _xy(a[0], a[1], lat0), _xy(b[0], b[1], lat0)
+    start, end = to_xy(a[0], a[1], lat0), to_xy(b[0], b[1], lat0)
     candidates = []
-    for row in rows:
-        xy = [_xy(lon, lat, lat0) for lon, lat in json.loads(row["coordinates"])]
+    for row in known:
+        xy = [to_xy(lon, lat, lat0) for lon, lat in row["coordinates"]]
         if len(xy) < 2:
             continue
-        on_a, on_b = _project(xy, start), _project(xy, end)
+        on_a, on_b = project_onto(xy, start), project_onto(xy, end)
         if on_a[0] > MATCH_M or on_b[0] > MATCH_M:
             continue
-        stretch, reverse = _stretch(xy, on_a, on_b)
+        stretch, reverse = stretch_between(xy, on_a, on_b)
         length = abs(on_b[1] - on_a[1])
         if length > MAX_DETOUR * straight + DETOUR_SLACK_M:
             continue
@@ -220,36 +162,29 @@ def fill_gap(store, a, b):
     if not candidates:
         return None
     for candidate in candidates:
-        candidate["samples"] = _samples(candidate["points"], SAME_ROUTE_SAMPLES)
+        candidate["samples"] = samples_along(candidate["points"], SAME_ROUTE_SAMPLES)
     for candidate in candidates:
         candidate["route"] = [other for other in candidates
-                              if other is candidate or (_near(candidate["samples"], other["points"])
-                                                        and _near(other["samples"], candidate["points"]))]
+                              if other is candidate or (follows(candidate["samples"], other["points"])
+                                                        and follows(other["samples"], candidate["points"]))]
     # The most travelled route, then one travelled this way round, then the latest.
     best = max(candidates, key=lambda item: (len(item["route"]), not item["reverse"], item["started_at"]))
     points = [start, *best["points"], end]
-    coordinates = [[a[0], a[1]], *(_lonlat(x, y, lat0) for x, y in best["points"]), [b[0], b[1]]]
+    coordinates = [[a[0], a[1]], *(to_lonlat(x, y, lat0) for x, y in best["points"]), [b[0], b[1]]]
     modes = Counter(item["mode"] for item in best["route"])
     return {"coordinates": coordinates, "past_trips": len(best["route"]), "mode": modes.most_common(1)[0][0],
             "distance_m": round(sum(math.hypot(bx - ax, by - ay) for (ax, ay), (bx, by) in zip(points, points[1:])), 1)}
 
 
-def fill_trip(store, trip):
-    """Replace a trip's unrecorded legs with known routes where there is one.
+def with_fills(trip, fills, gaps):
+    """A copy of a trip whose unrecorded legs were filled from known routes where there was one.
 
     Filled legs move from route_gaps to route_fills and count toward the
     trip's distance. A trip mostly made of them takes their mode, unless you
     corrected it: a few fixes rolling away from home say little about how
     you crossed town.
     """
-    fills, gaps = [], []
-    for gap in trip.get("route_gaps") or []:
-        fill = fill_gap(store, gap[0], gap[-1])
-        if fill:
-            fills.append(fill)
-        else:
-            gaps.append(gap)
-    trip["route_fills"], trip["route_gaps"] = fills, gaps
+    trip = {**trip, "route_fills": fills, "route_gaps": gaps}
     if not fills:
         return trip
     filled_km = sum(fill["distance_m"] for fill in fills) / 1000
@@ -264,13 +199,3 @@ def fill_trip(store, trip):
                     mode_from_paths=True)
     return trip
 
-
-def report(store):
-    """What the library holds: paths by mode and by source."""
-    rows = store._rows("SELECT source,mode,distance_m,started_at FROM known_paths")
-    return {"paths": len(rows),
-            "km": round(sum(row["distance_m"] for row in rows) / 1000, 1),
-            "by_mode": dict(Counter(row["mode"] for row in rows).most_common()),
-            "by_source": dict(Counter(row["source"] for row in rows).most_common()),
-            "first": min((row["started_at"] for row in rows), default=None),
-            "last": max((row["started_at"] for row in rows), default=None)}

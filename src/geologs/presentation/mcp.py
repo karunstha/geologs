@@ -1,12 +1,20 @@
 """Small dependency-free MCP JSON-RPC dispatcher for Streamable HTTP."""
 import json
-import sqlite3
 
-from .core import current_location, deliver_webhook, geocode, nearby_places, reverse_geocode, save_place_label
-from .analysis import daily_briefs, daily_overview, day_summary, fuel_costs, place_patterns, predict_next, resolve_place_patterns, search_visits, stays, transitions, visited_places
-from .postgres import INTEGRITY_ERRORS
+from ..services.corrections import save_mode_override
+from ..services.day import day_summary
+from ..services.fuel import fuel_costs
+from ..services.ingest import record_locations
+from ..services.location import current_location
+from ..services.overview import daily_briefs, daily_overview, daily_overviews
+from ..services.patterns import place_patterns, predict_next, resolve_place_patterns, search_visits, transitions, visited_places
+from ..services.places import geocode, nearby_places, reverse_geocode
+from ..services.reminders import cancel_reminder, create_reminder
+from ..services.samples import near, stats
+from ..services.saved_places import delete_label, delete_place, place_visits, save_place, save_place_label
+from ..services.stays import anchored_trips, stays
+from .errors import INPUT_ERRORS, input_message, internal_failure
 
-DB_INPUT_ERRORS = (ValueError, KeyError, TypeError, sqlite3.IntegrityError) + INTEGRITY_ERRORS
 SUPPORTED_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26")
 
 
@@ -60,92 +68,90 @@ TOOLS = [
 ]
 
 
-def call_tool(store, name, args):
+def call_tool(db, name, args):
     if name == "get_current_location":
-        return current_location(store)
+        return current_location(db)
     if name == "get_location_history":
-        return store.points(args.get("start"), args.get("end"), args.get("source"), args.get("limit", 5000))
+        return db.points.points(args.get("start"), args.get("end"), args.get("source"), args.get("limit", 5000))
     if name == "get_raw_observations":
-        return store.observations(args.get("start"), args.get("end"), args.get("source"), args.get("limit", 5000), args.get("offset", 0))
+        return db.points.observations(args.get("start"), args.get("end"), args.get("source"), args.get("limit", 5000), args.get("offset", 0))
     if name == "get_compact_timeline":
-        return store.timeline(args.get("start"), args.get("end"), args.get("source"), args.get("limit", 5000))
+        return db.points.timeline(args.get("start"), args.get("end"), args.get("source"), args.get("limit", 5000))
     if name == "get_location_at_time":
-        return store.at_time(args["timestamp"])
+        return db.points.nearest_in_time(args["timestamp"])
     if name == "search_locations_near":
-        return store.near(args["lat"], args["lon"], args.get("radius_m", 250), args.get("start"), args.get("end"), args.get("limit", 100), args.get("source"))
+        return near(db, args["lat"], args["lon"], args.get("radius_m", 250), args.get("start"), args.get("end"), args.get("limit", 100), args.get("source"))
     if name == "get_travel_stats":
-        return store.stats(args.get("start"), args.get("end"), args.get("source"))
+        return stats(db, args.get("start"), args.get("end"), args.get("source"))
     if name == "get_trips":
-        return store.trips(args.get("start"), args.get("end"), args.get("source"))
+        return anchored_trips(db, args.get("start"), args.get("end"), args.get("source"))
     if name == "get_coverage":
-        return store.coverage()
+        return db.points.coverage()
     if name == "get_place_visits":
-        return store.place_visits(args["place_id"], args.get("start"), args.get("end"))
+        return place_visits(db, args["place_id"], args.get("start"), args.get("end"))
     if name == "get_stays":
-        return stays(store, args.get("start"), args.get("end"), args.get("source"), args.get("limit", 500))
+        return stays(db, args.get("start"), args.get("end"), args.get("source"), args.get("limit", 500))
     if name == "get_fuel_costs":
-        return fuel_costs(store, min(max(int(args.get("days", 30)), 1), 366))
+        return fuel_costs(db, min(max(int(args.get("days", 30)), 1), 366))
     if name == "search_visits":
-        return search_visits(store, args["query"], args.get("start"), args.get("end"), args.get("limit", 50), args.get("timezone"))
+        return search_visits(db, args["query"], args.get("start"), args.get("end"), args.get("limit", 50), args.get("timezone"))
     if name == "get_frequent_places":
-        return resolve_place_patterns(store, place_patterns(store, None))[0][:min(int(args.get("limit", 50)), 5000)]
+        return resolve_place_patterns(db, place_patterns(db, None))[0][:min(int(args.get("limit", 50)), 5000)]
     if name == "get_visited_places":
-        return visited_places(store, args.get("limit", 100))
+        return visited_places(db, args.get("limit", 100))
     if name == "get_unlabeled_frequent_places":
-        return [p for p in resolve_place_patterns(store, place_patterns(store, None))[0]
+        return [p for p in resolve_place_patterns(db, place_patterns(db, None))[0]
                 if p["place_id"] is None and not p.get("label_id")][:min(int(args.get("limit", 50)), 500)]
     if name == "get_time_at_place":
-        return store.place_visits(args["place_id"], args.get("start"), args.get("end"))
+        return place_visits(db, args["place_id"], args.get("start"), args.get("end"))
     if name == "get_day_summary":
-        return day_summary(store, args["date"], args.get("timezone") or store.settings()["timezone"], args.get("source"))
+        return day_summary(db, args["date"], args.get("timezone") or db.settings.get()["timezone"], args.get("source"))
     if name == "get_daily_overview":
-        return daily_overview(store, args["date"], args.get("timezone"), args.get("source"))
+        return daily_overview(db, args["date"], args.get("timezone"), args.get("source"))
     if name == "get_daily_brief":
-        return daily_briefs(store, args["date"], args.get("end_date"))
+        return daily_briefs(db, args["date"], args.get("end_date"))
     if name == "list_daily_overviews":
-        return store.daily_overviews(args.get("start"), args.get("end"), args.get("limit", 90))
+        return daily_overviews(db, args.get("start"), args.get("end"), args.get("limit", 90))
     if name == "get_place_transitions":
-        return transitions(store, args.get("limit", 50))
+        return transitions(db, args.get("limit", 50))
     if name == "predict_next_destination":
-        return predict_next(store)
+        return predict_next(db)
     if name == "list_places":
-        return store.places(enrich=True)
+        return db.places.saved()
     if name == "save_place":
-        return store.save_place(args)
+        return save_place(db, args)
     if name == "delete_place":
-        return store.delete_place(args["id"])
+        return delete_place(db, args["id"])
     if name == "list_place_labels":
-        return store.place_labels()
+        return db.places.labels()
     if name == "set_place_label":
-        return save_place_label(store, args)
+        return save_place_label(db, args)
     if name == "set_travel_mode":
-        return store.save_mode_override(args)
+        return save_mode_override(db, args)
     if name == "remove_place_label":
-        return store.delete_place_label(args["id"])
+        return delete_label(db, args["id"])
     if name == "list_reminders":
-        return store.reminders()
+        return db.reminders.active()
     if name == "list_reminder_history":
-        return store.reminder_history(args.get("limit", 200))
+        return db.reminders.history(args.get("limit", 200))
     if name == "create_reminder":
-        return store.create_reminder(args)
+        return create_reminder(db, args)
     if name == "cancel_reminder":
-        return store.cancel_reminder(args["id"])
+        return cancel_reminder(db, args["id"])
     if name == "list_reminder_events":
-        return store.events(args.get("since_id", 0), args.get("limit", 100))
+        return db.reminders.events(args.get("since_id", 0), args.get("limit", 100))
     if name == "ingest_location":
-        value = store.ingest(args)
-        deliver_webhook(store, value["events"])
-        return value
+        return record_locations(db, [args])
     if name == "geocode_address":
-        return geocode(store, args["query"], args.get("lat"), args.get("lon"))
+        return geocode(db, args["query"], args.get("lat"), args.get("lon"))
     if name == "list_nearby_places":
-        return nearby_places(store, args["lat"], args["lon"], args.get("radius_m"), args.get("limit", 15))
+        return nearby_places(db, args["lat"], args["lon"], args.get("radius_m"), args.get("limit", 15))
     if name == "reverse_geocode":
-        return reverse_geocode(store, args["lat"], args["lon"], args.get("radius_m"))
+        return reverse_geocode(db, args["lat"], args["lon"], args.get("radius_m"))
     raise ValueError("unknown tool: " + str(name))
 
 
-def dispatch(store, request):
+def dispatch(db, request):
     if not isinstance(request, dict) or request.get("jsonrpc") != "2.0":
         return {"jsonrpc": "2.0", "id": request.get("id") if isinstance(request, dict) else None, "error": {"code": -32600, "message": "Invalid Request"}}
     if "id" not in request:
@@ -164,12 +170,12 @@ def dispatch(store, request):
             result = {"tools": TOOLS}
         elif method == "tools/call":
             try:
-                value = call_tool(store, params["name"], params.get("arguments") or {})
+                value = call_tool(db, params["name"], params.get("arguments") or {})
                 result = {"content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False)}], "structuredContent": {"result": value}}
-            except DB_INPUT_ERRORS as exc:
-                result = {"content": [{"type": "text", "text": str(exc)}], "isError": True}
+            except INPUT_ERRORS as exc:
+                result = {"content": [{"type": "text", "text": input_message(exc)}], "isError": True}
         else:
             return {"jsonrpc": "2.0", "id": id_, "error": {"code": -32601, "message": "Method not found"}}
         return {"jsonrpc": "2.0", "id": id_, "result": result}
-    except Exception as exc:
-        return {"jsonrpc": "2.0", "id": id_, "error": {"code": -32603, "message": str(exc)}}
+    except Exception:
+        return {"jsonrpc": "2.0", "id": id_, "error": {"code": -32603, "message": internal_failure(f"MCP {method}")}}

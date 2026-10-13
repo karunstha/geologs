@@ -13,8 +13,31 @@ from email.message import Message
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from geologs.core import Store, classify_motion, database_path, place_details, current_location, deliver_webhook, geocode, mode_for, name_matches, nearby_places, places_provider, street_key, places_provider_identity, reverse_cache_radius, reverse_geocode, route_segments_from_points, smooth_route_segment
-from geologs.analysis import daily_brief, daily_briefs, daily_overview, day_summary, insights, place_overview, stored_daily_record, place_patterns, predict_next, resolve_place_patterns, save_scheduled_summaries, search_visits, stays, transitions, visited_places
+from geologs.services import open_database
+from geologs.services.corrections import delete_stay_edit, save_mode_override, save_stay_edit
+from geologs.services.devices import create_ingest_token
+from geologs.services.imports import import_csv
+from geologs.services.ingest import ingest
+from geologs.services.position import latest
+from geologs.services.overview import daily_overviews
+from geologs.services.reminders import cancel_reminder, create_reminder
+from geologs.services.samples import near, stats
+from geologs.services.saved_places import delete_label, delete_place, place_visits, save_label, save_place
+from geologs.services.settings import save_settings
+from geologs.services.stays import anchored_trips
+from geologs.data.database import database_path
+from geologs.services.places import place_details, geocode, nearby_places, places_provider, places_provider_identity, reverse_geocode
+from geologs.services.location import current_location
+from geologs.services.reminders import deliver_webhook
+from geologs.integrations.places import reverse_cache_radius
+from geologs.domain.motion import classify_motion, mode_for
+from geologs.domain.places import name_matches, street_key
+from geologs.domain.routes import route_segments_from_points, smooth_route_segment
+from geologs.domain.briefs import daily_brief
+from geologs.services.overview import daily_briefs, daily_overview, stored_daily_record, save_scheduled_summaries
+from geologs.services.day import day_summary
+from geologs.services.patterns import insights, place_overview, place_patterns, predict_next, resolve_place_patterns, search_visits, transitions, visited_places
+from geologs.services.stays import stays
 
 
 HOME = (41.0, -87.9)
@@ -57,7 +80,7 @@ def minute_fixes(segments, source="phone", start=datetime(2026, 9, 27, 13, tzinf
 
 
 def metres_between(place, row):
-    from geologs.core import metres
+    from geologs.domain.geo import metres
     return metres(place[0], place[1], row["lat"], row["lon"])
 
 
@@ -67,90 +90,91 @@ def lake_run_day(hold=1):
     run = laps(LAKE, 500, 60, 9)
     return minute_fixes([still(HOME, 31), line(HOME, shore, 12), run, line(run[-1], HOME, 12), still(HOME, 30)],
                         source="home_assistant:phone", hold=hold)
-from geologs.imports import import_takeout
-from geologs.mcp import dispatch
-from geologs.cli import load_env_file, main, poll_home_assistant
-from geologs.http import Handler, active_token
+from geologs.services.imports import import_takeout
+from geologs.presentation.mcp import dispatch
+from geologs.presentation.cli import load_env_file, main, poll_home_assistant
+from geologs.config import api_token as active_token
+from geologs.presentation.http import Handler
 
 
 class StoreTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.store = Store(Path(self.tmp.name) / "test.db")
+        self.db = open_database(Path(self.tmp.name) / "test.db")
 
     def tearDown(self):
-        self.store.close()
+        self.db.close()
         self.tmp.cleanup()
 
     def test_arrival_once_and_idempotent_source_poll(self):
-        place = self.store.save_place({"name": "Walmart", "lat": 41, "lon": -87.9, "radius_m": 120})
-        self.store.create_reminder({"text": "Pick up salt", "place_id": place["id"]})
+        place = save_place(self.db, {"name": "Walmart", "lat": 41, "lon": -87.9, "radius_m": 120})
+        create_reminder(self.db, {"text": "Pick up salt", "place_id": place["id"]})
         now = datetime.now(timezone.utc)
         outside = {"source": "ha", "external_id": "a", "timestamp": (now-timedelta(minutes=10)).isoformat(), "lat": 41.01, "lon": -87.9}
         inside = {"source": "ha", "external_id": "b", "timestamp": (now-timedelta(minutes=5)).isoformat(), "lat": 41, "lon": -87.9}
-        self.assertEqual(self.store.ingest(outside)["events"], [])
-        result = self.store.ingest(inside)
+        self.assertEqual(ingest(self.db, outside)["events"], [])
+        result = ingest(self.db, inside)
         self.assertEqual(len(result["events"]), 1)
-        self.assertEqual(self.store.ingest(inside)["duplicates"], 1)
-        self.assertEqual(len(self.store.observations()), 2)
-        self.assertEqual(len(self.store.events()), 1)
-        self.assertEqual(self.store.reminders(), [])
-        self.assertEqual(self.store.reminder_history()[0]["status"], "triggered")
+        self.assertEqual(ingest(self.db, inside)["duplicates"], 1)
+        self.assertEqual(len(self.db.points.observations()), 2)
+        self.assertEqual(len(self.db.reminders.events()), 1)
+        self.assertEqual(self.db.reminders.active(), [])
+        self.assertEqual(self.db.reminders.history()[0]["status"], "triggered")
 
     def test_reminders_are_one_shot_even_if_old_repeat_fields_are_sent(self):
-        place = self.store.save_place({"name": "Campus", "lat": 41, "lon": -87.9})
-        self.store.create_reminder({"text": "Call friend", "place_id": place["id"], "repeat": True, "cooldown_minutes": 60})
+        place = save_place(self.db, {"name": "Campus", "lat": 41, "lon": -87.9})
+        create_reminder(self.db, {"text": "Call friend", "place_id": place["id"], "repeat": True, "cooldown_minutes": 60})
         base = datetime.now(timezone.utc)-timedelta(minutes=25)
         def put(id_, minute, lat):
-            return self.store.ingest({"source": "phone", "external_id": str(id_), "timestamp": (base+timedelta(minutes=minute)).isoformat(), "lat": lat, "lon": -87.9})
+            return ingest(self.db, {"source": "phone", "external_id": str(id_), "timestamp": (base+timedelta(minutes=minute)).isoformat(), "lat": lat, "lon": -87.9})
         self.assertEqual(len(put(1, 0, 41.01)["events"]), 0)
         self.assertEqual(len(put(2, 5, 41)["events"]), 1)
         self.assertEqual(len(put(3, 10, 41)["events"]), 0)
         put(4, 15, 41.01)
         self.assertEqual(len(put(5, 20, 41)["events"]), 0)
-        self.assertEqual(len(self.store.events()), 1)
-        self.assertEqual(self.store.reminders(), [])
+        self.assertEqual(len(self.db.reminders.events()), 1)
+        self.assertEqual(self.db.reminders.active(), [])
 
     def test_cancelled_reminder_moves_to_history_without_reenable(self):
-        place = self.store.save_place({"name": "Market", "lat": 41, "lon": -87.9})
-        reminder = self.store.create_reminder({"text": "Buy salt", "place_id": place["id"]})
-        self.assertEqual(len(self.store.reminders()), 1)
-        self.store.cancel_reminder(reminder["id"])
-        self.assertEqual(self.store.reminders(), [])
-        history = self.store.reminder_history()
+        place = save_place(self.db, {"name": "Market", "lat": 41, "lon": -87.9})
+        reminder = create_reminder(self.db, {"text": "Buy salt", "place_id": place["id"]})
+        self.assertEqual(len(self.db.reminders.active()), 1)
+        cancel_reminder(self.db, reminder["id"])
+        self.assertEqual(self.db.reminders.active(), [])
+        history = self.db.reminders.history()
         self.assertEqual(history[0]["status"], "cancelled")
         self.assertIsNotNone(history[0]["cancelled_at"])
         with self.assertRaisesRegex(ValueError, "active reminder"):
-            self.store.cancel_reminder(reminder["id"])
+            cancel_reminder(self.db, reminder["id"])
 
     def test_unsaved_coordinate_reminder_stays_out_of_saved_places_and_triggers(self):
         found = {"name": "Lake Example", "address": "Lake Example, Chicago",
                  "category": "natural.water", "provider_place_id": "lake-1"}
-        with patch("geologs.core.place_for_coordinate", return_value=found):
-            reminder = self.store.create_reminder({"text": "Start my run", "place_name": "Lake Example",
+        with patch("geologs.services.places.place_for_coordinate", return_value=found):
+            reminder = create_reminder(self.db, {"text": "Start my run", "place_name": "Lake Example",
                                                     "lat": 41, "lon": -87.9, "radius_m": 120})
-        self.assertEqual(self.store.places(), [])
+        self.assertEqual(self.db.places.saved(), [])
         self.assertEqual(reminder["place_name"], "Lake Example")
         self.assertEqual(reminder["category"], "natural.water")
         now = datetime.now(timezone.utc)
-        self.store.ingest({"source": "phone", "timestamp": (now - timedelta(minutes=5)).isoformat(),
+        ingest(self.db, {"source": "phone", "timestamp": (now - timedelta(minutes=5)).isoformat(),
                            "lat": 41.01, "lon": -87.9})
-        event = self.store.ingest({"source": "phone", "timestamp": now.isoformat(),
+        event = ingest(self.db, {"source": "phone", "timestamp": now.isoformat(),
                                    "lat": 41, "lon": -87.9})["events"][0]
         self.assertEqual(event["place"], "Lake Example")
-        history = self.store.reminder_history()[0]
+        history = self.db.reminders.history()[0]
         self.assertNotIn("acknowledged_at", history)
-        self.assertNotIn("acknowledged_at", {row[1] for row in self.store.db.execute("PRAGMA table_info(events)")})
+        self.assertNotIn("acknowledged_at", {row[1] for row in self.db.conn.execute("PRAGMA table_info(events)")})
 
     def test_stale_and_cross_source_segments_do_not_inflate_distance(self):
-        self.store.ingest({"source": "one", "timestamp": "2026-09-26T10:00:00Z", "lat": 41, "lon": -87})
-        self.store.ingest({"source": "two", "timestamp": "2026-09-26T10:01:00Z", "lat": 42, "lon": -88})
-        self.assertEqual(self.store.stats()["distance_km"], 0)
-        self.assertEqual(self.store.trips(), [])
-        self.assertEqual(self.store.stats(source="one")["points"], 1)
-        self.assertEqual(self.store.stats(source="missing")["points"], 0)
-        self.assertEqual(len(self.store.near(41, -87, 100, source="one")), 1)
-        self.assertEqual(self.store.near(41, -87, 100, source="two"), [])
+        ingest(self.db, {"source": "one", "timestamp": "2026-09-26T10:00:00Z", "lat": 41, "lon": -87})
+        ingest(self.db, {"source": "two", "timestamp": "2026-09-26T10:01:00Z", "lat": 42, "lon": -88})
+        self.assertEqual(stats(self.db, )["distance_km"], 0)
+        self.assertEqual(anchored_trips(self.db, ), [])
+        self.assertEqual(stats(self.db, source="one")["points"], 1)
+        self.assertEqual(stats(self.db, source="missing")["points"], 0)
+        self.assertEqual(len(near(self.db, 41, -87, 100, source="one")), 1)
+        self.assertEqual(near(self.db, 41, -87, 100, source="two"), [])
 
     def test_interleaved_sources_keep_independent_route_segments(self):
         points = [
@@ -162,9 +186,9 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(len(route_segments_from_points(points)), 2)
 
     def test_day_summary_counts_trips_and_unique_observed_places(self):
-        self.store.save_place({"name": "Home", "lat": 41.01, "lon": -87.9, "radius_m": 150})
-        self.store.save_place({"name": "Campus", "lat": 41, "lon": -87.9, "radius_m": 150})
-        self.store.save_place({"name": "Park", "lat": 41.002, "lon": -87.9, "radius_m": 100})
+        save_place(self.db, {"name": "Home", "lat": 41.01, "lon": -87.9, "radius_m": 150})
+        save_place(self.db, {"name": "Campus", "lat": 41, "lon": -87.9, "radius_m": 150})
+        save_place(self.db, {"name": "Park", "lat": 41.002, "lon": -87.9, "radius_m": 100})
         fixes = [
             (0, 41.01, 0), (15, 41.01, 0),
             (16, 41.007, 15), (17, 41.004, 15), (18, 41.001, 15),
@@ -172,11 +196,11 @@ class StoreTests(unittest.TestCase):
             (36, 41.0005, 1.4), (37, 41.001, 1.4),
             (40, 41.002, 0), (55, 41.002, 0),
         ]
-        self.store.ingest([{"source": "phone", "timestamp": (datetime(2026, 9, 25, 14, tzinfo=timezone.utc) + timedelta(minutes=minute)).isoformat(),
+        ingest(self.db, [{"source": "phone", "timestamp": (datetime(2026, 9, 25, 14, tzinfo=timezone.utc) + timedelta(minutes=minute)).isoformat(),
                             "lat": lat, "lon": -87.9, "speed_mps": speed, "accuracy_m": 10}
                            for minute, lat, speed in fixes])
-        self.store.ingest({"source": "other", "timestamp": "2026-09-25T14:20:00Z", "lat": 42, "lon": -88})
-        day = day_summary(self.store, "2026-09-25", "America/Chicago", "phone")
+        ingest(self.db, {"source": "other", "timestamp": "2026-09-25T14:20:00Z", "lat": 42, "lon": -88})
+        day = day_summary(self.db, "2026-09-25", "America/Chicago", "phone")
         self.assertEqual(day["points"], 11)
         self.assertEqual(day["stats"]["points"], 11)
         self.assertEqual(day["activity_counts"]["driving"], 1)
@@ -189,45 +213,45 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(len(day["route_segments"]), 1)
 
     def test_day_summary_is_persisted_until_its_inputs_change(self):
-        self.store.ingest([
+        ingest(self.db, [
             {"source": "phone", "timestamp": "2026-09-25T10:00:00Z", "lat": 41, "lon": -87.9},
             {"source": "phone", "timestamp": "2026-09-25T10:01:00Z", "lat": 41.001, "lon": -87.9},
         ])
-        first = day_summary(self.store, "2026-09-25", "UTC", "phone")
-        self.assertEqual(self.store.db.execute("SELECT COUNT(*) AS n FROM analysis_cache").fetchone()["n"], 1)
-        with patch("geologs.analysis.stays", side_effect=AssertionError("summary was recalculated")):
-            self.assertEqual(day_summary(self.store, "2026-09-25", "UTC", "phone"), first)
+        first = day_summary(self.db, "2026-09-25", "UTC", "phone")
+        self.assertEqual(self.db.conn.execute("SELECT COUNT(*) AS n FROM analysis_cache").fetchone()["n"], 1)
+        with patch("geologs.services.day.stays", side_effect=AssertionError("summary was recalculated")):
+            self.assertEqual(day_summary(self.db, "2026-09-25", "UTC", "phone"), first)
 
-        self.store.ingest({"source": "phone", "timestamp": "2026-09-25T10:02:00Z", "lat": 41.002, "lon": -87.9})
-        with patch("geologs.analysis.stays", wraps=stays) as calculate_stays:
-            updated = day_summary(self.store, "2026-09-25", "UTC", "phone")
+        ingest(self.db, {"source": "phone", "timestamp": "2026-09-25T10:02:00Z", "lat": 41.002, "lon": -87.9})
+        with patch("geologs.services.day.stays", wraps=stays) as calculate_stays:
+            updated = day_summary(self.db, "2026-09-25", "UTC", "phone")
         self.assertTrue(calculate_stays.called)
         self.assertEqual(updated["points"], 3)
-        self.assertEqual(self.store.db.execute("SELECT COUNT(*) AS n FROM analysis_cache").fetchone()["n"], 1)
+        self.assertEqual(self.db.conn.execute("SELECT COUNT(*) AS n FROM analysis_cache").fetchone()["n"], 1)
 
-        self.store.save_place({"name": "Campus", "lat": 41, "lon": -87.9})
-        self.assertEqual(self.store.db.execute("SELECT COUNT(*) AS n FROM analysis_cache").fetchone()["n"], 0)
+        save_place(self.db, {"name": "Campus", "lat": 41, "lon": -87.9})
+        self.assertEqual(self.db.conn.execute("SELECT COUNT(*) AS n FROM analysis_cache").fetchone()["n"], 0)
 
     def test_day_stay_uses_visited_place_reverse_geocode_label(self):
-        self.store.ingest([
+        ingest(self.db, [
             {"source": "phone", "timestamp": "2026-09-25T10:00:00Z", "lat": 41, "lon": -87.9, "accuracy_m": 5},
             {"source": "phone", "timestamp": "2026-09-25T10:16:00Z", "lat": 41, "lon": -87.9, "accuracy_m": 5},
         ])
         found = {"name": "University of Arkansas at Little Rock", "address": "2801 South University Avenue"}
-        with patch("geologs.analysis.place_for_coordinate", return_value=found) as reverse:
-            day = day_summary(self.store, "2026-09-25", "UTC")
+        with patch("geologs.services.places.place_for_coordinate", return_value=found) as reverse:
+            day = day_summary(self.db, "2026-09-25", "UTC")
         self.assertEqual(day["visited_places"][0]["name"], "University of Arkansas at Little Rock")
         self.assertEqual(day["visited_places"][0]["address"], "2801 South University Avenue")
         self.assertEqual(day["stays"][0]["display_name"], day["visited_places"][0]["name"])
         reverse.assert_called_once()
 
     def test_recorded_route_does_not_connect_gaps(self):
-        self.store.ingest([
+        ingest(self.db, [
             {"source": "phone", "timestamp": "2026-09-25T10:00:00Z", "lat": 41, "lon": -87.9},
             {"source": "phone", "timestamp": "2026-09-25T11:00:00Z", "lat": 41.01, "lon": -87.9},
             {"source": "phone", "timestamp": "2026-09-25T11:05:00Z", "lat": 41.011, "lon": -87.9},
         ])
-        segments = route_segments_from_points(list(reversed(self.store.points(limit=None))))
+        segments = route_segments_from_points(list(reversed(self.db.points.points(limit=None))))
         self.assertEqual(len(segments), 1)
         self.assertEqual(len(segments[0]), 2)
 
@@ -240,55 +264,55 @@ class StoreTests(unittest.TestCase):
 
     def test_raw_observation_pagination(self):
         for minute in range(5):
-            self.store.ingest({"source": "phone", "timestamp": f"2026-09-25T10:0{minute}:00Z",
+            ingest(self.db, {"source": "phone", "timestamp": f"2026-09-25T10:0{minute}:00Z",
                                "lat": 41 + minute / 1000, "lon": -87.9})
-        first = self.store.observations(limit=2, offset=0)
-        second = self.store.observations(limit=2, offset=2)
-        last = self.store.observations(limit=2, offset=4)
+        first = self.db.points.observations(limit=2, offset=0)
+        second = self.db.points.observations(limit=2, offset=2)
+        last = self.db.points.observations(limit=2, offset=4)
         self.assertEqual([row["id"] for row in first + second + last], [5, 4, 3, 2, 1])
 
     def test_speed_settings_reported_offset_and_calculated_mode(self):
-        self.store.save_settings({"speed_strategy": "reported", "reported_speed_offset_kmh": -3.6})
-        self.store.ingest({"source": "reported", "timestamp": "2026-09-25T10:00:00Z",
+        save_settings(self.db, {"speed_strategy": "reported", "reported_speed_offset_kmh": -3.6})
+        ingest(self.db, {"source": "reported", "timestamp": "2026-09-25T10:00:00Z",
                            "lat": 41, "lon": -87.9, "speed_mps": 2})
-        reported = self.store.observations(source="reported", limit=1)[0]
+        reported = self.db.points.observations(source="reported", limit=1)[0]
         self.assertAlmostEqual(reported["speed_mps"], 1)
         self.assertEqual(reported["speed_origin"], "reported_adjusted")
-        self.store.save_settings({"speed_strategy": "calculated", "reported_speed_offset_kmh": -3.6})
-        self.store.ingest([
+        save_settings(self.db, {"speed_strategy": "calculated", "reported_speed_offset_kmh": -3.6})
+        ingest(self.db, [
             {"source": "calculated", "timestamp": "2026-09-25T10:00:00Z", "lat": 41, "lon": -87.9, "speed_mps": 40},
             {"source": "calculated", "timestamp": "2026-09-25T10:01:00Z", "lat": 41.001, "lon": -87.9, "speed_mps": 40},
         ])
-        calculated = self.store.observations(source="calculated", limit=1)[0]
+        calculated = self.db.points.observations(source="calculated", limit=1)[0]
         self.assertEqual(calculated["speed_origin"], "estimated")
         self.assertLess(calculated["speed_mps"], 3)
 
     def test_timezone_setting_is_validated(self):
-        value = self.store.save_settings({"timezone": "America/Chicago"})
+        value = save_settings(self.db, {"timezone": "America/Chicago"})
         self.assertEqual(value["timezone"], "America/Chicago")
-        self.assertEqual(self.store.settings()["timezone"], "America/Chicago")
+        self.assertEqual(self.db.settings.get()["timezone"], "America/Chicago")
         with self.assertRaisesRegex(ValueError, "IANA timezone"):
-            self.store.save_settings({"timezone": "not/a-zone"})
+            save_settings(self.db, {"timezone": "not/a-zone"})
 
     def test_query_paths_have_storage_indexes(self):
-        indexes = {row["name"] for row in self.store._rows("SELECT name FROM sqlite_master WHERE type='index'")}
+        indexes = {row["name"] for row in self.db.rows("SELECT name FROM sqlite_master WHERE type='index'")}
         self.assertTrue({"point_observations_source_time", "observed_stays_v2_source_time",
                          "reminders_active_created", "events_triggered", "daily_summaries_date"}.issubset(indexes))
 
     def test_trip_classification_uses_connected_trip_context(self):
-        self.store.ingest([
+        ingest(self.db, [
             {"source": "phone", "timestamp": f"2026-09-25T10:{minute:02d}:00Z", "lat": lat, "lon": -87.9, "speed_mps": speed}
             for minute, lat, speed in [(0, 41, 0), (15, 41, 0), (16, 41.01, 10), (17, 41.02, 10),
                                        (18, 41.021, 1.5), (19, 41.022, 1.5), (20, 41.023, 0), (35, 41.023, 0)]
         ])
-        day = day_summary(self.store, "2026-09-25", "UTC")
+        day = day_summary(self.db, "2026-09-25", "UTC")
         self.assertEqual(day["activity_counts"]["driving"], 1)
         self.assertEqual(day["activity_counts"]["walking"], 0)
         self.assertEqual(len(day["trips"]), 1)
 
     def test_red_light_does_not_split_driving_trip(self):
         base = datetime(2026, 9, 25, 10, tzinfo=timezone.utc)
-        self.store.ingest([
+        ingest(self.db, [
             {"source": "phone", "timestamp": (base + timedelta(minutes=minute)).isoformat(),
              "lat": lat, "lon": -87.9, "speed_mps": speed, "accuracy_m": 10}
             for minute, lat, speed in [(0, 41.0, 0), (15, 41.0, 0),
@@ -297,14 +321,14 @@ class StoreTests(unittest.TestCase):
                                        (20, 41.003, 14), (21, 41.004, 16),
                                        (22, 41.005, 0), (37, 41.005, 0)]
         ])
-        day = day_summary(self.store, "2026-09-25", "UTC")
+        day = day_summary(self.db, "2026-09-25", "UTC")
         self.assertEqual(len(day["trips"]), 1)
         self.assertEqual(day["trips"][0]["mode"], "driving")
         self.assertEqual((day["activity_counts"]["running"], day["activity_counts"]["cycling"]), (0, 0))
 
     def test_stay_requires_fifteen_minutes(self):
         base = datetime(2026, 9, 25, 10, tzinfo=timezone.utc)
-        self.store.ingest([
+        ingest(self.db, [
             {"source": "short", "timestamp": (base + timedelta(minutes=minute)).isoformat(),
              "lat": 41, "lon": -87.9, "accuracy_m": 5}
             for minute in (0, 14)
@@ -313,8 +337,8 @@ class StoreTests(unittest.TestCase):
              "lat": 42, "lon": -88.9, "accuracy_m": 5}
             for minute in (0, 15)
         ])
-        self.assertEqual(stays(self.store, source="short"), [])
-        self.assertEqual(len(stays(self.store, source="confirmed")), 1)
+        self.assertEqual(stays(self.db, source="short"), [])
+        self.assertEqual(len(stays(self.db, source="confirmed")), 1)
 
     def test_trip_route_keeps_coverage_gaps_as_separate_segments(self):
         base = datetime(2026, 9, 25, 10, tzinfo=timezone.utc)
@@ -322,18 +346,18 @@ class StoreTests(unittest.TestCase):
                  (16, 41.001, 15), (17, 41.002, 15),
                  (60, 41.003, 15), (61, 41.004, 15),
                  (62, 41.005, 0), (77, 41.005, 0)]
-        self.store.ingest([
+        ingest(self.db, [
             {"source": "phone", "timestamp": (base + timedelta(minutes=minute)).isoformat(),
              "lat": lat, "lon": -87.9, "speed_mps": speed, "accuracy_m": 5}
             for minute, lat, speed in fixes
         ])
-        trip = day_summary(self.store, "2026-09-25", "UTC")["trips"][0]
+        trip = day_summary(self.db, "2026-09-25", "UTC")["trips"][0]
         self.assertEqual(len(trip["route_segments"]), 2)
         self.assertFalse(trip["coverage_complete"])
         self.assertEqual(trip["coordinates"], [])
 
     def test_held_home_assistant_state_does_not_strand_next_fix(self):
-        self.store.ingest([
+        ingest(self.db, [
             {"source": "home_assistant:phone", "external_id": "held", "timestamp": "2026-09-25T10:00:00Z",
              "lat": 41, "lon": -87.9, "accuracy_m": 5},
             {"source": "home_assistant:phone", "external_id": "held", "timestamp": "2026-09-25T10:04:00Z",
@@ -341,7 +365,7 @@ class StoreTests(unittest.TestCase):
             {"source": "home_assistant:phone", "external_id": "fresh", "timestamp": "2026-09-25T10:05:00Z",
              "lat": 41.045, "lon": -87.9, "accuracy_m": 5},
         ])
-        day = day_summary(self.store, "2026-09-25", "UTC")
+        day = day_summary(self.db, "2026-09-25", "UTC")
         self.assertEqual(len(day["route_segments"]), 1)
         self.assertEqual(day["trips"], [])
         self.assertGreater(day["stats"]["distance_km"], 4)
@@ -358,15 +382,15 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(route_segments_from_points(points), [])
 
     def test_compact_stationary_timeline_preserves_raw_fixes(self):
-        self.store.ingest([
+        ingest(self.db, [
             {"source": "phone", "timestamp": "2026-09-25T10:00:00Z", "lat": 41, "lon": -87.9, "accuracy_m": 90},
             {"source": "phone", "timestamp": "2026-09-25T10:00:30Z", "lat": 41.00002, "lon": -87.9, "accuracy_m": 8},
             {"source": "phone", "timestamp": "2026-09-25T10:04:00Z", "lat": 41.00003, "lon": -87.9, "accuracy_m": 12},
         ])
-        self.assertEqual(len(self.store.observations(limit=None)), 3)
-        timeline = list(reversed(self.store.timeline(limit=None)))
+        self.assertEqual(len(self.db.points.observations(limit=None)), 3)
+        timeline = list(reversed(self.db.points.timeline(limit=None)))
         self.assertEqual([point["role"] for point in timeline], ["arrival", "latest"])
-        day = day_summary(self.store, "2026-09-25", "UTC")
+        day = day_summary(self.db, "2026-09-25", "UTC")
         self.assertEqual((day["timeline_points"], day["points"]), (2, 3))
 
     def test_home_assistant_polls_record_repeated_coordinates(self):
@@ -376,14 +400,14 @@ class StoreTests(unittest.TestCase):
                  datetime(2026, 9, 25, 10, 0, 0, 200000, tzinfo=timezone.utc)]
         env = {"HA_URL": "http://home-assistant.test:8123", "HA_TOKEN": "test", "HA_ENTITY": "device_tracker.phone",
                "GEOLOGS_URL": "", "GEOLOGS_DATABASE_URL": "", "GEOLOGS_DB": str(Path(self.tmp.name) / "poll.db")}
-        with patch.dict(os.environ, env), patch("geologs.cli.urllib.request.urlopen") as urlopen, \
-                patch("geologs.cli.datetime") as clock:
+        with patch.dict(os.environ, env), patch("geologs.presentation.home_assistant.urllib.request.urlopen") as urlopen, \
+                patch("geologs.presentation.home_assistant.datetime") as clock:
             urlopen.side_effect = lambda *_args, **_kwargs: io.BytesIO(json.dumps(state).encode())
             clock.now.side_effect = times
             first, second = poll_home_assistant(), poll_home_assistant()
         self.assertEqual((first["inserted"], first["recorded"]), (1, 1))
         self.assertEqual((second["duplicates"], second["recorded"]), (1, 1))
-        archive = Store(Path(self.tmp.name) / "poll.db")
+        archive = open_database(Path(self.tmp.name) / "poll.db")
         try:
             day = day_summary(archive, "2026-09-25", "UTC")
             self.assertEqual((day["timeline_points"], day["points"]), (2, 2))
@@ -391,13 +415,13 @@ class StoreTests(unittest.TestCase):
             archive.close()
 
     def test_repeated_poll_does_not_inherit_previous_movement_speed(self):
-        self.store.ingest({"source": "ha", "external_id": "first", "timestamp": "2026-09-25T10:00:00Z",
+        ingest(self.db, {"source": "ha", "external_id": "first", "timestamp": "2026-09-25T10:00:00Z",
                            "lat": 41, "lon": -87.9, "accuracy_m": 4})
         moving = {"source": "ha", "external_id": "second", "timestamp": "2026-09-25T10:01:00Z",
                   "lat": 41.0014, "lon": -87.9, "accuracy_m": 4}
-        self.store.ingest(moving)
-        self.store.ingest({**moving, "timestamp": "2026-09-25T10:01:01Z"})
-        newest, previous = self.store.observations(limit=2)
+        ingest(self.db, moving)
+        ingest(self.db, {**moving, "timestamp": "2026-09-25T10:01:01Z"})
+        newest, previous = self.db.points.observations(limit=2)
         self.assertEqual(previous["mode"], "running_cycling")
         self.assertEqual(newest["speed_mps"], 0)
         self.assertEqual(newest["speed_origin"], "estimated")
@@ -407,47 +431,47 @@ class StoreTests(unittest.TestCase):
         base = datetime(2026, 9, 25, 10, tzinfo=timezone.utc)
         at_home = [{"source": "phone", "timestamp": (base + timedelta(minutes=minute)).isoformat(),
                     "lat": 41, "lon": -87.9, "accuracy_m": 5} for minute in range(100)]
-        self.store.ingest(at_home)
-        timeline = list(reversed(self.store.timeline(limit=None)))
-        self.assertEqual(len(self.store.observations(limit=None)), 100)
+        ingest(self.db, at_home)
+        timeline = list(reversed(self.db.points.timeline(limit=None)))
+        self.assertEqual(len(self.db.points.observations(limit=None)), 100)
         self.assertEqual([point["role"] for point in timeline], ["arrival", "latest"])
         self.assertEqual([point["timestamp"] for point in timeline], [at_home[0]["timestamp"], at_home[-1]["timestamp"]])
         movement = [{"source": "phone", "timestamp": (base + timedelta(minutes=minute)).isoformat(),
                      "lat": 41 + (minute - 99) * .001, "lon": -87.9, "accuracy_m": 5}
                     for minute in range(100, 104)]
-        self.store.ingest(movement)
-        timeline = list(reversed(self.store.timeline(limit=None)))
+        ingest(self.db, movement)
+        timeline = list(reversed(self.db.points.timeline(limit=None)))
         self.assertEqual(len(timeline), 6)
         self.assertEqual(timeline[1]["role"], "departure")
         self.assertEqual([point["role"] for point in timeline[-4:]], ["movement"] * 4)
 
     def test_stays_use_best_accuracy_observation_for_a_timestamp(self):
-        self.store.ingest([
+        ingest(self.db, [
             {"source": "phone", "timestamp": "2026-09-25T10:00:00Z", "lat": 41, "lon": -87.9, "accuracy_m": 5},
             {"source": "phone", "timestamp": "2026-09-25T10:00:00Z", "lat": 41, "lon": -87.9, "accuracy_m": 90},
             {"source": "phone", "timestamp": "2026-09-25T10:06:00Z", "lat": 41, "lon": -87.9, "accuracy_m": 5},
         ])
-        timeline = list(reversed(self.store.timeline(limit=None)))
-        self.assertEqual(len(self.store.observations(limit=None)), 3)
+        timeline = list(reversed(self.db.points.timeline(limit=None)))
+        self.assertEqual(len(self.db.points.observations(limit=None)), 3)
         self.assertEqual([point["accuracy_m"] for point in timeline], [5, 5])
 
     def test_existing_observations_get_speed_origin_without_inheriting_speed(self):
         path = Path(self.tmp.name) / "v2.db"
-        archive = Store(path)
-        archive.ingest({"source": "ha", "external_id": "first", "timestamp": "2026-09-25T10:00:00Z",
+        archive = open_database(path)
+        ingest(archive, {"source": "ha", "external_id": "first", "timestamp": "2026-09-25T10:00:00Z",
                         "lat": 41, "lon": -87.9, "accuracy_m": 4})
         moving = {"source": "ha", "external_id": "second", "timestamp": "2026-09-25T10:01:00Z",
                   "lat": 41.0014, "lon": -87.9, "accuracy_m": 4}
-        archive.ingest(moving)
-        archive.ingest({**moving, "timestamp": "2026-09-25T10:01:01Z"})
-        archive.db.execute("UPDATE point_observations SET speed_mps=NULL")
-        archive.db.execute("ALTER TABLE point_observations DROP COLUMN speed_origin")
-        archive.db.execute("PRAGMA user_version=2")
-        archive.db.commit()
+        ingest(archive, moving)
+        ingest(archive, {**moving, "timestamp": "2026-09-25T10:01:01Z"})
+        archive.conn.execute("UPDATE point_observations SET speed_mps=NULL")
+        archive.conn.execute("ALTER TABLE point_observations DROP COLUMN speed_origin")
+        archive.conn.execute("PRAGMA user_version=2")
+        archive.commit()
         archive.close()
-        migrated = Store(path)
+        migrated = open_database(path)
         try:
-            newest, previous = migrated.observations(limit=2)
+            newest, previous = migrated.points.observations(limit=2)
             self.assertEqual(previous["mode"], "running_cycling")
             self.assertEqual(newest["speed_mps"], 0)
             self.assertEqual(newest["mode"], "idle")
@@ -457,30 +481,30 @@ class StoreTests(unittest.TestCase):
     def test_duplicate_delivery_is_stored_and_better_accuracy_is_selected(self):
         first = {"source": "phone", "external_id": "ha-1", "timestamp": "2026-09-25T10:00:00Z",
                  "lat": 41, "lon": -87.9, "accuracy_m": 80}
-        self.store.ingest(first)
-        self.assertEqual(self.store.ingest({**first, "accuracy_m": 5})["duplicates"], 1)
-        self.assertEqual(len(self.store.points()), 1)
-        self.assertEqual(len(self.store.observations()), 2)
-        day = day_summary(self.store, "2026-09-25", "UTC")
+        ingest(self.db, first)
+        self.assertEqual(ingest(self.db, {**first, "accuracy_m": 5})["duplicates"], 1)
+        self.assertEqual(len(self.db.points.points()), 1)
+        self.assertEqual(len(self.db.points.observations()), 2)
+        day = day_summary(self.db, "2026-09-25", "UTC")
         self.assertEqual((day["unique_points"], day["points"]), (1, 2))
-        self.assertEqual(self.store.latest()["accuracy_m"], 5)
+        self.assertEqual(latest(self.db)["accuracy_m"], 5)
 
     def test_retry_of_backfilled_legacy_fix_does_not_add_an_observation(self):
         fix = {"source": "phone", "external_id": "ha-1", "timestamp": "2026-09-25T10:00:00Z",
                "lat": 41, "lon": -87.9, "accuracy_m": 80}
-        self.store.ingest(fix)
-        point_id = self.store.points()[0]["id"]
-        self.store.db.execute("UPDATE point_observations SET legacy_point_id=?,fingerprint=NULL WHERE point_id=?",
+        ingest(self.db, fix)
+        point_id = self.db.points.points()[0]["id"]
+        self.db.conn.execute("UPDATE point_observations SET legacy_point_id=?,fingerprint=NULL WHERE point_id=?",
                               (point_id, point_id))
-        self.store.db.commit()
-        self.assertEqual(self.store.ingest(fix)["duplicates"], 1)
-        self.assertEqual(len(self.store.observations()), 1)
-        self.store.ingest({**fix, "accuracy_m": 5})
-        self.assertEqual(len(self.store.observations()), 2)
+        self.db.commit()
+        self.assertEqual(ingest(self.db, fix)["duplicates"], 1)
+        self.assertEqual(len(self.db.points.observations()), 1)
+        ingest(self.db, {**fix, "accuracy_m": 5})
+        self.assertEqual(len(self.db.points.observations()), 2)
 
     def test_short_stop_after_a_drive_is_a_quick_stop(self):
         base = datetime(2026, 9, 25, 10, tzinfo=timezone.utc)
-        self.store.ingest([
+        ingest(self.db, [
             {"source": "phone", "timestamp": (base + timedelta(minutes=minute)).isoformat(),
              "lat": lat, "lon": -87.9, "speed_mps": speed, "accuracy_m": 10}
             for minute, lat, speed in [(0, 41.0, 0), (15, 41.0, 0),
@@ -490,12 +514,12 @@ class StoreTests(unittest.TestCase):
                                        (23, 41.0025, 1.5), (24, 41.003, 1.5),
                                        (25, 41.004, 0), (40, 41.004, 0)]
         ])
-        trips = list(reversed(day_summary(self.store, "2026-09-25", "UTC")["trips"]))
+        trips = list(reversed(day_summary(self.db, "2026-09-25", "UTC")["trips"]))
         # Five minutes still after a drive is a quick stop (a fuel stop) that splits the trip.
         self.assertEqual([trip["mode"] for trip in trips], ["driving", "walking"])
-        self.assertEqual([stay["kind"] for stay in reversed(stays(self.store, limit=None))], ["stationary", "stop", "stationary"])
-        self.store.save_settings({"quick_stop_minutes": 0})
-        trips = list(reversed(day_summary(self.store, "2026-09-25", "UTC")["trips"]))
+        self.assertEqual([stay["kind"] for stay in reversed(stays(self.db, limit=None))], ["stationary", "stop", "stationary"])
+        save_settings(self.db, {"quick_stop_minutes": 0})
+        trips = list(reversed(day_summary(self.db, "2026-09-25", "UTC")["trips"]))
         self.assertEqual([trip["mode"] for trip in trips], ["driving"])
 
     def test_held_home_assistant_stop_under_15_minutes_does_not_split_trip(self):
@@ -505,34 +529,34 @@ class StoreTests(unittest.TestCase):
                  (18, 41.020, "held", 0), (23, 41.020, "held", 0),
                  (24, 41.030, "drive-b", 15), (25, 41.040, "finish", 0),
                  (40, 41.040, "finish", 0)]
-        self.store.ingest([{"source": "home_assistant:phone", "external_id": external_id,
+        ingest(self.db, [{"source": "home_assistant:phone", "external_id": external_id,
                             "timestamp": (base + timedelta(minutes=minute)).isoformat(),
                             "lat": lat, "lon": -87.9, "speed_mps": speed, "accuracy_m": 5}
                            for minute, lat, external_id, speed in fixes])
-        trips = list(reversed(day_summary(self.store, "2026-09-25", "UTC")["trips"]))
+        trips = list(reversed(day_summary(self.db, "2026-09-25", "UTC")["trips"]))
         self.assertEqual(len(trips), 1)
         self.assertEqual(trips[0]["mode"], "driving")
         self.assertTrue(trips[0]["coverage_complete"])
 
     def test_home_is_hidden_from_visited_list_but_kept_in_daily_overview(self):
-        home = self.store.save_place({"name": "Home", "lat": 41, "lon": -87.9, "radius_m": 150})
-        campus = self.store.save_place({"name": "Campus", "lat": 41.02, "lon": -87.9, "radius_m": 150})
+        home = save_place(self.db, {"name": "Home", "lat": 41, "lon": -87.9, "radius_m": 150})
+        campus = save_place(self.db, {"name": "Campus", "lat": 41.02, "lon": -87.9, "radius_m": 150})
         base = datetime(2026, 9, 25, 10, tzinfo=timezone.utc)
         fixes = [(0, 41), (16, 41), (17, 41.005), (18, 41.01), (20, 41.02), (36, 41.02)]
-        self.store.ingest([{"source": "phone", "timestamp": (base + timedelta(minutes=minute)).isoformat(),
+        ingest(self.db, [{"source": "phone", "timestamp": (base + timedelta(minutes=minute)).isoformat(),
                             "lat": lat, "lon": -87.9, "accuracy_m": 5}
                            for minute, lat in fixes])
-        reminder = self.store.create_reminder({"text": "Call friend", "place_id": campus["id"]})
-        point_id = self.store.points(limit=1)[0]["id"]
+        reminder = create_reminder(self.db, {"text": "Call friend", "place_id": campus["id"]})
+        point_id = self.db.points.points(limit=1)[0]["id"]
         triggered_at = (base + timedelta(minutes=16)).isoformat()
-        self.store.db.execute("INSERT INTO events(reminder_id,point_id,triggered_at) VALUES (?,?,?)",
+        self.db.conn.execute("INSERT INTO events(reminder_id,point_id,triggered_at) VALUES (?,?,?)",
                               (reminder["id"], point_id, triggered_at))
-        self.store.db.execute("UPDATE reminders SET active=0,last_triggered_at=? WHERE id=?", (triggered_at, reminder["id"]))
-        self.store.db.commit()
-        day = day_summary(self.store, "2026-09-25", "UTC")
+        self.db.conn.execute("UPDATE reminders SET active=0,last_triggered_at=? WHERE id=?", (triggered_at, reminder["id"]))
+        self.db.commit()
+        day = day_summary(self.db, "2026-09-25", "UTC")
         self.assertEqual([place["name"] for place in day["visited_places"]], ["Campus"])
         self.assertEqual({place["name"] for place in day["places_including_home"]}, {"Home", "Campus"})
-        summary = daily_overview(self.store, "2026-09-25", "UTC")
+        summary = daily_overview(self.db, "2026-09-25", "UTC")
         self.assertEqual(summary["schema_version"], 7)
         self.assertEqual({place["name"] for place in summary["places"]}, {"Home", "Campus"})
         self.assertEqual((summary["totals"]["trips"], summary["trips"][0]["from"], summary["trips"][0]["to"]),
@@ -540,15 +564,15 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(summary["totals"]["distance_km"], summary["trips"][0]["distance_km"])
         self.assertTrue(next(place for place in summary["places"] if place["name"] == "Home")["home"])
         self.assertEqual(summary["totals"]["reminders_triggered"], 1)
-        self.assertEqual(len(self.store.daily_overviews()), 1)
-        self.assertEqual(current_location(self.store)["place_name"], "Campus")
+        self.assertEqual(len(daily_overviews(self.db, )), 1)
+        self.assertEqual(current_location(self.db)["place_name"], "Campus")
 
     def test_csv_import_and_mcp(self):
         csv = "timestamp,lat,lon,accuracy_m,speed_mps\n2026-09-26T10:00:00Z,41,-87.9,,\n"
-        self.assertEqual(self.store.import_csv(csv)["inserted"], 1)
-        init = dispatch(self.store, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25"}})
+        self.assertEqual(import_csv(self.db, csv)["inserted"], 1)
+        init = dispatch(self.db, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25"}})
         self.assertEqual(init["result"]["serverInfo"]["name"], "geologs")
-        tools = dispatch(self.store, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+        tools = dispatch(self.db, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         tool_names = [t["name"] for t in tools["result"]["tools"]]
         self.assertIn("get_current_location", tool_names)
         self.assertIn("get_compact_timeline", tool_names)
@@ -557,7 +581,7 @@ class StoreTests(unittest.TestCase):
         self.assertIn("list_reminder_history", tool_names)
         self.assertNotIn("set_reminder_active", tool_names)
         self.assertNotIn("plan_route", tool_names)
-        result = dispatch(self.store, {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "get_current_location", "arguments": {}}})
+        result = dispatch(self.db, {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "get_current_location", "arguments": {}}})
         self.assertEqual(result["result"]["structuredContent"]["result"]["lat"], 41)
 
     def test_mcp_streamable_http_headers_and_notification(self):
@@ -568,7 +592,7 @@ class StoreTests(unittest.TestCase):
         handler.headers["MCP-Protocol-Version"] = "2025-11-25"
         handler.mcp_error = Mock()
         self.assertTrue(handler.mcp_headers_valid())
-        self.assertIsNone(dispatch(self.store, {"jsonrpc": "2.0", "method": "notifications/initialized"}))
+        self.assertIsNone(dispatch(self.db, {"jsonrpc": "2.0", "method": "notifications/initialized"}))
         handler.headers.replace_header("Accept", "application/json")
         self.assertFalse(handler.mcp_headers_valid())
         handler.mcp_error.assert_called_with(406, -32600, "Accept must include application/json and text/event-stream")
@@ -578,11 +602,11 @@ class StoreTests(unittest.TestCase):
         handler.mcp_error.assert_called_with(400, -32600, "Unsupported MCP protocol version")
 
     def test_historical_points_do_not_fire_live_reminders(self):
-        place = self.store.save_place({"name": "Market", "lat": 41, "lon": -87.9})
-        self.store.create_reminder({"text": "Buy salt", "place_id": place["id"]})
-        result = self.store.import_csv("timestamp,lat,lon\n2020-01-01T10:00:00Z,41,-87.9\n")
+        place = save_place(self.db, {"name": "Market", "lat": 41, "lon": -87.9})
+        create_reminder(self.db, {"text": "Buy salt", "place_id": place["id"]})
+        result = import_csv(self.db, "timestamp,lat,lon\n2020-01-01T10:00:00Z,41,-87.9\n")
         self.assertEqual(result["inserted"], 1)
-        self.assertEqual(self.store.events(), [])
+        self.assertEqual(self.db.reminders.events(), [])
 
     def test_mode_thresholds(self):
         self.assertEqual(mode_for(0), "idle")
@@ -617,7 +641,7 @@ class StoreTests(unittest.TestCase):
     def test_default_database_stays_where_an_archive_from_before_the_rename_is(self):
         home = Path(self.tmp.name)
         legacy, current = home / ".local/share/geotracker/geotracker.db", home / ".local/share/geologs/geologs.db"
-        with patch.dict(os.environ, {}, clear=True), patch("geologs.core.Path.home", return_value=home):
+        with patch.dict(os.environ, {}, clear=True), patch("geologs.config.Path.home", return_value=home):
             self.assertEqual(database_path(), str(current))
             legacy.parent.mkdir(parents=True)
             legacy.touch()
@@ -638,40 +662,40 @@ class StoreTests(unittest.TestCase):
 
     def test_optional_self_hosted_providers_and_cache(self):
         feature = {"type": "Feature", "geometry": {"type": "Point", "coordinates": [-87.9, 41]}, "properties": {"name": "Market", "city": "Chicago", "type": "house"}}
-        with patch.dict(os.environ, {"GEOLOGS_PHOTON_URL": "http://127.0.0.1:2322"}), patch("geologs.core.json_get", return_value={"features": [feature]}) as request:
-            self.assertEqual(geocode(self.store, "market")[0]["lat"], 41)
-            self.assertEqual(geocode(self.store, "market")[0]["name"], "Market, Chicago")
+        with patch.dict(os.environ, {"GEOLOGS_PHOTON_URL": "http://127.0.0.1:2322"}), patch("geologs.integrations.places.json_get", return_value={"features": [feature]}) as request:
+            self.assertEqual(geocode(self.db, "market")[0]["lat"], 41)
+            self.assertEqual(geocode(self.db, "market")[0]["name"], "Market, Chicago")
             self.assertEqual(request.call_count, 1)
-            self.assertEqual(reverse_geocode(self.store, 41, -87.9)["cache"], "provider")
-            exact = reverse_geocode(self.store, 41, -87.9)
+            self.assertEqual(reverse_geocode(self.db, 41, -87.9)["cache"], "provider")
+            exact = reverse_geocode(self.db, 41, -87.9)
             self.assertEqual(exact["cache"], "region")
             self.assertFalse(exact["approximate"])
-            reused = reverse_geocode(self.store, 41.00005, -87.9)
+            reused = reverse_geocode(self.db, 41.00005, -87.9)
             self.assertEqual(reused["cache"], "region")
             self.assertTrue(reused["approximate"])
-            self.assertEqual(reverse_geocode(self.store, 41.001, -87.9)["cache"], "provider")
+            self.assertEqual(reverse_geocode(self.db, 41.001, -87.9)["cache"], "provider")
             self.assertEqual(request.call_count, 3)
 
     def test_geocode_bias_uses_latest_fix_and_cache_is_area_specific(self):
-        self.store.ingest({"source": "phone", "timestamp": "2026-09-25T10:00:00Z", "lat": 41, "lon": -87.9})
+        ingest(self.db, {"source": "phone", "timestamp": "2026-09-25T10:00:00Z", "lat": 41, "lon": -87.9})
         response = {"results": [{"name": "Neighborhood Market", "formatted": "Neighborhood Market, 1200 Main Street", "lat": 41.01, "lon": -87.9}]}
-        with patch.dict(os.environ, {"GEOAPIFY_API_KEY": "test", "GEOLOGS_PHOTON_URL": ""}), patch("geologs.core.provider_request", return_value=response) as request:
-            self.assertEqual(geocode(self.store, "market")[0]["name"], "Neighborhood Market")
-            self.assertEqual(geocode(self.store, "market")[0]["address"], "Neighborhood Market, 1200 Main Street")
+        with patch.dict(os.environ, {"GEOAPIFY_API_KEY": "test", "GEOLOGS_PHOTON_URL": ""}), patch("geologs.integrations.places.provider_request", return_value=response) as request:
+            self.assertEqual(geocode(self.db, "market")[0]["name"], "Neighborhood Market")
+            self.assertEqual(geocode(self.db, "market")[0]["address"], "Neighborhood Market, 1200 Main Street")
             # Nearby first (a 100 km circle), then anywhere; both favour the latest fix.
             nearby, anywhere = (call.args[1] for call in request.call_args_list)
             self.assertEqual((nearby["filter"], nearby["bias"]), ("circle:-87.9,41.0,100000", "proximity:-87.9,41.0"))
             self.assertEqual((anywhere.get("filter"), anywhere["bias"]), (None, "proximity:-87.9,41.0"))
-            geocode(self.store, "market")
+            geocode(self.db, "market")
             self.assertEqual(request.call_count, 2)
-            geocode(self.store, "market", 42, -88)
+            geocode(self.db, "market", 42, -88)
             self.assertEqual(request.call_count, 4)
 
     def test_saved_places_reverse_geocode_once_per_cached_region(self):
         response = {"results": [{"formatted": "Market Street", "result_type": "building"}]}
-        with patch.dict(os.environ, {"GEOAPIFY_API_KEY": "test", "GEOLOGS_PHOTON_URL": ""}), patch("geologs.core.provider_request", return_value=response) as request:
-            first = self.store.save_place({"name": "Shop", "lat": 41, "lon": -87.9})
-            second = self.store.save_place({"name": "Office", "lat": 41.00003, "lon": -87.9})
+        with patch.dict(os.environ, {"GEOAPIFY_API_KEY": "test", "GEOLOGS_PHOTON_URL": ""}), patch("geologs.integrations.places.provider_request", return_value=response) as request:
+            first = save_place(self.db, {"name": "Shop", "lat": 41, "lon": -87.9})
+            second = save_place(self.db, {"name": "Office", "lat": 41.00003, "lon": -87.9})
             self.assertEqual(first["address"], "Market Street")
             self.assertEqual(second["address"], "Market Street")
             self.assertEqual(request.call_count, 3)
@@ -688,10 +712,10 @@ class StoreTests(unittest.TestCase):
                                                "place_id": "hotel", "distance": 3170}}]}
         responses = lambda path, params: travel if "accommodation" in params["categories"] else everyday
         env = {"GEOAPIFY_API_KEY": "test", "GEOLOGS_PHOTON_URL": ""}
-        with patch.dict(os.environ, env), patch("geologs.core.provider_request", side_effect=responses) as request:
-            result = reverse_geocode(self.store, 34.852116, -92.412809)
-            cached = reverse_geocode(self.store, 34.85214, -92.412809)
-            wider = reverse_geocode(self.store, 34.852116, -92.412809, radius_m=515)
+        with patch.dict(os.environ, env), patch("geologs.integrations.places.provider_request", side_effect=responses) as request:
+            result = reverse_geocode(self.db, 34.852116, -92.412809)
+            cached = reverse_geocode(self.db, 34.85214, -92.412809)
+            wider = reverse_geocode(self.db, 34.852116, -92.412809, radius_m=515)
         self.assertEqual((result["name"], result["category"], result["distance_m"]), ("Lake Willastein Park", "leisure.park", 3))
         self.assertEqual(result["address"], "Lake Willastein Park, Maumelle, AR")
         self.assertEqual((cached["cache"], cached["approximate"]), ("region", True))
@@ -712,15 +736,15 @@ class StoreTests(unittest.TestCase):
         travel = {"features": [{"properties": {"name": "Planet Fitness", "categories": ["sport.fitness"], "distance": 20}}]}
         responses = lambda path, params: travel if "sport" in params["categories"] else everyday
         with patch.dict(os.environ, {"GEOAPIFY_API_KEY": "test", "GEOLOGS_PHOTON_URL": ""}), \
-                patch("geologs.core.provider_request", side_effect=responses):
-            self.assertEqual(reverse_geocode(self.store, 41, -87.9)["name"], "Planet Fitness")
+                patch("geologs.integrations.places.provider_request", side_effect=responses):
+            self.assertEqual(reverse_geocode(self.db, 41, -87.9)["name"], "Planet Fitness")
 
     def test_no_named_place_nearby_falls_back_to_the_address(self):
         reverse = {"results": [{"formatted": "5511 West Markham Street, Little Rock, AR", "result_type": "building"}]}
         responses = lambda path, params: {"features": []} if path == "/v2/places" else reverse
         env = {"GEOAPIFY_API_KEY": "test", "GEOLOGS_PHOTON_URL": ""}
-        with patch.dict(os.environ, env), patch("geologs.core.provider_request", side_effect=responses) as request:
-            result = reverse_geocode(self.store, 34.749, -92.332)
+        with patch.dict(os.environ, env), patch("geologs.integrations.places.provider_request", side_effect=responses) as request:
+            result = reverse_geocode(self.db, 34.749, -92.332)
         self.assertEqual(result["name"], "5511 West Markham Street, Little Rock, AR")
         self.assertEqual(result["place_name"], "")
         self.assertEqual(result["source"], "geoapify_reverse")
@@ -730,8 +754,8 @@ class StoreTests(unittest.TestCase):
         street = {"geometry": {"coordinates": [-87.9, 41]}, "properties": {"name": "Main Street", "osm_key": "highway"}}
         cafe = {"geometry": {"coordinates": [-87.9, 41.0003]}, "properties": {"name": "Corner Cafe", "osm_key": "amenity", "osm_value": "cafe"}}
         with patch.dict(os.environ, {"GEOLOGS_PHOTON_URL": "http://127.0.0.1:2322"}), \
-                patch("geologs.core.json_get", return_value={"features": [street, cafe]}) as request:
-            result = reverse_geocode(self.store, 41, -87.9, radius_m=250)
+                patch("geologs.integrations.places.json_get", return_value={"features": [street, cafe]}) as request:
+            result = reverse_geocode(self.db, 41, -87.9, radius_m=250)
         self.assertEqual(result["name"], "Corner Cafe")
         self.assertIn("radius=0.3", request.call_args.args[0])
 
@@ -739,22 +763,22 @@ class StoreTests(unittest.TestCase):
         only_geoapify = {"GEOAPIFY_API_KEY": "key", "MAPBOX_ACCESS_TOKEN": "", "GEOLOGS_PHOTON_URL": ""}
         both = {**only_geoapify, "MAPBOX_ACCESS_TOKEN": "token"}
         with patch.dict(os.environ, only_geoapify):
-            self.assertEqual(places_provider(self.store), "geoapify")
+            self.assertEqual(places_provider(self.db), "geoapify")
             with self.assertRaisesRegex(ValueError, "Set MAPBOX_ACCESS_TOKEN to use Mapbox"):
-                self.store.save_settings({"places_provider": "mapbox"})
+                save_settings(self.db, {"places_provider": "mapbox"})
             with self.assertRaisesRegex(ValueError, "places_provider must be one of"):
-                self.store.save_settings({"places_provider": "google"})
+                save_settings(self.db, {"places_provider": "google"})
         with patch.dict(os.environ, both):
-            self.assertEqual(self.store.save_settings({"places_provider": "mapbox"})["places_provider"], "mapbox")
-            self.assertEqual((places_provider(self.store), places_provider_identity(self.store)), ("mapbox", "mapbox"))
+            self.assertEqual(save_settings(self.db, {"places_provider": "mapbox"})["places_provider"], "mapbox")
+            self.assertEqual((places_provider(self.db), places_provider_identity(self.db)), ("mapbox", "mapbox"))
         # A chosen provider whose token was removed falls back to one that works.
         with patch.dict(os.environ, only_geoapify):
-            self.assertEqual(places_provider(self.store), "geoapify")
-            self.assertEqual(self.store.save_settings({"timezone": "UTC"})["places_provider"], "mapbox")
+            self.assertEqual(places_provider(self.db), "geoapify")
+            self.assertEqual(save_settings(self.db, {"timezone": "UTC"})["places_provider"], "mapbox")
         with patch.dict(os.environ, {**only_geoapify, "GEOAPIFY_API_KEY": ""}):
-            self.assertIsNone(places_provider(self.store))
+            self.assertIsNone(places_provider(self.db))
             with self.assertRaisesRegex(ValueError, "MAPBOX_ACCESS_TOKEN"):
-                reverse_geocode(self.store, 41, -87.9)
+                reverse_geocode(self.db, 41, -87.9)
 
     def test_mapbox_names_a_position_after_the_nearest_poi_within_the_radius(self):
         origin = (34.852116, -92.412809)
@@ -772,9 +796,9 @@ class StoreTests(unittest.TestCase):
             requests.append(url)
             return pois if "types=poi" in url else address
         env = {"MAPBOX_ACCESS_TOKEN": "token", "GEOAPIFY_API_KEY": "", "GEOLOGS_PHOTON_URL": ""}
-        with patch.dict(os.environ, env), patch("geologs.core.json_get", side_effect=respond):
-            park = reverse_geocode(self.store, *origin)
-            far = reverse_geocode(self.store, *shifted(origin, 0, 2000))
+        with patch.dict(os.environ, env), patch("geologs.integrations.places.json_get", side_effect=respond):
+            park = reverse_geocode(self.db, *origin)
+            far = reverse_geocode(self.db, *shifted(origin, 0, 2000))
         self.assertEqual((park["name"], park["category"], park["distance_m"], park["source"]),
                          ("Lake Willastein Park", "park", 40, "mapbox_searchbox"))
         self.assertEqual(park["provider_place_id"], "id-Lake Willastein Park")
@@ -813,10 +837,10 @@ class StoreTests(unittest.TestCase):
             return next((value for category, value in responses.items()
                          if f"/category/{category}?" in url), {"features": []})
         env = {"MAPBOX_ACCESS_TOKEN": "token", "GEOAPIFY_API_KEY": "", "GEOLOGS_PHOTON_URL": ""}
-        with patch.dict(os.environ, env), patch("geologs.core.MAPBOX_CATEGORY_REQUEST_INTERVAL_SECONDS", 0), \
-                patch("geologs.core.json_get", side_effect=respond) as request:
-            places = nearby_places(self.store, *origin, radius_m=1000)
-            cached = nearby_places(self.store, *shifted(origin, 5, 0), radius_m=1000)
+        with patch.dict(os.environ, env), patch("geologs.integrations.places.MAPBOX_CATEGORY_REQUEST_INTERVAL_SECONDS", 0), \
+                patch("geologs.integrations.places.json_get", side_effect=respond) as request:
+            places = nearby_places(self.db, *origin, radius_m=1000)
+            cached = nearby_places(self.db, *shifted(origin, 5, 0), radius_m=1000)
         self.assertEqual([place["name"] for place in places],
                          ["Natural State Eyecare", "Costco", "Starbucks", "Kroger"])
         self.assertEqual([place["provider_place_id"] for place in places].count("costco"), 1)
@@ -838,25 +862,25 @@ class StoreTests(unittest.TestCase):
                                                   "poi_category_ids": ["warehouse_store"]}}]}
         env = {"MAPBOX_ACCESS_TOKEN": "token", "GEOAPIFY_API_KEY": "key", "GEOLOGS_PHOTON_URL": ""}
         respond = lambda url: suggested if "/suggest?" in url else retrieved
-        with patch.dict(os.environ, env), patch("geologs.core.json_get", side_effect=respond) as request:
-            self.store.save_settings({"places_provider": "mapbox"})
-            listed = geocode(self.store, "costco", 34.85, -92.41, resolve=0)
-            geocode(self.store, "costco", 34.85, -92.41, resolve=0)
+        with patch.dict(os.environ, env), patch("geologs.integrations.places.json_get", side_effect=respond) as request:
+            save_settings(self.db, {"places_provider": "mapbox"})
+            listed = geocode(self.db, "costco", 34.85, -92.41, resolve=0)
+            geocode(self.db, "costco", 34.85, -92.41, resolve=0)
             # The browser lists suggestions, then fetches coordinates for the one picked.
             self.assertEqual(request.call_count, 1)
             self.assertIn("/search/searchbox/v1/suggest?q=costco", request.call_args.args[0])
             self.assertIn("proximity=-92.41%2C34.85", request.call_args.args[0])
             self.assertEqual((listed[0]["name"], listed[0]["lat"], listed[0]["distance_m"]), ("Costco Wholesale", None, 9800))
-            picked = place_details(self.store, listed[0]["provider_place_id"], listed[0]["session"])
+            picked = place_details(self.db, listed[0]["provider_place_id"], listed[0]["session"])
             self.assertIn(f"/retrieve/costco?session_token={listed[0]['session']}", request.call_args.args[0])
             self.assertEqual((picked["lat"], picked["lon"]), (34.8, -92.3))
             # Callers that need coordinates (a reminder by place name, MCP) get them resolved.
-            resolved = geocode(self.store, "costco", 34.85, -92.41, resolve=1)
+            resolved = geocode(self.db, "costco", 34.85, -92.41, resolve=1)
             self.assertEqual((resolved[0]["lat"], request.call_count), (34.8, 2))
         # Switching back to Geoapify asks Geoapify instead of reusing Mapbox's cached answer.
-        with patch.dict(os.environ, env), patch("geologs.core.provider_request", return_value={"results": []}) as geoapify:
-            self.store.save_settings({"places_provider": "geoapify"})
-            self.assertEqual(geocode(self.store, "costco", 34.85, -92.41), [])
+        with patch.dict(os.environ, env), patch("geologs.integrations.places.provider_request", return_value={"results": []}) as geoapify:
+            save_settings(self.db, {"places_provider": "geoapify"})
+            self.assertEqual(geocode(self.db, "costco", 34.85, -92.41), [])
         self.assertEqual(geoapify.call_count, 2)
 
     def test_place_search_puts_the_nearby_match_before_distant_ones(self):
@@ -870,9 +894,9 @@ class StoreTests(unittest.TestCase):
             {"name": "Capital Tea", "mapbox_id": "denver", "feature_type": "poi", "distance": 1234000,
              "full_address": "1450 S Broadway, Denver, Colorado 80210, United States"}]}
         env = {"MAPBOX_ACCESS_TOKEN": "token", "GEOAPIFY_API_KEY": "", "GEOLOGS_PHOTON_URL": ""}
-        with patch.dict(os.environ, env), patch("geologs.core.json_get", return_value=suggested):
-            self.store.save_settings({"places_provider": "mapbox"})
-            found = geocode(self.store, "Tea Capital", *here, resolve=0)
+        with patch.dict(os.environ, env), patch("geologs.integrations.places.json_get", return_value=suggested):
+            save_settings(self.db, {"places_provider": "mapbox"})
+            found = geocode(self.db, "Tea Capital", *here, resolve=0)
         self.assertEqual([(place["name"], place["distance_m"]) for place in found],
                          [("Tea Capital", 18000), ("Capital Tea", 1234000), ("Tea capital", 14892000)])
         # Geoapify: a nearby search runs first, so a tea shop across town beats an exact name in India.
@@ -881,9 +905,9 @@ class StoreTests(unittest.TestCase):
                 return {"results": [{"name": "Zen Tea", "formatted": "Zen Tea, 5625 Kavanaugh Boulevard, Little Rock", "lat": 34.79, "lon": -92.33}]}
             return {"results": [{"name": "Tea Capital", "formatted": "Tea Capital, Ernakulam, India", "lat": 9.96, "lon": 76.29},
                                 {"name": "Zen Tea", "formatted": "Zen Tea, 5625 Kavanaugh Boulevard, Little Rock", "lat": 34.79, "lon": -92.33}]}
-        with patch.dict(os.environ, {**env, "GEOAPIFY_API_KEY": "key"}), patch("geologs.core.provider_request", side_effect=geoapify):
-            self.store.save_settings({"places_provider": "geoapify"})
-            found = geocode(self.store, "Tea Capital", *here)
+        with patch.dict(os.environ, {**env, "GEOAPIFY_API_KEY": "key"}), patch("geologs.integrations.places.provider_request", side_effect=geoapify):
+            save_settings(self.db, {"places_provider": "geoapify"})
+            found = geocode(self.db, "Tea Capital", *here)
         self.assertEqual([place["name"] for place in found], ["Zen Tea", "Tea Capital"])
         self.assertLess(found[0]["distance_m"], 15000)
         self.assertGreater(found[1]["distance_m"], 14_000_000)
@@ -893,9 +917,9 @@ class StoreTests(unittest.TestCase):
                                   "formatted": "War Memorial Park, 5511 West Markham Street, Little Rock, AR",
                                   "address_line1": "War Memorial Park", "result_type": "amenity",
                                   "category": "leisure.park", "distance": 8}]}
-        with patch.dict(os.environ, {"GEOAPIFY_API_KEY": "test", "GEOLOGS_PHOTON_URL": ""}), patch("geologs.core.provider_request", return_value=response) as request:
-            result = reverse_geocode(self.store, 34.749, -92.332)
-            nearby = reverse_geocode(self.store, 34.74903, -92.332)
+        with patch.dict(os.environ, {"GEOAPIFY_API_KEY": "test", "GEOLOGS_PHOTON_URL": ""}), patch("geologs.integrations.places.provider_request", return_value=response) as request:
+            result = reverse_geocode(self.db, 34.749, -92.332)
+            nearby = reverse_geocode(self.db, 34.74903, -92.332)
         self.assertEqual(result["name"], "War Memorial Park")
         self.assertEqual(result["place_name"], "War Memorial Park")
         self.assertEqual(result["address"], "War Memorial Park, 5511 West Markham Street, Little Rock, AR")
@@ -906,18 +930,122 @@ class StoreTests(unittest.TestCase):
 
     def test_geoapify_reverse_uses_address_when_place_is_unnamed(self):
         response = {"results": [{"formatted": "1200 Main Street, Little Rock, AR", "result_type": "building"}]}
-        with patch.dict(os.environ, {"GEOAPIFY_API_KEY": "test", "GEOLOGS_PHOTON_URL": ""}), patch("geologs.core.provider_request", return_value=response):
-            result = reverse_geocode(self.store, 34.74, -92.27)
+        with patch.dict(os.environ, {"GEOAPIFY_API_KEY": "test", "GEOLOGS_PHOTON_URL": ""}), patch("geologs.integrations.places.provider_request", return_value=response):
+            result = reverse_geocode(self.db, 34.74, -92.27)
         self.assertEqual(result["name"], "1200 Main Street, Little Rock, AR")
         self.assertEqual(result["place_name"], "")
         self.assertEqual(result["source"], "geoapify_reverse")
+
+    def test_a_lookup_never_commits_half_of_an_ingest(self):
+        # A stop near a café: the name-only reminder check looks up nearby places (and caches
+        # them) halfway through the ingest. Only the ingest itself may commit, once, at its end.
+        create_reminder(self.db, {"text": "Get beans", "match_name": "Starbucks"})
+        start = datetime.now(timezone.utc) - timedelta(minutes=10)
+        fixes = minute_fixes([still(HOME, 8)], start=start)
+        nearby = [{"name": "Starbucks Coffee", "place_lat": HOME[0], "place_lon": HOME[1], "distance_m": 5}]
+        with patch.dict(os.environ, {"GEOAPIFY_API_KEY": "key"}), \
+                patch("geologs.integrations.places.nearby", return_value=nearby) as lookup, \
+                patch.object(self.db, "commit", wraps=self.db.commit) as commit:
+            result = ingest(self.db, fixes)
+        self.assertEqual((lookup.call_count, commit.call_count), (1, 1))
+        self.assertEqual([event["place"] for event in result["events"]], ["Starbucks Coffee"])
+        # The names are kept beside the open stop, not inside stay detection's own state.
+        state = self.db.stays.state("phone")
+        self.assertNotIn("nearby_names", state["candidate"])
+        self.assertEqual(self.db.stays.nearby_names("phone", state["candidate"]["start_id"]), ["Starbucks Coffee"])
+
+    def test_stay_detection_runs_without_a_database(self):
+        from geologs.domain.settings import ANALYSIS_DEFAULTS
+        from geologs.domain.stay_detection import advance
+
+        class Stays:
+            """Keeps what the detector reports, in memory."""
+            def __init__(self):
+                self.kept, self.withdrawn = {}, []
+            def keep(self, record):
+                self.kept[record["start_id"]] = record
+            def withdraw(self, start_id):
+                self.withdrawn.append(start_id)
+                self.kept.pop(start_id, None)
+
+        stays_found, candidate = Stays(), None
+        fixes = minute_fixes([still(HOME, 20), line(HOME, shifted(HOME, 3000, 0), 5)])
+        for index, fix in enumerate(fixes):
+            candidate = advance(candidate, {**fix, "id": index + 1, "speed_mps": None, "speed_origin": None},
+                                ANALYSIS_DEFAULTS, stays_found)
+        (stay,) = stays_found.kept.values()
+        self.assertEqual((stay["kind"], stay["count"], stay["ongoing"]), ("stationary", 20, False))
+        self.assertEqual(stays_found.withdrawn, [])
+
+    def test_repositories_hand_out_plain_rows_and_chosen_columns(self):
+        ingest(self.db, {"source": "phone", "timestamp": "2026-09-25T10:00:00Z", "lat": 41, "lon": -87.9})
+        self.assertIs(type(self.db.points.live_point("phone")), dict)
+        self.assertIs(type(self.db.points.prior_fix("phone", "2026-09-26T00:00:00+00:00")), dict)
+        place = save_place(self.db, {"name": "Market", "lat": 41.01, "lon": -87.9})
+        reminder = create_reminder(self.db, {"text": "Buy salt", "place_id": place["id"]})
+        # Legacy columns stay inside: what a reminder reads as is chosen, not whatever the table holds.
+        self.assertFalse({"repeat", "cooldown_minutes"} & set(reminder))
+        self.assertFalse({"repeat", "cooldown_minutes"} & set(self.db.reminders.active()[0]))
+
+    def test_a_page_keeps_each_lookup_at_once_without_holding_the_database(self):
+        # Reading a day can look up many places; each is kept as it arrives, so the write lock
+        # is never held across the provider calls between them.
+        found = ({"name": "Cafe", "place_name": "Cafe", "address": "1 Main St", "lat": HOME[0], "lon": HOME[1]}, "place")
+        other = open_database(Path(self.tmp.name) / "test.db")
+        try:
+            with patch.dict(os.environ, {"GEOAPIFY_API_KEY": "key"}), \
+                    patch("geologs.integrations.places.lookup", return_value=found), self.db.transaction():
+                reverse_geocode(self.db, HOME[0], HOME[1])
+                self.assertIsNotNone(other.caches.reverse_region("geoapify:nearest-v2:r150", HOME[0], HOME[1]))
+        finally:
+            other.close()
+
+    def test_a_cached_lookup_does_not_wait_for_a_slow_provider(self):
+        import threading
+        from geologs.services import places
+        self.db.caches.save_reverse_region("geoapify:nearest-v2:r150", HOME[0], HOME[1], 15,
+                                           {"name": "Cafe", "place_name": "Cafe", "lat": HOME[0], "lon": HOME[1]})
+        answered = []
+        with patch.dict(os.environ, {"GEOAPIFY_API_KEY": "key"}), places._provider_turn:  # another lookup is out
+            thread = threading.Thread(target=lambda: answered.append(reverse_geocode(self.db, HOME[0], HOME[1])))
+            thread.start()
+            thread.join(2)
+        self.assertEqual([item["cache"] for item in answered], ["region"])
+
+    def test_a_bad_fuel_price_saves_none_of_the_fuel_settings(self):
+        from geologs.services.fuel import update_fuel
+        with self.assertRaises(ValueError):
+            update_fuel(self.db, {"currency": "EUR", "fuel_economy_l100km": 7, "price_per_l": 500})
+        settings = self.db.settings.get()
+        self.assertEqual((settings["currency"], settings["fuel_economy_l100km"]), ("USD", None))
+        self.assertEqual(self.db.fuel.table("manual"), [])
+
+    def test_fired_reminders_are_kept_before_the_webhook_hears_of_them(self):
+        from geologs.services.ingest import record_locations
+        place = save_place(self.db, {"name": "Market", "lat": 41.01, "lon": -87.9, "radius_m": 100})
+        create_reminder(self.db, {"text": "Buy salt", "place_id": place["id"]})
+        now = datetime.now(timezone.utc)
+        seen = []
+        def send(_target, event):
+            other = open_database(Path(self.tmp.name) / "test.db")
+            try:
+                seen.append([row["id"] for row in other.reminders.events()] == [event["id"]])
+            finally:
+                other.close()
+            return "sent"
+        with patch.dict(os.environ, {"GEOLOGS_WEBHOOK_URL": "https://hooks.example/geologs"}), \
+                patch("geologs.integrations.webhooks.send", side_effect=send):
+            record_locations(self.db, [{"source": "phone", "timestamp": (now - timedelta(minutes=1)).isoformat(), "lat": 41.0, "lon": -87.9},
+                                       {"source": "phone", "timestamp": now.isoformat(), "lat": 41.01, "lon": -87.9}])
+        self.assertEqual(seen, [True])
+        self.assertEqual(self.db.reminders.events()[0]["webhook_status"], "sent")
 
     def test_webhook_uses_hermes_compatible_hmac_v2_signature(self):
         event = {"id": 99, "text": "Pick up salt", "place": "Walmart"}
         env = {"GEOLOGS_WEBHOOK_URL": "http://host.docker.internal:8644/webhooks/geologs-reminders",
                "GEOLOGS_WEBHOOK_SECRET": "shared-secret", "GEOLOGS_WEBHOOK_TOKEN": ""}
-        with patch.dict(os.environ, env), patch("geologs.core.urllib.request.urlopen", return_value=io.BytesIO()) as urlopen:
-            deliver_webhook(self.store, [event])
+        with patch.dict(os.environ, env), patch("geologs.integrations.webhooks.urllib.request.urlopen", return_value=io.BytesIO()) as urlopen:
+            deliver_webhook(self.db, [event])
         request = urlopen.call_args.args[0]
         headers = {key.lower(): value for key, value in request.header_items()}
         timestamp = headers["x-webhook-timestamp"]
@@ -928,12 +1056,12 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(reverse_cache_radius("city"), 0)
         self.assertEqual(reverse_cache_radius("building"), 15)
         self.assertEqual(reverse_cache_radius("street"), 30)
-        self.store.save_reverse_region("provider", 41, -87.9, 30, {"name": "First"})
-        self.assertEqual(self.store.reverse_region("provider", 41.0001, -87.9)["name"], "First")
-        self.assertIsNone(self.store.reverse_region("other", 41, -87.9))
-        self.store.db.execute("UPDATE reverse_regions SET expires_at='2000-01-01T00:00:00+00:00'")
-        self.store.db.commit()
-        self.assertIsNone(self.store.reverse_region("provider", 41, -87.9))
+        self.db.caches.save_reverse_region("provider", 41, -87.9, 30, {"name": "First"})
+        self.assertEqual(self.db.caches.reverse_region("provider", 41.0001, -87.9)["name"], "First")
+        self.assertIsNone(self.db.caches.reverse_region("other", 41, -87.9))
+        self.db.conn.execute("UPDATE reverse_regions SET expires_at='2000-01-01T00:00:00+00:00'")
+        self.db.commit()
+        self.assertIsNone(self.db.caches.reverse_region("provider", 41, -87.9))
 
     def test_stays_frequent_places_transitions_and_day(self):
         base = datetime(2026, 9, 25, 10, tzinfo=timezone.utc)
@@ -948,24 +1076,24 @@ class StoreTests(unittest.TestCase):
             batch.append({"source": "phone", "external_id": f"3-A-{minute}",
                           "timestamp": (base + timedelta(hours=3, minutes=minute)).isoformat(),
                           "lat": 41, "lon": -87.9})
-        self.store.ingest(batch)
-        self.assertEqual(len(stays(self.store)), 7)
-        self.assertEqual(len(place_patterns(self.store)[0]), 2)
-        self.assertEqual(sum(t["count"] for t in transitions(self.store)), 6)
-        self.assertEqual(predict_next(self.store)["frequency"], 1)
-        self.assertEqual(day_summary(self.store, "2026-09-25", "UTC")["points"], 21)
-        place = self.store.save_place({"name": "University", "lat": 41, "lon": -87.9})
+        ingest(self.db, batch)
+        self.assertEqual(len(stays(self.db)), 7)
+        self.assertEqual(len(place_patterns(self.db)[0]), 2)
+        self.assertEqual(sum(t["count"] for t in transitions(self.db)), 6)
+        self.assertEqual(predict_next(self.db)["frequency"], 1)
+        self.assertEqual(day_summary(self.db, "2026-09-25", "UTC")["points"], 21)
+        place = save_place(self.db, {"name": "University", "lat": 41, "lon": -87.9})
         # Fixes come every 8 minutes, so each visit lasts until shortly before the next fix elsewhere.
-        self.assertEqual(self.store.place_visits(place["id"])["total_observed_minutes"], 84.4)
-        ranked = visited_places(self.store)
+        self.assertEqual(place_visits(self.db, place["id"])["total_observed_minutes"], 84.4)
+        ranked = visited_places(self.db)
         # A saved place is a zone: with nothing named right there, the place inside is known by the zone's name.
         university = next(item for item in ranked if item["zone"] == "University")
         self.assertEqual((university["display_name"], university["saved"], university["visits"]), ("University", False, 4))
         self.assertGreaterEqual(ranked[0]["observed_minutes"], ranked[1]["observed_minutes"])
-        insight = insights(self.store)
+        insight = insights(self.db)
         self.assertEqual(insight["unlabeled_places"][0]["visits"], 3)
         self.assertNotIn("Unlabeled", insight["unlabeled_places"][0]["display_name"])
-        mcp = dispatch(self.store, {"jsonrpc": "2.0", "id": 9, "method": "tools/call",
+        mcp = dispatch(self.db, {"jsonrpc": "2.0", "id": 9, "method": "tools/call",
                                     "params": {"name": "get_frequent_places", "arguments": {"limit": 10}}})
         self.assertIn("University", [item["name"] for item in mcp["result"]["structuredContent"]["result"]])
 
@@ -976,17 +1104,17 @@ class StoreTests(unittest.TestCase):
             (17, 41.0005), (20, 41.0010), (36, 41.0010),
             (37, 41.0015), (40, 41.0020), (56, 41.0020),
         ]
-        self.store.ingest([{"source": "phone", "external_id": str(minute),
+        ingest(self.db, [{"source": "phone", "external_id": str(minute),
                             "timestamp": (base + timedelta(minutes=minute)).isoformat(),
                             "lat": lat, "lon": -87.9, "accuracy_m": 5}
                            for minute, lat in fixes])
         resolved = {"name": "Lake Example", "address": "Lake Example, Chicago",
                     "category": "natural.water", "categories": ["natural.water"],
                     "provider_place_id": "geoapify-lake-1"}
-        with patch("geologs.analysis.place_for_coordinate", return_value=resolved):
-            places = visited_places(self.store)
-            day = day_summary(self.store, "2026-09-25", "UTC", "phone")
-            pattern = insights(self.store)["frequent_places"]
+        with patch("geologs.services.places.place_for_coordinate", return_value=resolved):
+            places = visited_places(self.db)
+            day = day_summary(self.db, "2026-09-25", "UTC", "phone")
+            pattern = insights(self.db)["frequent_places"]
         self.assertEqual(len(places), 1)
         self.assertEqual(places[0]["name"], "Lake Example")
         self.assertEqual(places[0]["category"], "natural.water")
@@ -1014,60 +1142,60 @@ class StoreTests(unittest.TestCase):
             {"name": "  lake   example ", "address": "South shore", "category": "natural.water",
              "categories": ["natural.water"], "provider_place_id": "south"},
         ]
-        with patch("geologs.analysis.place_for_coordinate", side_effect=labels):
-            merged, mapping = resolve_place_patterns(self.store, (clusters, {10: 0, 11: 1}))
+        with patch("geologs.services.places.place_for_coordinate", side_effect=labels):
+            merged, mapping = resolve_place_patterns(self.db, (clusters, {10: 0, 11: 1}))
         self.assertEqual(len(merged), 1)
         self.assertEqual(merged[0]["visits"], 2)
         self.assertEqual(mapping[10], mapping[11])
 
     def test_saved_place_keeps_provider_metadata(self):
-        place = self.store.save_place({"name": "Walmart", "lat": 41, "lon": -87.9,
+        place = save_place(self.db, {"name": "Walmart", "lat": 41, "lon": -87.9,
                                        "address": "100 Main Street", "category": "commercial.supermarket",
                                        "provider_place_id": "geoapify-store-1"})
         self.assertEqual(place["category"], "commercial.supermarket")
         self.assertEqual(place["provider_place_id"], "geoapify-store-1")
-        self.assertEqual(self.store.places()[0]["category"], "commercial.supermarket")
+        self.assertEqual(self.db.places.saved()[0]["category"], "commercial.supermarket")
 
     def test_late_import_rebuilds_affected_source_stays(self):
         base = datetime(2026, 9, 25, 10, tzinfo=timezone.utc)
         def put(id_, minute):
-            self.store.ingest({"source": "phone", "external_id": str(id_),
+            ingest(self.db, {"source": "phone", "external_id": str(id_),
                                "timestamp": (base + timedelta(minutes=minute)).isoformat(),
                                "lat": 41, "lon": -87.9})
         put(1, 0)
         put(3, 16)
-        self.assertEqual(len(stays(self.store)), 1)
+        self.assertEqual(len(stays(self.db)), 1)
         put(2, 8)
-        self.assertEqual(stays(self.store)[0]["point_count"], 3)
+        self.assertEqual(stays(self.db)[0]["point_count"], 3)
 
     def test_repeated_home_assistant_samples_at_one_spot_are_one_stay_across_a_gap(self):
         base = datetime(2026, 9, 25, 10, tzinfo=timezone.utc)
         def poll(minute):
-            return self.store.ingest({"source": "home_assistant:phone", "external_id": "unchanged-state",
+            return ingest(self.db, {"source": "home_assistant:phone", "external_id": "unchanged-state",
                                       "timestamp": (base + timedelta(minutes=minute)).isoformat(),
                                       "lat": 41, "lon": -87.9, "accuracy_m": 4})
         poll(0)
         self.assertEqual(poll(16)["recorded"], 1)
-        self.assertEqual(len(self.store.points()), 1)
-        self.assertEqual(len(stays(self.store)), 1)
-        self.assertEqual(stays(self.store)[0]["point_count"], 2)
+        self.assertEqual(len(self.db.points.points()), 1)
+        self.assertEqual(len(stays(self.db)), 1)
+        self.assertEqual(stays(self.db)[0]["point_count"], 2)
         poll(50)
         poll(66)
         # Still at the same spot after a quiet half hour: one stay, not two.
-        rows = stays(self.store)
+        rows = stays(self.db)
         self.assertEqual([(row["point_count"], row["observed_minutes"]) for row in rows], [(4, 66)])
 
     def test_existing_raw_samples_bootstrap_stays_when_opened(self):
         path = Path(self.tmp.name) / "bootstrap.db"
-        archive = Store(path)
+        archive = open_database(path)
         base = datetime(2026, 9, 25, 10, tzinfo=timezone.utc)
         for minute in (0, 16):
-            archive.ingest({"source": "home_assistant:phone", "external_id": "same-state",
+            ingest(archive, {"source": "home_assistant:phone", "external_id": "same-state",
                             "timestamp": (base + timedelta(minutes=minute)).isoformat(),
                             "lat": 41, "lon": -87.9, "accuracy_m": 4}, process_analysis=False)
         self.assertEqual(len(stays(archive)), 0)
         archive.close()
-        reopened = Store(path)
+        reopened = open_database(path)
         try:
             self.assertEqual(len(stays(reopened)), 1)
             self.assertEqual(stays(reopened)[0]["point_count"], 2)
@@ -1076,49 +1204,49 @@ class StoreTests(unittest.TestCase):
 
     def test_stay_threshold_migration_removes_old_short_stays(self):
         path = Path(self.tmp.name) / "old-stays.db"
-        archive = Store(path)
+        archive = open_database(path)
         base = datetime(2026, 9, 25, 10, tzinfo=timezone.utc)
-        archive.ingest([
+        ingest(archive, [
             {"source": "phone", "timestamp": (base + timedelta(minutes=minute)).isoformat(),
              "lat": 41, "lon": -87.9, "accuracy_m": 5}
             for minute in (0, 6)
         ])
-        observations = list(reversed(archive.observations(limit=None)))
-        archive.db.execute("""INSERT INTO observed_stays_v2
+        observations = list(reversed(archive.points.observations(limit=None)))
+        archive.conn.execute("""INSERT INTO observed_stays_v2
             (source,start_observation_id,end_observation_id,started_at,ended_at,lat,lon,point_count,ongoing)
             VALUES (?,?,?,?,?,?,?,?,1)""",
             ("phone", observations[0]["id"], observations[1]["id"], observations[0]["timestamp"],
              observations[1]["timestamp"], 41, -87.9, 2))
-        archive.db.execute("PRAGMA user_version=7")
-        archive.db.commit()
+        archive.conn.execute("PRAGMA user_version=7")
+        archive.commit()
         archive.close()
-        migrated = Store(path)
+        migrated = open_database(path)
         try:
             self.assertEqual(stays(migrated), [])
-            self.assertEqual(migrated.db.execute("PRAGMA user_version").fetchone()[0], 18)
+            self.assertEqual(migrated.conn.execute("PRAGMA user_version").fetchone()[0], 18)
         finally:
             migrated.close()
 
     def test_takeout_import_is_idempotent_and_does_not_trigger_reminders(self):
-        place = self.store.save_place({"name": "Market", "lat": 41, "lon": -87.9})
-        self.store.create_reminder({"text": "Buy salt", "place_id": place["id"]})
+        place = save_place(self.db, {"name": "Market", "lat": 41, "lon": -87.9})
+        create_reminder(self.db, {"text": "Buy salt", "place_id": place["id"]})
         content = json.dumps({"locations": [
             {"timestampMs": "1600000000000", "latitudeE7": 410000000, "longitudeE7": -879000000, "accuracy": 12},
             {"timestamp": "2020-09-13T12:30:00Z", "latitudeE7": 410000001, "longitudeE7": -879000000},
             {"timestamp": "2020-09-13T12:31:00Z"}]})
-        first = import_takeout(self.store, io.StringIO(content))
-        second = import_takeout(self.store, io.StringIO(content))
+        first = import_takeout(self.db, io.StringIO(content))
+        second = import_takeout(self.db, io.StringIO(content))
         self.assertEqual((first["inserted"], first["skipped"]), (2, 1))
         self.assertEqual(second["duplicates"], 2)
-        self.assertEqual(self.store.events(), [])
+        self.assertEqual(self.db.reminders.events(), [])
 
     def test_lake_run_between_drives_is_a_running_area_stay(self):
-        self.store.save_place({"name": "Home", "lat": HOME[0], "lon": HOME[1], "radius_m": 100})
+        save_place(self.db, {"name": "Home", "lat": HOME[0], "lon": HOME[1], "radius_m": 100})
         # Home Assistant holds each position for two polls; timing a move from
         # the last poll instead of the first would make the run look like a drive.
         for fix in lake_run_day(hold=2):
-            self.store.ingest(fix)
-        rows = list(reversed(stays(self.store, limit=None)))
+            ingest(self.db, fix)
+        rows = list(reversed(stays(self.db, limit=None)))
         self.assertEqual([row["kind"] for row in rows], ["stationary", "area", "stationary"])
         lake = rows[1]
         self.assertEqual(lake["activity"], "running")
@@ -1127,14 +1255,17 @@ class StoreTests(unittest.TestCase):
         self.assertAlmostEqual(lake["radius_m"], 500, delta=60)
         self.assertAlmostEqual(lake["distance_m"] / 1000, 9, delta=1)
         live = [(row["kind"], row["started_at"], row["ended_at"]) for row in rows]
-        process_stays_rebuild(self.store)
-        self.assertEqual([(row["kind"], row["started_at"], row["ended_at"]) for row in reversed(stays(self.store, limit=None))], live)
+        process_stays_rebuild(self.db)
+        self.assertEqual([(row["kind"], row["started_at"], row["ended_at"]) for row in reversed(stays(self.db, limit=None))], live)
 
         found = {"name": "Lake Example", "address": "Lake Example, Chicago", "category": "natural.water",
                  "categories": ["natural.water"], "provider_place_id": "lake-1"}
-        with patch("geologs.analysis.place_for_coordinate", return_value=found):
-            day = day_summary(self.store, "2026-09-27", "UTC")
-            overview = daily_overview(self.store, "2026-09-27", "UTC")
+        nothing = {"name": "", "named": False, "address": "", "category": "", "categories": [], "provider_place_id": ""}
+        # The provider knows the lake, not Home's street.
+        lookup = lambda _db, lat, lon, *_args: found if metres_between(LAKE, {"lat": lat, "lon": lon}) < 1000 else nothing
+        with patch("geologs.services.places.place_for_coordinate", side_effect=lookup):
+            day = day_summary(self.db, "2026-09-27", "UTC")
+            overview = daily_overview(self.db, "2026-09-27", "UTC")
         self.assertEqual([trip["mode"] for trip in day["trips"]], ["driving", "driving"])
         self.assertEqual((day["activity_counts"]["running"], day["activity_counts"]["driving"]), (1, 2))
         self.assertEqual([place["name"] for place in day["visited_places"]], ["Lake Example"])
@@ -1146,60 +1277,60 @@ class StoreTests(unittest.TestCase):
 
     def test_round_trip_from_home_is_a_loop_trip_not_a_visit(self):
         walk = laps(shifted(HOME, 150, 0), 150, 20, 4.5)
-        self.store.ingest(minute_fixes([still(HOME, 30), walk, still(HOME, 30)]))
-        self.assertEqual([row["kind"] for row in stays(self.store, limit=None)], ["stationary", "stationary"])
-        trips = day_summary(self.store, "2026-09-27", "UTC")["trips"]
+        ingest(self.db, minute_fixes([still(HOME, 30), walk, still(HOME, 30)]))
+        self.assertEqual([row["kind"] for row in stays(self.db, limit=None)], ["stationary", "stationary"])
+        trips = day_summary(self.db, "2026-09-27", "UTC")["trips"]
         self.assertEqual([(trip["mode"], trip["loop"]) for trip in trips], [("walking", True)])
         self.assertGreater(trips[0]["distance_km"], 1)
 
     def test_errands_driven_with_short_stops_are_not_an_area_stay(self):
-        self.store.save_settings({"quick_stop_minutes": 0})  # stops this long would otherwise be quick stops
+        save_settings(self.db, {"quick_stop_minutes": 0})  # stops this long would otherwise be quick stops
         a, b, c = shifted(HOME, 3000, 0), shifted(HOME, 3000, 1500), shifted(HOME, 1500, 1500)
-        self.store.ingest(minute_fixes([still(HOME, 30), line(HOME, a, 6), still(a, 8), line(a, b, 4), still(b, 6),
+        ingest(self.db, minute_fixes([still(HOME, 30), line(HOME, a, 6), still(a, 8), line(a, b, 4), still(b, 6),
                                         line(b, c, 4), still(c, 9), line(c, HOME, 5), still(HOME, 30)]))
-        self.assertEqual([row["kind"] for row in stays(self.store, limit=None)], ["stationary", "stationary"])
-        trips = day_summary(self.store, "2026-09-27", "UTC")["trips"]
+        self.assertEqual([row["kind"] for row in stays(self.db, limit=None)], ["stationary", "stationary"])
+        trips = day_summary(self.db, "2026-09-27", "UTC")["trips"]
         self.assertEqual([trip["mode"] for trip in trips], ["driving"])
 
     def test_indoor_jitter_at_a_large_store_is_one_visit(self):
-        store = shifted(HOME, 6000, 2000)
-        jitter = [shifted(store, 70 * math.sin(index * 2.3), 50 * math.cos(index * 1.7)) + (35,) for index in range(40)]
-        self.store.ingest(minute_fixes([still(HOME, 30), line(HOME, store, 10), jitter, line(store, HOME, 10), still(HOME, 30)]))
-        rows = list(reversed(stays(self.store, limit=None)))
+        db = shifted(HOME, 6000, 2000)
+        jitter = [shifted(db, 70 * math.sin(index * 2.3), 50 * math.cos(index * 1.7)) + (35,) for index in range(40)]
+        ingest(self.db, minute_fixes([still(HOME, 30), line(HOME, db, 10), jitter, line(db, HOME, 10), still(HOME, 30)]))
+        rows = list(reversed(stays(self.db, limit=None)))
         self.assertEqual(len(rows), 3)
         self.assertGreaterEqual(rows[1]["observed_minutes"], 35)
-        self.assertLess(metres_from(rows[1], store), 60)
+        self.assertLess(metres_from(rows[1], db), 60)
 
     def test_inaccurate_and_stray_fixes_do_not_split_a_stay(self):
         fixes = still(HOME, 20) + [(HOME[0] + .003, HOME[1], 300)] + still(HOME, 10) + [shifted(HOME, 80, 0) + (20,)] + still(HOME, 10)
-        self.store.ingest(minute_fixes([fixes]))
-        rows = stays(self.store, limit=None)
+        ingest(self.db, minute_fixes([fixes]))
+        rows = stays(self.db, limit=None)
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["observed_minutes"], 41)
 
     def test_departure_confirmed_after_stray_fixes_keeps_stay_end(self):
         away = line(HOME, shifted(HOME, 3000, 0), 6)
         for fix in minute_fixes([still(HOME, 20), away]):
-            self.store.ingest(fix)
-        row = stays(self.store, limit=None)[0]
+            ingest(self.db, fix)
+        row = stays(self.db, limit=None)[0]
         self.assertEqual((row["ongoing"], row["observed_minutes"]), (0, 19))
-        timeline = list(reversed(self.store.timeline(limit=None)))
+        timeline = list(reversed(self.db.points.timeline(limit=None)))
         self.assertEqual([point["role"] for point in timeline[:2]], ["arrival", "departure"])
 
     def test_stay_split_by_gps_noise_is_reported_as_one_visit(self):
-        store = shifted(HOME, 4000, 0)
-        strays = [shifted(store, 80, 0), shifted(store, 85, 10), shifted(store, 80, 20)]
-        self.store.ingest(minute_fixes([still(HOME, 30), line(HOME, store, 6), still(store, 16), strays,
-                                        still(store, 17), line(store, HOME, 6), still(HOME, 30)]))
-        self.assertEqual(len(stays(self.store, limit=None)), 4)
+        db = shifted(HOME, 4000, 0)
+        strays = [shifted(db, 80, 0), shifted(db, 85, 10), shifted(db, 80, 20)]
+        ingest(self.db, minute_fixes([still(HOME, 30), line(HOME, db, 6), still(db, 16), strays,
+                                        still(db, 17), line(db, HOME, 6), still(HOME, 30)]))
+        self.assertEqual(len(stays(self.db, limit=None)), 4)
         label = {"name": "Costco Wholesale", "address": "", "category": "commercial.supermarket",
                  "categories": ["commercial.supermarket"], "provider_place_id": "costco"}
         home = {"name": "Home Street", "address": "", "category": "", "categories": [], "provider_place_id": "home"}
         def resolve(_store, lat, lon, _radius=None):
             return label if lon > HOME[1] + .01 else home
-        with patch("geologs.analysis.place_for_coordinate", side_effect=resolve):
-            found = search_visits(self.store, "costco", timezone_name="UTC")
-            day = day_summary(self.store, "2026-09-27", "UTC")
+        with patch("geologs.services.places.place_for_coordinate", side_effect=resolve):
+            found = search_visits(self.db, "costco", timezone_name="UTC")
+            day = day_summary(self.db, "2026-09-27", "UTC")
         self.assertEqual(found["total_visits"], 1)
         self.assertEqual(found["places"][0]["visits"], 1)
         self.assertGreaterEqual(found["visits"][0]["observed_minutes"], 35)
@@ -1211,24 +1342,24 @@ class StoreTests(unittest.TestCase):
                               line(shifted(park, -300, 0), shifted(track, 0, -400), 10), laps(track, 400, 25, 9),
                               line(shifted(track, 0, -400), HOME, 12)], source="car")
         for fix in fixes:
-            self.store.ingest(fix)
+            ingest(self.db, fix)
         signature = lambda: [(row["kind"], row["activity"], row["started_at"], row["ended_at"], row["went_elsewhere"])
-                             for row in stays(self.store, limit=None)]
+                             for row in stays(self.db, limit=None)]
         live = signature()
         self.assertEqual([(kind, activity) for kind, activity, *_ in reversed(live)], [("area", "walking"), ("area", "running")])
-        process_stays_rebuild(self.store)
+        process_stays_rebuild(self.db)
         self.assertEqual(signature(), live)
 
     def campus_day(self, middle, extra=None):
         """Home, drive to campus, `middle`, drive home; campus coordinates geocode to University."""
         library = CAMPUS
         fixes = minute_fixes([still(HOME, 30), line(HOME, library, 12), *middle, line(middle[-1][-1][:2], HOME, 12), still(HOME, 30)])
-        self.store.ingest(fixes)
+        ingest(self.db, fixes)
         if extra:
-            self.store.ingest(extra)
-        with patch("geologs.analysis.place_for_coordinate", side_effect=campus_label):
-            return (day_summary(self.store, "2026-09-27", "UTC"), search_visits(self.store, "university", timezone_name="UTC"),
-                    daily_overview(self.store, "2026-09-27", "UTC"))
+            ingest(self.db, extra)
+        with patch("geologs.services.places.place_for_coordinate", side_effect=campus_label):
+            return (day_summary(self.db, "2026-09-27", "UTC"), search_visits(self.db, "university", timezone_name="UTC"),
+                    daily_overview(self.db, "2026-09-27", "UTC"))
 
     def test_walking_between_buildings_is_one_visit_not_a_trip(self):
         day, found, overview = self.campus_day([still(CAMPUS, 90), line(CAMPUS, LAB, 7), still(LAB, 80)])
@@ -1257,7 +1388,7 @@ class StoreTests(unittest.TestCase):
         self.assertEqual([stay["display_name"] for stay in day["stays"]].count("University"), 1)
 
     def test_lunch_off_campus_is_a_round_trip(self):
-        self.store.save_settings({"quick_stop_minutes": 0})  # stops this long would otherwise be quick stops
+        save_settings(self.db, {"quick_stop_minutes": 0})  # stops this long would otherwise be quick stops
         taco = shifted(CAMPUS, 2500, 0)
         day, found, _overview = self.campus_day([still(CAMPUS, 60), line(CAMPUS, taco, 5), still(taco, 10),
                                                  line(taco, CAMPUS, 5), still(CAMPUS, 60)])
@@ -1279,9 +1410,9 @@ class StoreTests(unittest.TestCase):
         # An app that reports only while moving: two quiet hours on campus.
         before = minute_fixes([still(HOME, 30), line(HOME, CAMPUS, 12), still(CAMPUS, 60)])
         after = minute_fixes([still(CAMPUS, 60), line(CAMPUS, HOME, 12), still(HOME, 30)], start=datetime(2026, 9, 27, 17, tzinfo=timezone.utc))
-        self.store.ingest(before + after)
-        with patch("geologs.analysis.place_for_coordinate", side_effect=campus_label):
-            day = day_summary(self.store, "2026-09-27", "UTC")
+        ingest(self.db, before + after)
+        with patch("geologs.services.places.place_for_coordinate", side_effect=campus_label):
+            day = day_summary(self.db, "2026-09-27", "UTC")
         self.assertEqual(day["coverage_gaps"], [])
         campus = [stay for stay in day["stays"] if metres_between(CAMPUS, stay) < 100]
         self.assertEqual([(stay["started_at"], stay["ended_at"]) for stay in campus],
@@ -1291,32 +1422,32 @@ class StoreTests(unittest.TestCase):
         # A tablet left at home all afternoon sends more samples than the phone you carried to campus.
         tablet = minute_fixes([still(HOME, 200)], source="old_tablet", start=datetime(2026, 9, 27, 14, tzinfo=timezone.utc))
         phone = minute_fixes([still(CAMPUS, 180)], source="phone", start=datetime(2026, 9, 27, 14, 10, tzinfo=timezone.utc))
-        self.store.ingest(tablet + phone)
-        with patch("geologs.analysis.place_for_coordinate", side_effect=campus_label):
-            busiest = day_summary(self.store, "2026-09-27", "UTC")
-            self.store.save_settings({"source_priority": ["phone", "old_tablet"]})
-            ranked = day_summary(self.store, "2026-09-27", "UTC")
+        ingest(self.db, tablet + phone)
+        with patch("geologs.services.places.place_for_coordinate", side_effect=campus_label):
+            busiest = day_summary(self.db, "2026-09-27", "UTC")
+            save_settings(self.db, {"source_priority": ["phone", "old_tablet"]})
+            ranked = day_summary(self.db, "2026-09-27", "UTC")
         self.assertEqual((busiest["timeline_sources"][0], ranked["timeline_sources"][0]), ("old_tablet", "phone"))
         self.assertIn("University", [stay["display_name"] for stay in ranked["stays"]])
-        self.assertEqual(self.store.settings()["source_priority"], ["phone", "old_tablet"])
+        self.assertEqual(self.db.settings.get()["source_priority"], ["phone", "old_tablet"])
         with self.assertRaises(ValueError):
-            self.store.save_settings({"source_priority": "phone"})
+            save_settings(self.db, {"source_priority": "phone"})
 
     def test_current_location_prefers_the_top_tracker_while_it_is_fresh(self):
         now = datetime.now(timezone.utc).replace(microsecond=0)
-        self.store.ingest([{"source": "phone", "timestamp": (now - timedelta(minutes=5)).isoformat(), "lat": CAMPUS[0], "lon": CAMPUS[1]},
+        ingest(self.db, [{"source": "phone", "timestamp": (now - timedelta(minutes=5)).isoformat(), "lat": CAMPUS[0], "lon": CAMPUS[1]},
                            {"source": "tablet", "timestamp": now.isoformat(), "lat": HOME[0], "lon": HOME[1]}])
-        self.assertEqual(self.store.latest()["source"], "tablet")  # newest wins without a priority
-        self.store.save_settings({"source_priority": ["phone"]})
-        self.assertEqual(self.store.latest()["source"], "phone")
-        self.store.ingest({"source": "tablet", "timestamp": (now + timedelta(minutes=20)).isoformat(), "lat": HOME[0], "lon": HOME[1]})
-        self.assertEqual(self.store.latest()["source"], "tablet")  # the phone has gone quiet for 25 minutes
+        self.assertEqual(latest(self.db)["source"], "tablet")  # newest wins without a priority
+        save_settings(self.db, {"source_priority": ["phone"]})
+        self.assertEqual(latest(self.db)["source"], "phone")
+        ingest(self.db, {"source": "tablet", "timestamp": (now + timedelta(minutes=20)).isoformat(), "lat": HOME[0], "lon": HOME[1]})
+        self.assertEqual(latest(self.db)["source"], "tablet")  # the phone has gone quiet for 25 minutes
 
     def test_coverage_gap_between_different_places_is_still_reported(self):
         # Silent overnight and the next fix 300 km away: no way to know when you left.
         far = shifted(HOME, 300000, 0)
-        self.store.ingest(minute_fixes([still(HOME, 30)]) + minute_fixes([still(far, 30)], start=datetime(2026, 9, 27, 20, tzinfo=timezone.utc)))
-        day = day_summary(self.store, "2026-09-27", "UTC")
+        ingest(self.db, minute_fixes([still(HOME, 30)]) + minute_fixes([still(far, 30)], start=datetime(2026, 9, 27, 20, tzinfo=timezone.utc)))
+        day = day_summary(self.db, "2026-09-27", "UTC")
         self.assertEqual(len(day["coverage_gaps"]), 1)
         home = next(stay for stay in day["stays"] if metres_between(HOME, stay) < 100)
         self.assertEqual(home["ended_at"], "2026-09-27T13:29:00+00:00")
@@ -1325,14 +1456,14 @@ class StoreTests(unittest.TestCase):
         taco = shifted(CAMPUS, 2500, 0)
         for fix in minute_fixes([still(HOME, 30), line(HOME, CAMPUS, 12), still(CAMPUS, 60), line(CAMPUS, LAB, 7), still(LAB, 40),
                                  line(LAB, taco, 5), still(taco, 10), line(taco, LAB, 5), still(LAB, 40)]):
-            self.store.ingest(fix)
-        live = [(row["started_at"], row["went_elsewhere"]) for row in stays(self.store, limit=None)]
+            ingest(self.db, fix)
+        live = [(row["started_at"], row["went_elsewhere"]) for row in stays(self.db, limit=None)]
         # Home -> campus and campus -> lab go straight; lab -> taco place -> lab went elsewhere.
         # The taco place is a quick stop; flags still compare stays, as a rebuild does.
-        self.assertEqual([(row["kind"], row["went_elsewhere"]) for row in reversed(stays(self.store, limit=None))],
+        self.assertEqual([(row["kind"], row["went_elsewhere"]) for row in reversed(stays(self.db, limit=None))],
                          [("stationary", None), ("stationary", 0), ("stationary", 0), ("stop", None), ("stationary", 1)])
-        process_stays_rebuild(self.store)
-        self.assertEqual([(row["started_at"], row["went_elsewhere"]) for row in stays(self.store, limit=None)], live)
+        process_stays_rebuild(self.db)
+        self.assertEqual([(row["started_at"], row["went_elsewhere"]) for row in stays(self.db, limit=None)], live)
 
     def test_place_is_named_at_the_sample_weighted_average_of_its_stays(self):
         def row(id_, east, count, radius=None):
@@ -1340,29 +1471,29 @@ class StoreTests(unittest.TestCase):
             return {"id": id_, "source": "phone", "lat": lat, "lon": lon, "place_id": None, "radius_m": radius,
                     "activity": None, "started_at": f"2026-09-2{id_}T10:00:00+00:00", "ended_at": f"2026-09-2{id_}T11:00:00+00:00",
                     "observed_minutes": 60, "point_count": count}
-        clusters, mapping = place_patterns(self.store, rows=[row(1, 0, 10), row(2, 60, 30)])
+        clusters, mapping = place_patterns(self.db, rows=[row(1, 0, 10), row(2, 60, 30)])
         self.assertEqual(len(clusters), 1)
         self.assertLess(metres_from(clusters[0], shifted(CAMPUS, 45, 0)), 1)
         self.assertEqual(clusters[0]["extent_m"], 45)
         self.assertNotIn("_members", clusters[0])
-        with patch("geologs.analysis.place_for_coordinate", return_value={"name": "University"}) as lookup:
-            resolve_place_patterns(self.store, (clusters, mapping))
+        with patch("geologs.services.places.place_for_coordinate", return_value={"name": "University"}) as lookup:
+            resolve_place_patterns(self.db, (clusters, mapping))
         lat, lon, radius = lookup.call_args.args[1:]
         self.assertEqual(round(lat, 6), round(clusters[0]["lat"], 6))
         self.assertEqual(radius, 45)
 
     def test_round_trip_names_where_it_stopped(self):
-        self.store.save_settings({"quick_stop_minutes": 0})  # stops this long would otherwise be quick stops
-        store = shifted(HOME, 4000, 0)
-        self.store.ingest(minute_fixes([still(HOME, 30), line(HOME, store, 8), still(store, 8), line(store, HOME, 8), still(HOME, 30)]))
-        with patch("geologs.analysis.place_for_coordinate", side_effect=campus_label):
-            day = day_summary(self.store, "2026-09-27", "UTC")
+        save_settings(self.db, {"quick_stop_minutes": 0})  # stops this long would otherwise be quick stops
+        db = shifted(HOME, 4000, 0)
+        ingest(self.db, minute_fixes([still(HOME, 30), line(HOME, db, 8), still(db, 8), line(db, HOME, 8), still(HOME, 30)]))
+        with patch("geologs.services.places.place_for_coordinate", side_effect=campus_label):
+            day = day_summary(self.db, "2026-09-27", "UTC")
         trip = day["trips"][0]
         self.assertTrue(trip["loop"])
         self.assertEqual((trip["turnaround"]["name"], trip["turnaround"]["stop_minutes"]), ("Taco Place", 8))
         self.assertAlmostEqual(trip["turnaround"]["distance_m"], 4000, delta=20)
-        with patch("geologs.analysis.place_for_coordinate", side_effect=campus_label):
-            brief = daily_brief(daily_overview(self.store, "2026-09-27", "UTC"))
+        with patch("geologs.services.places.place_for_coordinate", side_effect=campus_label):
+            brief = daily_brief(daily_overview(self.db, "2026-09-27", "UTC"))
         self.assertRegex(brief["timeline"][1], r"^13:[23]\d-13:5\d drove \d\.\d km round trip from .+ via Taco Place$")
 
     def test_short_fast_looking_move_within_a_place_is_walking(self):
@@ -1370,67 +1501,67 @@ class StoreTests(unittest.TestCase):
         self.assertEqual([move["mode"] for move in day["stays"][1]["internal_moves"]], ["walking"])
 
     def test_one_daily_summary_per_date_in_the_configured_timezone(self):
-        self.store.save_settings({"timezone": "UTC"})
-        self.store.ingest(minute_fixes([still(HOME, 30)], start=datetime(2026, 9, 27, 13, tzinfo=timezone.utc)))
-        daily_overview(self.store, "2026-09-27")
+        save_settings(self.db, {"timezone": "UTC"})
+        ingest(self.db, minute_fixes([still(HOME, 30)], start=datetime(2026, 9, 27, 13, tzinfo=timezone.utc)))
+        daily_overview(self.db, "2026-09-27")
         # An agent asking in another zone or for one source gets an answer, but no second record.
-        other_zone = daily_overview(self.store, "2026-09-27", "America/Chicago")
-        one_source = daily_overview(self.store, "2026-09-27", source="phone")
+        other_zone = daily_overview(self.db, "2026-09-27", "America/Chicago")
+        one_source = daily_overview(self.db, "2026-09-27", source="phone")
         self.assertEqual((other_zone["timezone"], one_source["source"]), ("America/Chicago", "phone"))
-        self.assertEqual([(row["date"], row["timezone"], row["source"]) for row in self.store.daily_overviews()],
+        self.assertEqual([(row["date"], row["timezone"], row["source"]) for row in daily_overviews(self.db, )],
                          [("2026-09-27", "UTC", None)])
-        self.assertEqual(self.store.db.execute("SELECT COUNT(*) AS n FROM daily_summaries").fetchone()["n"], 1)
+        self.assertEqual(self.db.conn.execute("SELECT COUNT(*) AS n FROM daily_summaries").fetchone()["n"], 1)
         # Changing the timezone drops summaries stored for the old one.
-        self.store.save_settings({"timezone": "America/Chicago"})
-        self.assertEqual(self.store.daily_overviews(), [])
-        daily_overview(self.store, "2026-09-27")
-        self.assertEqual([row["timezone"] for row in self.store.daily_overviews()], ["America/Chicago"])
+        save_settings(self.db, {"timezone": "America/Chicago"})
+        self.assertEqual(daily_overviews(self.db, ), [])
+        daily_overview(self.db, "2026-09-27")
+        self.assertEqual([row["timezone"] for row in daily_overviews(self.db, )], ["America/Chicago"])
 
     def test_upgrade_removes_duplicate_daily_summaries_and_keeps_reminders(self):
         path = Path(self.tmp.name) / "before-name-reminders.db"
-        archive = Store(path)
-        archive.save_settings({"timezone": "UTC"})
-        place = archive.save_place({"name": "Market", "lat": 41, "lon": -87.9})
-        reminder = archive.create_reminder({"text": "Buy salt", "place_id": place["id"]})
-        archive.ingest({"source": "phone", "timestamp": "2026-09-27T10:00:00Z", "lat": 41, "lon": -87.9})
-        point_id = archive.points()[0]["id"]
-        archive.db.execute("INSERT INTO events(reminder_id,point_id,triggered_at) VALUES (?,?,?)",
+        archive = open_database(path)
+        save_settings(archive, {"timezone": "UTC"})
+        place = save_place(archive, {"name": "Market", "lat": 41, "lon": -87.9})
+        reminder = create_reminder(archive, {"text": "Buy salt", "place_id": place["id"]})
+        ingest(archive, {"source": "phone", "timestamp": "2026-09-27T10:00:00Z", "lat": 41, "lon": -87.9})
+        point_id = archive.points.points()[0]["id"]
+        archive.conn.execute("INSERT INTO events(reminder_id,point_id,triggered_at) VALUES (?,?,?)",
                            (reminder["id"], point_id, "2026-09-27T10:00:00+00:00"))
         for zone, source in (("UTC", ""), ("America/Chicago", ""), ("UTC", "phone")):
-            archive.db.execute("""INSERT INTO daily_summaries(summary_date,timezone,source,watermark,points,distance_km,
+            archive.conn.execute("""INSERT INTO daily_summaries(summary_date,timezone,source,watermark,points,distance_km,
                 trip_count,place_count,reminder_count,summary,created_at,updated_at) VALUES (?,?,?,?,5,0,0,0,0,'{}',?,?)""",
                 ("2026-09-27", zone, source, "w", "2026-09-28T00:00:00+00:00", "2026-09-28T00:00:00+00:00"))
         # Recreate the pre-v13 reminders table, where place_id could not be empty.
-        archive.db.commit()
-        archive.db.execute("PRAGMA foreign_keys=OFF")
-        archive.db.execute("""CREATE TABLE reminders_legacy (id INTEGER PRIMARY KEY, text TEXT NOT NULL,
+        archive.commit()
+        archive.conn.execute("PRAGMA foreign_keys=OFF")
+        archive.conn.execute("""CREATE TABLE reminders_legacy (id INTEGER PRIMARY KEY, text TEXT NOT NULL,
             place_id INTEGER NOT NULL REFERENCES places(id), active INTEGER NOT NULL DEFAULT 1,
             repeat INTEGER NOT NULL DEFAULT 0, cooldown_minutes INTEGER NOT NULL DEFAULT 1440,
             created_at TEXT NOT NULL, last_triggered_at TEXT, cancelled_at TEXT, destination_name TEXT,
             destination_address TEXT, destination_category TEXT, destination_provider_place_id TEXT,
             FOREIGN KEY(place_id) REFERENCES places(id))""")
-        archive.db.execute("""INSERT INTO reminders_legacy SELECT id,text,place_id,active,repeat,cooldown_minutes,created_at,
+        archive.conn.execute("""INSERT INTO reminders_legacy SELECT id,text,place_id,active,repeat,cooldown_minutes,created_at,
             last_triggered_at,cancelled_at,destination_name,destination_address,destination_category,
             destination_provider_place_id FROM reminders""")
-        archive.db.execute("DROP TABLE reminders")
-        archive.db.execute("ALTER TABLE reminders_legacy RENAME TO reminders")
-        archive.db.execute("PRAGMA user_version=12")
-        archive.db.commit()
+        archive.conn.execute("DROP TABLE reminders")
+        archive.conn.execute("ALTER TABLE reminders_legacy RENAME TO reminders")
+        archive.conn.execute("PRAGMA user_version=12")
+        archive.commit()
         archive.close()
-        migrated = Store(path)
+        migrated = open_database(path)
         try:
-            self.assertEqual([(row["timezone"], row["source"]) for row in migrated.daily_overviews()], [("UTC", None)])
-            self.assertEqual(migrated.db.execute("SELECT COUNT(*) AS n FROM daily_summaries").fetchone()["n"], 1)
-            self.assertEqual([item["text"] for item in migrated.reminders()], ["Buy salt"])
-            self.assertEqual(len(migrated.events()), 1)
-            self.assertEqual(migrated.db.execute("PRAGMA foreign_key_check").fetchall(), [])
-            named = migrated.create_reminder({"text": "Get beans", "match_name": "Starbucks"})
+            self.assertEqual([(row["timezone"], row["source"]) for row in daily_overviews(migrated, )], [("UTC", None)])
+            self.assertEqual(migrated.conn.execute("SELECT COUNT(*) AS n FROM daily_summaries").fetchone()["n"], 1)
+            self.assertEqual([item["text"] for item in migrated.reminders.active()], ["Buy salt"])
+            self.assertEqual(len(migrated.reminders.events()), 1)
+            self.assertEqual(migrated.conn.execute("PRAGMA foreign_key_check").fetchall(), [])
+            named = create_reminder(migrated, {"text": "Get beans", "match_name": "Starbucks"})
             self.assertIsNone(named["place_id"])
         finally:
             migrated.close()
 
     def test_name_only_reminder_fires_after_a_short_stop_near_a_matching_place(self):
-        reminder = self.store.create_reminder({"text": "Get coffee beans", "match_name": "starbuks"})
+        reminder = create_reminder(self.db, {"text": "Get coffee beans", "match_name": "starbuks"})
         self.assertEqual((reminder["place_name"], reminder["match_name"], reminder["place_id"]), ("starbuks", "starbuks", None))
         cafe = shifted(HOME, 5000, 0)
         nearby = [{"name": "Chipotle Mexican Grill", "distance_m": 12}, {"name": "Starbucks Coffee", "distance_m": 40},
@@ -1438,29 +1569,29 @@ class StoreTests(unittest.TestCase):
         start = datetime.now(timezone.utc) - timedelta(minutes=20)
         fixes = minute_fixes([line(HOME, cafe, 10), still(cafe, 8)], start=start)
         events = []
-        with patch("geologs.analysis.nearby_places", return_value=nearby) as lookup:
+        with patch("geologs.services.places.nearby_places", return_value=nearby) as lookup:
             for fix in fixes[:12]:  # two minutes still: not yet
-                events += self.store.ingest(fix)["events"]
+                events += ingest(self.db, fix)["events"]
             self.assertEqual(events, [])
             for fix in fixes[12:]:
-                events += self.store.ingest(fix)["events"]
+                events += ingest(self.db, fix)["events"]
         self.assertEqual([(event["text"], event["place"]) for event in events], [("Get coffee beans", "Starbucks Coffee")])
         self.assertEqual(lookup.call_count, 1)  # looked up once per stop, not on every poll
-        self.assertEqual(self.store.reminders(), [])
-        history = self.store.reminder_history()[0]
+        self.assertEqual(self.db.reminders.active(), [])
+        history = self.db.reminders.history()[0]
         self.assertEqual((history["status"], history["place_name"]), ("triggered", "starbuks"))
-        self.assertEqual(self.store.events()[0]["place_name"], "starbuks")
+        self.assertEqual(self.db.reminders.events()[0]["place_name"], "starbuks")
 
     def test_name_only_reminder_ignores_other_places_and_old_data(self):
-        self.store.create_reminder({"text": "Get coffee beans", "match_name": "Starbucks"})
-        with patch("geologs.analysis.nearby_places", return_value=[{"name": "Dunkin'", "distance_m": 5}]):
+        create_reminder(self.db, {"text": "Get coffee beans", "match_name": "Starbucks"})
+        with patch("geologs.services.places.nearby_places", return_value=[{"name": "Dunkin'", "distance_m": 5}]):
             start = datetime.now(timezone.utc) - timedelta(minutes=10)
-            events = self.store.ingest(minute_fixes([still(HOME, 6)], start=start))["events"]
+            events = ingest(self.db, minute_fixes([still(HOME, 6)], start=start))["events"]
         self.assertEqual(events, [])
-        with patch("geologs.analysis.nearby_places", return_value=[{"name": "Starbucks", "distance_m": 5}]) as lookup:
-            old = self.store.ingest(minute_fixes([still(HOME, 6)], source="old", start=datetime(2026, 1, 1, tzinfo=timezone.utc)))
+        with patch("geologs.services.places.nearby_places", return_value=[{"name": "Starbucks", "distance_m": 5}]) as lookup:
+            old = ingest(self.db, minute_fixes([still(HOME, 6)], source="old", start=datetime(2026, 1, 1, tzinfo=timezone.utc)))
         self.assertEqual((old["events"], lookup.call_count), ([], 0))
-        self.assertEqual(len(self.store.reminders()), 1)
+        self.assertEqual(len(self.db.reminders.active()), 1)
 
     def test_place_name_matching_tolerates_spelling_and_punctuation(self):
         self.assertTrue(name_matches("starbucks", "Starbucks Coffee"))
@@ -1481,9 +1612,9 @@ class StoreTests(unittest.TestCase):
                                                "lat": 41.0008, "lon": -87.9}}]}
         responses = lambda path, params: travel if "accommodation" in params["categories"] else everyday
         with patch.dict(os.environ, {"GEOAPIFY_API_KEY": "test", "GEOLOGS_PHOTON_URL": "", "MAPBOX_ACCESS_TOKEN": ""}), \
-                patch("geologs.core.provider_request", side_effect=responses) as request:
-            places = nearby_places(self.store, 41, -87.9, 250)
-            again = nearby_places(self.store, 41.00005, -87.9, 250)
+                patch("geologs.integrations.places.provider_request", side_effect=responses) as request:
+            places = nearby_places(self.db, 41, -87.9, 250)
+            again = nearby_places(self.db, 41.00005, -87.9, 250)
         self.assertEqual([place["name"] for place in places], ["Chipotle", "Hampton Inn"])
         self.assertEqual(places[0]["distance_m"], 11)
         self.assertEqual(request.call_count, 2)
@@ -1492,21 +1623,21 @@ class StoreTests(unittest.TestCase):
 
     def test_corrected_name_replaces_the_providers_guess_everywhere(self):
         cafe = shifted(HOME, 5000, 0)
-        self.store.ingest(minute_fixes([still(HOME, 30), line(HOME, cafe, 8), still(cafe, 25), line(cafe, HOME, 8), still(HOME, 30)]))
+        ingest(self.db, minute_fixes([still(HOME, 30), line(HOME, cafe, 8), still(cafe, 25), line(cafe, HOME, 8), still(HOME, 30)]))
         wrong = {"name": "Chipotle Mexican Grill", "address": "1 Strip Mall", "category": "catering.restaurant",
                  "categories": ["catering.restaurant"], "provider_place_id": "chipotle"}
         home = {"name": "Home Street", "address": "", "category": "", "categories": [], "provider_place_id": "home"}
         resolve = lambda _store, lat, lon, _radius=None: wrong if lon > HOME[1] + .01 else home
-        with patch("geologs.analysis.place_for_coordinate", side_effect=resolve):
-            before = day_summary(self.store, "2026-09-27", "UTC")
+        with patch("geologs.services.places.place_for_coordinate", side_effect=resolve):
+            before = day_summary(self.db, "2026-09-27", "UTC")
             self.assertEqual(before["stays"][1]["display_name"], "Chipotle Mexican Grill")
             visit = before["stays"][1]
-            label = self.store.save_place_label({"name": "Starbucks", "lat": visit["lat"], "lon": visit["lon"],
+            label = save_label(self.db, {"name": "Starbucks", "lat": visit["lat"], "lon": visit["lon"],
                                                  "category": "catering.cafe", "provider_place_id": "starbucks"})
-            after = day_summary(self.store, "2026-09-27", "UTC")
-            overview = daily_overview(self.store, "2026-09-27", "UTC")
-            found = search_visits(self.store, "starbucks", timezone_name="UTC")
-            missed = search_visits(self.store, "chipotle", timezone_name="UTC")
+            after = day_summary(self.db, "2026-09-27", "UTC")
+            overview = daily_overview(self.db, "2026-09-27", "UTC")
+            found = search_visits(self.db, "starbucks", timezone_name="UTC")
+            missed = search_visits(self.db, "chipotle", timezone_name="UTC")
         self.assertEqual(label["radius_m"], 50)
         self.assertEqual(after["stays"][1]["display_name"], "Starbucks")
         corrected = next(place for place in after["visited_places"] if place["name"] == "Starbucks")
@@ -1515,57 +1646,57 @@ class StoreTests(unittest.TestCase):
         self.assertIn("Starbucks", [visit["place"] for visit in overview["visits"]])
         self.assertEqual((found["total_visits"], missed["total_visits"]), (1, 0))
         # No saved place was created.
-        self.assertEqual(self.store.places(), [])
+        self.assertEqual(self.db.places.saved(), [])
         # Renaming the same visit again replaces the correction; removing it restores the automatic name.
-        again = self.store.save_place_label({"name": "Starbucks Reserve", "lat": visit["lat"] + .0001, "lon": visit["lon"]})
-        self.assertEqual((again["id"], len(self.store.place_labels())), (label["id"], 1))
-        self.store.delete_place_label(label["id"])
-        with patch("geologs.analysis.place_for_coordinate", side_effect=resolve):
-            self.assertEqual(day_summary(self.store, "2026-09-27", "UTC")["stays"][1]["display_name"], "Chipotle Mexican Grill")
+        again = save_label(self.db, {"name": "Starbucks Reserve", "lat": visit["lat"] + .0001, "lon": visit["lon"]})
+        self.assertEqual((again["id"], len(self.db.places.labels())), (label["id"], 1))
+        delete_label(self.db, label["id"])
+        with patch("geologs.services.places.place_for_coordinate", side_effect=resolve):
+            self.assertEqual(day_summary(self.db, "2026-09-27", "UTC")["stays"][1]["display_name"], "Chipotle Mexican Grill")
 
     def test_visit_only_correction_leaves_other_visits_to_the_same_spot_alone(self):
         cafe = shifted(HOME, 5000, 0)
         for day in (26, 27):
-            self.store.ingest(minute_fixes([still(cafe, 30)], start=datetime(2026, 9, day, 15, tzinfo=timezone.utc)))
+            ingest(self.db, minute_fixes([still(cafe, 30)], start=datetime(2026, 9, day, 15, tzinfo=timezone.utc)))
         wrong = {"name": "Chipotle Mexican Grill", "address": "", "category": "catering.restaurant",
                  "categories": ["catering.restaurant"], "provider_place_id": "chipotle"}
-        names = lambda: {stay["started_at"][:10]: stay["place_name"] for stay in stays(self.store, limit=None)}
-        first = next(stay for stay in stays(self.store, limit=None) if stay["started_at"].startswith("2026-09-26"))
-        only_first = self.store.save_place_label({"name": "Starbucks", "lat": first["lat"], "lon": first["lon"], "source": first["source"],
+        names = lambda: {stay["started_at"][:10]: stay["place_name"] for stay in stays(self.db, limit=None)}
+        first = next(stay for stay in stays(self.db, limit=None) if stay["started_at"].startswith("2026-09-26"))
+        only_first = save_label(self.db, {"name": "Starbucks", "lat": first["lat"], "lon": first["lon"], "source": first["source"],
                                                   "started_at": first["started_at"], "ended_at": first["ended_at"]})
         self.assertEqual((only_first["source"], only_first["started_at"]), ("phone", first["started_at"]))
         self.assertEqual(names(), {"2026-09-26": "Starbucks", "2026-09-27": None})
-        with patch("geologs.analysis.place_for_coordinate", return_value=wrong):
-            self.assertEqual(day_summary(self.store, "2026-09-27", "UTC")["stays"][0]["display_name"], "Chipotle Mexican Grill")
-            self.assertEqual([visit["date"] for visit in search_visits(self.store, "starbucks", timezone_name="UTC")["visits"]], ["2026-09-26"])
+        with patch("geologs.services.places.place_for_coordinate", return_value=wrong):
+            self.assertEqual(day_summary(self.db, "2026-09-27", "UTC")["stays"][0]["display_name"], "Chipotle Mexican Grill")
+            self.assertEqual([visit["date"] for visit in search_visits(self.db, "starbucks", timezone_name="UTC")["visits"]], ["2026-09-26"])
         # An every-visit correction names both days; the visit-only one still wins for its own visit.
-        everywhere = self.store.save_place_label({"name": "Coffee Corner", "lat": first["lat"], "lon": first["lon"]})
+        everywhere = save_label(self.db, {"name": "Coffee Corner", "lat": first["lat"], "lon": first["lon"]})
         self.assertEqual(names(), {"2026-09-26": "Starbucks", "2026-09-27": "Coffee Corner"})
         # Correcting the same visit again replaces it; another visit gets its own.
-        again = self.store.save_place_label({"name": "Starbucks Reserve", "lat": first["lat"], "lon": first["lon"],
+        again = save_label(self.db, {"name": "Starbucks Reserve", "lat": first["lat"], "lon": first["lon"],
                                              "source": "phone", "started_at": first["started_at"], "ended_at": first["ended_at"]})
         self.assertEqual(again["id"], only_first["id"])
-        self.assertEqual(len(self.store.place_labels()), 2)
+        self.assertEqual(len(self.db.places.labels()), 2)
         self.assertNotEqual(everywhere["id"], only_first["id"])
         # Every-visit corrections only name the spot itself when there is no visit to match.
-        from geologs.core import place_for_coordinate
-        self.assertEqual(place_for_coordinate(self.store, first["lat"], first["lon"])["name"], "Coffee Corner")
+        from geologs.services.places import place_for_coordinate
+        self.assertEqual(place_for_coordinate(self.db, first["lat"], first["lon"])["name"], "Coffee Corner")
         with self.assertRaisesRegex(ValueError, "together"):
-            self.store.save_place_label({"name": "X", "lat": 41, "lon": -87.9, "started_at": first["started_at"]})
+            save_label(self.db, {"name": "X", "lat": 41, "lon": -87.9, "started_at": first["started_at"]})
 
     def test_rename_without_an_address_looks_up_the_spot_s_own_address(self):
-        from geologs.core import save_place_label
+        from geologs.services.saved_places import save_place_label
         house = {"name": "742 Evergreen Terrace", "place_name": "", "address": "742 Evergreen Terrace"}
         cafe_nearby = {"name": "Corner Cafe", "place_name": "Corner Cafe", "address": "10 Main St",
                        "place_lat": 41.0010, "place_lon": -87.9}
-        with patch("geologs.core.reverse_geocode", return_value=house):
-            friend = save_place_label(self.store, {"name": "Alex", "lat": 41, "lon": -87.9})
-        with patch("geologs.core.reverse_geocode", return_value=cafe_nearby):
-            other = save_place_label(self.store, {"name": "Sam", "lat": 41, "lon": -87.8})
-        with patch("geologs.core.reverse_geocode", side_effect=AssertionError("looked up a given address")):
-            typed = save_place_label(self.store, {"name": "Kim", "lat": 41, "lon": -87.7, "address": "1 Typed Rd"})
-        with patch("geologs.core.reverse_geocode", side_effect=ValueError("no places provider")):
-            offline = save_place_label(self.store, {"name": "Lee", "lat": 41, "lon": -87.6})
+        with patch("geologs.services.places.reverse_geocode", return_value=house):
+            friend = save_place_label(self.db, {"name": "Alex", "lat": 41, "lon": -87.9})
+        with patch("geologs.services.places.reverse_geocode", return_value=cafe_nearby):
+            other = save_place_label(self.db, {"name": "Sam", "lat": 41, "lon": -87.8})
+        with patch("geologs.services.places.reverse_geocode", side_effect=AssertionError("looked up a given address")):
+            typed = save_place_label(self.db, {"name": "Kim", "lat": 41, "lon": -87.7, "address": "1 Typed Rd"})
+        with patch("geologs.services.places.reverse_geocode", side_effect=ValueError("no places provider")):
+            offline = save_place_label(self.db, {"name": "Lee", "lat": 41, "lon": -87.6})
         self.assertEqual(friend["address"], "742 Evergreen Terrace")
         # A named place 110 m away is a neighbour, not this spot: its address is not borrowed.
         self.assertEqual(other["address"], "")
@@ -1576,30 +1707,30 @@ class StoreTests(unittest.TestCase):
         cafe = shifted(HOME, 5000, 0)
         start = datetime.now(timezone.utc) - timedelta(minutes=40)
         fixes = minute_fixes([still(cafe, 40)], start=start)
-        self.store.ingest(fixes[:30])
-        visit = stays(self.store, limit=None)[0]
-        self.store.save_place_label({"name": "Starbucks", "lat": visit["lat"], "lon": visit["lon"], "source": "phone",
+        ingest(self.db, fixes[:30])
+        visit = stays(self.db, limit=None)[0]
+        save_label(self.db, {"name": "Starbucks", "lat": visit["lat"], "lon": visit["lon"], "source": "phone",
                                      "started_at": visit["started_at"], "ended_at": visit["ended_at"]})
-        self.store.ingest(fixes[30:])  # still there, past the corrected window
-        with patch("geologs.core.place_for_coordinate", return_value={"name": "Chipotle", "address": "", "category": "",
+        ingest(self.db, fixes[30:])  # still there, past the corrected window
+        with patch("geologs.services.places.place_for_coordinate", return_value={"name": "Chipotle", "address": "", "category": "",
                                                                        "provider_place_id": ""}):
-            self.assertEqual(current_location(self.store)["place_name"], "Starbucks")
+            self.assertEqual(current_location(self.db)["place_name"], "Starbucks")
 
     def test_correction_inside_a_large_saved_place_wins_only_where_it_points(self):
-        self.store.save_place({"name": "Campus", "lat": CAMPUS[0], "lon": CAMPUS[1], "radius_m": 600})
-        self.store.save_place_label({"name": "Ottenheimer Library", "lat": CAMPUS[0], "lon": CAMPUS[1]})
+        save_place(self.db, {"name": "Campus", "lat": CAMPUS[0], "lon": CAMPUS[1], "radius_m": 600})
+        save_label(self.db, {"name": "Ottenheimer Library", "lat": CAMPUS[0], "lon": CAMPUS[1]})
         day, _found, _overview = self.campus_day([still(CAMPUS, 60), line(CAMPUS, shifted(LAB, 0, 3000), 8),
                                                    line(shifted(LAB, 0, 3000), LAB, 8), still(LAB, 40)])
         # The saved Campus is a zone: the lab is named by the provider, and keeps the zone.
         self.assertEqual([(stay["display_name"], stay["zone"]) for stay in day["stays"]],
                          [("Home Street", None), ("Ottenheimer Library", "Campus"), ("University", "Campus"), ("Home Street", None)])
         latest = {"source": "phone", "timestamp": datetime.now(timezone.utc).isoformat(), "lat": CAMPUS[0], "lon": CAMPUS[1]}
-        self.store.ingest(latest)
-        self.assertEqual(current_location(self.store)["place_name"], "Ottenheimer Library")
+        ingest(self.db, latest)
+        self.assertEqual(current_location(self.db)["place_name"], "Ottenheimer Library")
 
     def buildings_lookup(self, buildings):
         """A provider that knows named buildings at their own coordinates, and only addresses elsewhere."""
-        from geologs.core import metres
+        from geologs.domain.geo import metres
         def lookup(_store, lat, lon, _radius=None):
             name, spot = min(buildings.items(), key=lambda item: metres(lat, lon, *item[1]))
             return {"name": name, "named": True, "address": f"{name} address", "category": "", "categories": [],
@@ -1607,16 +1738,16 @@ class StoreTests(unittest.TestCase):
         return lookup
 
     def test_saved_place_is_a_zone_holding_the_buildings_visited_inside_it(self):
-        university = self.store.save_place({"name": "University", "lat": CAMPUS[0], "lon": CAMPUS[1], "radius_m": 600})
-        self.store.ingest(minute_fixes([still(HOME, 30), line(HOME, CAMPUS, 12), still(CAMPUS, 90), line(CAMPUS, LAB, 7),
+        university = save_place(self.db, {"name": "University", "lat": CAMPUS[0], "lon": CAMPUS[1], "radius_m": 600})
+        ingest(self.db, minute_fixes([still(HOME, 30), line(HOME, CAMPUS, 12), still(CAMPUS, 90), line(CAMPUS, LAB, 7),
                                         still(LAB, 80), line(LAB, HOME, 12), still(HOME, 30)]))
         lookup = self.buildings_lookup({"Engineering Hall": shifted(CAMPUS, 10, 5), "Library": shifted(LAB, -8, 0),
                                         "Home Street": HOME})
-        with patch("geologs.analysis.place_for_coordinate", side_effect=lookup):
-            day = day_summary(self.store, "2026-09-27", "UTC")
-            overview = daily_overview(self.store, "2026-09-27", "UTC")
-            places = place_overview(self.store)
-            found = search_visits(self.store, "university", timezone_name="UTC")
+        with patch("geologs.services.places.place_for_coordinate", side_effect=lookup):
+            day = day_summary(self.db, "2026-09-27", "UTC")
+            overview = daily_overview(self.db, "2026-09-27", "UTC")
+            places = place_overview(self.db)
+            found = search_visits(self.db, "university", timezone_name="UTC")
         self.assertEqual([(stay["display_name"], stay["zone"]) for stay in day["stays"]],
                          [("Home Street", None), ("Engineering Hall", "University"), ("Library", "University"), ("Home Street", None)])
         self.assertEqual([trip["mode"] for trip in day["trips"] if trip["from_name"] == "Engineering Hall"], ["walking"])
@@ -1633,49 +1764,49 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(sorted(place["name"] for place in found["places"]), ["Engineering Hall", "Library"])
         self.assertEqual({visit["zone"] for visit in found["visits"]}, {"University"})
         # One visit to the zone, walking between buildings included.
-        self.assertEqual(self.store.place_visits(university["id"])["total_observed_minutes"], 177)
+        self.assertEqual(place_visits(self.db, university["id"])["total_observed_minutes"], 177)
 
     def test_a_named_place_down_the_street_does_not_name_a_spot_inside_a_zone(self):
         house = shifted(HOME, 4000, 0)
-        self.store.save_place({"name": "Mom's house", "lat": house[0], "lon": house[1], "radius_m": 150})
-        self.store.ingest(minute_fixes([still(HOME, 30), line(HOME, house, 10), still(house, 60), line(house, HOME, 10), still(HOME, 30)]))
+        save_place(self.db, {"name": "Mom's house", "lat": house[0], "lon": house[1], "radius_m": 150})
+        ingest(self.db, minute_fixes([still(HOME, 30), line(HOME, house, 10), still(house, 60), line(house, HOME, 10), still(HOME, 30)]))
         # The provider's nearest named place is a shop 120 m away: fine for a stranger's
         # street, wrong inside a zone you saved, so the zone names it.
         lookup = self.buildings_lookup({"Corner Shop": shifted(house, 120, 0), "Home Street": HOME})
-        with patch("geologs.analysis.place_for_coordinate", side_effect=lookup):
-            day = day_summary(self.store, "2026-09-27", "UTC")
+        with patch("geologs.services.places.place_for_coordinate", side_effect=lookup):
+            day = day_summary(self.db, "2026-09-27", "UTC")
         self.assertEqual([stay["display_name"] for stay in day["stays"]], ["Home Street", "Mom's house", "Home Street"])
 
     def test_home_names_everything_inside_it(self):
-        self.store.save_place({"name": "Home", "lat": HOME[0], "lon": HOME[1]})
-        self.store.ingest(minute_fixes([still(HOME, 60)]))
+        save_place(self.db, {"name": "Home", "lat": HOME[0], "lon": HOME[1]})
+        ingest(self.db, minute_fixes([still(HOME, 60)]))
         lookup = self.buildings_lookup({"Neighbour's Bakery": shifted(HOME, 15, 0)})
-        with patch("geologs.analysis.place_for_coordinate", side_effect=lookup):
-            day = day_summary(self.store, "2026-09-27", "UTC")
+        with patch("geologs.services.places.place_for_coordinate", side_effect=lookup):
+            day = day_summary(self.db, "2026-09-27", "UTC")
         self.assertEqual([(stay["display_name"], stay["zone"]) for stay in day["stays"]], [("Home", "Home")])
         latest = {"source": "phone", "timestamp": datetime.now(timezone.utc).isoformat(), "lat": HOME[0], "lon": HOME[1]}
-        self.store.ingest(latest)
-        current = current_location(self.store)
+        ingest(self.db, latest)
+        current = current_location(self.db)
         self.assertEqual((current["place_name"], current["zone"]), ("Home", "Home"))
 
     def test_deleting_a_saved_place_keeps_reminders_that_use_it(self):
-        unused = self.store.save_place({"name": "Gym", "lat": 41.1, "lon": -87.9})
-        market = self.store.save_place({"name": "Market", "lat": 41, "lon": -87.9})
-        self.store.create_reminder({"text": "Buy salt", "place_id": market["id"]})
-        self.store.delete_place(unused["id"])
-        self.store.delete_place(market["id"])
-        self.assertEqual(self.store.places(), [])
-        self.assertIsNone(self.store.db.execute("SELECT 1 FROM places WHERE id=?", (unused["id"],)).fetchone())
+        unused = save_place(self.db, {"name": "Gym", "lat": 41.1, "lon": -87.9})
+        market = save_place(self.db, {"name": "Market", "lat": 41, "lon": -87.9})
+        create_reminder(self.db, {"text": "Buy salt", "place_id": market["id"]})
+        delete_place(self.db, unused["id"])
+        delete_place(self.db, market["id"])
+        self.assertEqual(self.db.places.saved(), [])
+        self.assertIsNone(self.db.conn.execute("SELECT 1 FROM places WHERE id=?", (unused["id"],)).fetchone())
         # The reminder still knows where to fire and what to call it.
-        self.assertEqual([(item["text"], item["place_name"]) for item in self.store.reminders()], [("Buy salt", "Market")])
+        self.assertEqual([(item["text"], item["place_name"]) for item in self.db.reminders.active()], [("Buy salt", "Market")])
         now = datetime.now(timezone.utc)
-        self.store.ingest({"source": "phone", "timestamp": (now - timedelta(minutes=5)).isoformat(), "lat": 41.01, "lon": -87.9})
-        event = self.store.ingest({"source": "phone", "timestamp": now.isoformat(), "lat": 41, "lon": -87.9})["events"][0]
+        ingest(self.db, {"source": "phone", "timestamp": (now - timedelta(minutes=5)).isoformat(), "lat": 41.01, "lon": -87.9})
+        event = ingest(self.db, {"source": "phone", "timestamp": now.isoformat(), "lat": 41, "lon": -87.9})["events"][0]
         self.assertEqual(event["place"], "Market")
         # The name is free to use again.
-        self.assertEqual(self.store.save_place({"name": "Market", "lat": 41.2, "lon": -87.9})["name"], "Market")
+        self.assertEqual(save_place(self.db, {"name": "Market", "lat": 41.2, "lon": -87.9})["name"], "Market")
         with self.assertRaisesRegex(ValueError, "saved place not found"):
-            self.store.delete_place(unused["id"])
+            delete_place(self.db, unused["id"])
 
     def test_unnamed_places_on_one_street_are_one_place_despite_gps_drift(self):
         house, drifted = shifted(HOME, 4000, 0), shifted(HOME, 4140, 30)        # 143 m apart
@@ -1689,9 +1820,9 @@ class StoreTests(unittest.TestCase):
             address = labels[spot] if named else labels[spot] + ", Little Rock, Arkansas 72205, United States"
             return {"name": address, "named": named, "address": address, "category": "", "categories": [], "provider_place_id": ""}
         for day, spot, hours in ((20, house, 8), (21, drifted, 5), (22, house, 8), (23, far_down, 2), (24, cross_street, 2), (25, cafe, 1)):
-            self.store.ingest(minute_fixes([still(spot, hours * 60)], start=datetime(2026, 9, day, 1, tzinfo=timezone.utc)))
-        with patch("geologs.analysis.place_for_coordinate", side_effect=resolve):
-            places = {place["name"].split(",")[0]: place["visits"] for place in visited_places(self.store)}
+            ingest(self.db, minute_fixes([still(spot, hours * 60)], start=datetime(2026, 9, day, 1, tzinfo=timezone.utc)))
+        with patch("geologs.services.places.place_for_coordinate", side_effect=resolve):
+            places = {place["name"].split(",")[0]: place["visits"] for place in visited_places(self.db)}
         # The drifted stay joins the place where most time was spent; the rest stay apart.
         self.assertEqual(places, {"9004 Longacre Drive": 3, "9600 Longacre Drive": 1, "1200 Pine Street": 1, "Corner Cafe": 1})
         self.assertEqual(street_key("9004 Longacre Drive, Little Rock, Arkansas 72205, United States"), "longacre drive|little rock")
@@ -1702,52 +1833,52 @@ class StoreTests(unittest.TestCase):
         house, drifted = shifted(HOME, 4000, 0), shifted(HOME, 4170, 0)             # 170 m: outside Home's circle
         neighbour, elsewhere = shifted(HOME, 3850, 0), shifted(HOME, 4000, 400)
         street = ", Little Rock, Arkansas 72205, United States"
-        home = self.store.save_place({"name": "Home", "lat": house[0], "lon": house[1], "radius_m": 150, "address": "9004 Longacre Drive" + street})
-        friend = self.store.save_place({"name": "Sam's", "lat": neighbour[0], "lon": neighbour[1], "radius_m": 50, "address": "8950 Longacre Drive" + street})
+        home = save_place(self.db, {"name": "Home", "lat": house[0], "lon": house[1], "radius_m": 150, "address": "9004 Longacre Drive" + street})
+        friend = save_place(self.db, {"name": "Sam's", "lat": neighbour[0], "lon": neighbour[1], "radius_m": 50, "address": "8950 Longacre Drive" + street})
         def resolve(_store, lat, lon, _radius=None):
             text = ("1300 Pine Street" if lat > house[0] + .002 else "9109 Longacre Drive") + street
             return {"name": text, "named": False, "address": text, "category": "", "categories": [], "provider_place_id": ""}
         for day, spot in ((20, house), (21, drifted), (22, house), (23, neighbour), (24, elsewhere)):
-            self.store.ingest(minute_fixes([still(spot, 120)], start=datetime(2026, 9, day, 1, tzinfo=timezone.utc)))
-        with patch("geologs.analysis.place_for_coordinate", side_effect=resolve):
-            overview = place_overview(self.store)
+            ingest(self.db, minute_fixes([still(spot, 120)], start=datetime(2026, 9, day, 1, tzinfo=timezone.utc)))
+        with patch("geologs.services.places.place_for_coordinate", side_effect=resolve):
+            overview = place_overview(self.db)
         self.assertEqual(overview["saved"][str(home["id"])]["visits"], 3)
         self.assertEqual(overview["saved"][str(friend["id"])]["visits"], 1)
         self.assertEqual(sorted(place["name"].split(",")[0] for place in overview["visited"]), ["1300 Pine Street", "Sam's"])
 
     def test_a_day_with_nothing_recorded_is_summarized_but_not_stored(self):
-        self.store.save_settings({"timezone": "UTC"})
-        self.store.ingest(minute_fixes([still(HOME, 30)], start=datetime(2026, 9, 27, 13, tzinfo=timezone.utc)))
-        empty = daily_overview(self.store, "2026-09-28")
+        save_settings(self.db, {"timezone": "UTC"})
+        ingest(self.db, minute_fixes([still(HOME, 30)], start=datetime(2026, 9, 27, 13, tzinfo=timezone.utc)))
+        empty = daily_overview(self.db, "2026-09-28")
         self.assertEqual((empty["totals"]["raw_fixes"], daily_brief(empty)["summary"]), (0, "No location recorded."))
         with self.assertRaisesRegex(ValueError, "no summary is stored for 2026-09-28"):
-            stored_daily_record(self.store, "2026-09-28")
-        daily_overview(self.store, "2026-09-27")
-        self.assertEqual([row["date"] for row in self.store.daily_overviews()], ["2026-09-27"])
+            stored_daily_record(self.db, "2026-09-28")
+        daily_overview(self.db, "2026-09-27")
+        self.assertEqual([row["date"] for row in daily_overviews(self.db, )], ["2026-09-27"])
 
     def test_stored_daily_record_shows_what_is_stored_and_when_it_is_out_of_date(self):
-        self.store.save_settings({"timezone": "UTC"})
-        self.store.ingest(minute_fixes([still(HOME, 30)], start=datetime(2026, 9, 27, 13, tzinfo=timezone.utc)))
+        save_settings(self.db, {"timezone": "UTC"})
+        ingest(self.db, minute_fixes([still(HOME, 30)], start=datetime(2026, 9, 27, 13, tzinfo=timezone.utc)))
         with self.assertRaisesRegex(ValueError, "no summary is stored for 2026-09-27"):
-            stored_daily_record(self.store, "2026-09-27")
-        built = daily_overview(self.store, "2026-09-27")
-        record = stored_daily_record(self.store, "2026-09-27")
+            stored_daily_record(self.db, "2026-09-27")
+        built = daily_overview(self.db, "2026-09-27")
+        record = stored_daily_record(self.db, "2026-09-27")
         self.assertEqual((record["date"], record["timezone"], record["stale"]), ("2026-09-27", "UTC", False))
         self.assertEqual(record["summary"], built)
-        self.store.ingest({"source": "phone", "timestamp": "2026-09-27T18:00:00Z", "lat": HOME[0], "lon": HOME[1]})
-        self.assertTrue(stored_daily_record(self.store, "2026-09-27")["stale"])
-        daily_overview(self.store, "2026-09-27")
-        self.assertFalse(stored_daily_record(self.store, "2026-09-27")["stale"])
+        ingest(self.db, {"source": "phone", "timestamp": "2026-09-27T18:00:00Z", "lat": HOME[0], "lon": HOME[1]})
+        self.assertTrue(stored_daily_record(self.db, "2026-09-27")["stale"])
+        daily_overview(self.db, "2026-09-27")
+        self.assertFalse(stored_daily_record(self.db, "2026-09-27")["stale"])
 
     def test_early_home_return_is_linked_to_both_daily_summaries(self):
         late = shifted(HOME, 3000, 0)
-        self.store.save_place({"name": "Home", "lat": HOME[0], "lon": HOME[1], "radius_m": 150})
-        self.store.save_place({"name": "Late Cafe", "lat": late[0], "lon": late[1], "radius_m": 150})
+        save_place(self.db, {"name": "Home", "lat": HOME[0], "lon": HOME[1], "radius_m": 150})
+        save_place(self.db, {"name": "Late Cafe", "lat": late[0], "lon": late[1], "radius_m": 150})
         start = datetime(2026, 9, 27, 21, 30, tzinfo=timezone.utc)
-        self.store.ingest(minute_fixes([still(HOME, 30), line(HOME, late, 10), still(late, 190),
+        ingest(self.db, minute_fixes([still(HOME, 30), line(HOME, late, 10), still(late, 190),
                                         line(late, HOME, 10), still(HOME, 45)], start=start))
-        evening = daily_overview(self.store, "2026-09-27", "UTC")
-        morning = daily_overview(self.store, "2026-09-28", "UTC")
+        evening = daily_overview(self.db, "2026-09-27", "UTC")
+        morning = daily_overview(self.db, "2026-09-28", "UTC")
         self.assertEqual((evening["home_return"]["timing"], morning["home_return"]["timing"]),
                          ("next_day", "after_midnight"))
         self.assertEqual(evening["home_return"]["returned_at"], morning["home_return"]["returned_at"])
@@ -1759,33 +1890,33 @@ class StoreTests(unittest.TestCase):
 
     def test_prior_day_summary_becomes_stale_when_an_early_home_return_arrives(self):
         late = shifted(HOME, 3000, 0)
-        self.store.save_place({"name": "Home", "lat": HOME[0], "lon": HOME[1], "radius_m": 150})
-        self.store.save_place({"name": "Late Cafe", "lat": late[0], "lon": late[1], "radius_m": 150})
-        self.store.ingest(minute_fixes([still(HOME, 30), line(HOME, late, 10), still(late, 130)],
+        save_place(self.db, {"name": "Home", "lat": HOME[0], "lon": HOME[1], "radius_m": 150})
+        save_place(self.db, {"name": "Late Cafe", "lat": late[0], "lon": late[1], "radius_m": 150})
+        ingest(self.db, minute_fixes([still(HOME, 30), line(HOME, late, 10), still(late, 130)],
                                        start=datetime(2026, 9, 27, 21, tzinfo=timezone.utc)))
-        self.assertIsNone(daily_overview(self.store, "2026-09-27", "UTC")["home_return"])
-        self.store.ingest(minute_fixes([line(late, HOME, 10), still(HOME, 30)],
+        self.assertIsNone(daily_overview(self.db, "2026-09-27", "UTC")["home_return"])
+        ingest(self.db, minute_fixes([line(late, HOME, 10), still(HOME, 30)],
                                        start=datetime(2026, 9, 28, 0, 10, tzinfo=timezone.utc)))
-        self.assertTrue(stored_daily_record(self.store, "2026-09-27")["stale"])
-        refreshed = daily_overview(self.store, "2026-09-27", "UTC")
+        self.assertTrue(stored_daily_record(self.db, "2026-09-27")["stale"])
+        refreshed = daily_overview(self.db, "2026-09-27", "UTC")
         self.assertEqual(refreshed["home_return"]["timing"], "next_day")
-        self.assertFalse(stored_daily_record(self.store, "2026-09-27")["stale"])
+        self.assertFalse(stored_daily_record(self.db, "2026-09-27")["stale"])
 
     def test_daily_brief_states_only_what_happened_in_plain_text(self):
-        self.store.save_settings({"timezone": "America/Chicago"})
-        self.store.save_place({"name": "Home", "lat": HOME[0], "lon": HOME[1]})
-        lake = self.store.save_place({"name": "Lake Example", "lat": LAKE[0], "lon": LAKE[1], "radius_m": 600})
-        self.store.create_reminder({"text": "Stretch first", "place_id": lake["id"]})
-        self.store.create_reminder({"text": "Buy sunscreen", "match_name": "Walgreens"})
-        self.store.db.execute("UPDATE reminders SET created_at='2026-09-27T12:15:00+00:00'")
+        save_settings(self.db, {"timezone": "America/Chicago"})
+        save_place(self.db, {"name": "Home", "lat": HOME[0], "lon": HOME[1]})
+        lake = save_place(self.db, {"name": "Lake Example", "lat": LAKE[0], "lon": LAKE[1], "radius_m": 600})
+        create_reminder(self.db, {"text": "Stretch first", "place_id": lake["id"]})
+        create_reminder(self.db, {"text": "Buy sunscreen", "match_name": "Walgreens"})
+        self.db.conn.execute("UPDATE reminders SET created_at='2026-09-27T12:15:00+00:00'")
         for fix in lake_run_day():
-            self.store.ingest(fix)
+            ingest(self.db, fix)
         # Reminders fire only on live fixes; record the lake arrival as if it had.
-        point = self.store.db.execute("SELECT id,timestamp FROM points ORDER BY ABS(lat-?)+ABS(lon-?) LIMIT 1", LAKE).fetchone()
-        self.store.db.execute("INSERT INTO events(reminder_id,point_id,triggered_at) VALUES (1,?,?)", (point["id"], point["timestamp"]))
-        self.store.db.commit()
-        overview = daily_overview(self.store, "2026-09-27")
-        brief = stored_daily_record(self.store, "2026-09-27")["brief"]
+        point = self.db.conn.execute("SELECT id,timestamp FROM points ORDER BY ABS(lat-?)+ABS(lon-?) LIMIT 1", LAKE).fetchone()
+        self.db.conn.execute("INSERT INTO events(reminder_id,point_id,triggered_at) VALUES (1,?,?)", (point["id"], point["timestamp"]))
+        self.db.commit()
+        overview = daily_overview(self.db, "2026-09-27")
+        brief = stored_daily_record(self.db, "2026-09-27")["brief"]
         self.assertEqual(brief, daily_brief(overview))
         self.assertEqual(list(brief), ["date", "summary", "timeline", "places", "reminders_set", "reminders_triggered"])
         self.assertEqual(brief["date"], "Sunday, 2026-09-27 (America/Chicago)")
@@ -1806,71 +1937,71 @@ class StoreTests(unittest.TestCase):
         self.assertNotRegex(text, r"\d\d:\d\d:\d\d")
         self.assertLess(len(text), len(json.dumps(overview)) / 4)
 
-        briefs = daily_briefs(self.store, "2026-09-27", "2026-09-28")
+        briefs = daily_briefs(self.db, "2026-09-27", "2026-09-28")
         self.assertEqual(briefs, [brief, {"date": "Monday, 2026-09-28 (America/Chicago)", "summary": "No location recorded."}])
-        called = dispatch(self.store, {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        called = dispatch(self.db, {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                                        "params": {"name": "get_daily_brief", "arguments": {"date": "2026-09-27"}}})
         self.assertEqual(called["result"]["structuredContent"]["result"], [brief])
         with self.assertRaisesRegex(ValueError, "end_date must be on or up to 30 days after date"):
-            daily_briefs(self.store, "2026-09-27", "2026-09-26")
+            daily_briefs(self.db, "2026-09-27", "2026-09-26")
         with self.assertRaisesRegex(ValueError, "end_date must be on or up to 30 days after date"):
-            daily_briefs(self.store, "2026-09-01", "2026-10-02")
+            daily_briefs(self.db, "2026-09-01", "2026-10-02")
 
     def test_travel_mode_corrections_override_the_speed_guess(self):
         office = shifted(HOME, 2000, 0)
         # Crawling 2 km in 25 minutes reads as walking at these speeds.
-        self.store.ingest(minute_fixes([still(HOME, 30), line(HOME, office, 25), still(office, 30)]))
-        day = day_summary(self.store, "2026-09-27", "UTC")
+        ingest(self.db, minute_fixes([still(HOME, 30), line(HOME, office, 25), still(office, 30)]))
+        day = day_summary(self.db, "2026-09-27", "UTC")
         trip = day["trips"][0]
         self.assertEqual(trip["mode"], "walking")
         # Saved a couple of minutes off, as if the trip had been recalculated since.
-        self.store.save_mode_override({"source": trip["source"], "target": "trip", "mode": "driving",
+        save_mode_override(self.db, {"source": trip["source"], "target": "trip", "mode": "driving",
                                        "started_at": (datetime.fromisoformat(trip["start"]) + timedelta(minutes=2)).isoformat(),
                                        "ended_at": (datetime.fromisoformat(trip["end"]) + timedelta(minutes=1)).isoformat()})
-        corrected = day_summary(self.store, "2026-09-27", "UTC")
+        corrected = day_summary(self.db, "2026-09-27", "UTC")
         self.assertEqual((corrected["trips"][0]["mode"], corrected["trips"][0]["detected_mode"]), ("driving", "walking"))
         self.assertEqual((corrected["activity_totals"]["driving"]["count"], corrected["activity_totals"]["walking"]["count"]), (1, 0))
-        self.assertTrue(daily_overview(self.store, "2026-09-27", "UTC")["trips"][0]["mode_corrected"])
-        self.assertEqual([item["mode"] for item in self.store.trips("2026-09-27T00:00:00Z", "2026-09-28T00:00:00Z")], ["driving"])
+        self.assertTrue(daily_overview(self.db, "2026-09-27", "UTC")["trips"][0]["mode_corrected"])
+        self.assertEqual([item["mode"] for item in anchored_trips(self.db, "2026-09-27T00:00:00Z", "2026-09-28T00:00:00Z")], ["driving"])
         # Setting it again replaces the correction; "auto" restores the guess.
-        self.store.save_mode_override({"source": trip["source"], "mode": "transit", "started_at": trip["start"], "ended_at": trip["end"]})
-        self.assertEqual(len(self.store.mode_overrides()), 1)
-        self.assertEqual(day_summary(self.store, "2026-09-27", "UTC")["activity_totals"]["transit"]["count"], 1)
-        self.store.save_mode_override({"source": trip["source"], "mode": "auto", "started_at": trip["start"], "ended_at": trip["end"]})
-        self.assertEqual((self.store.mode_overrides(), day_summary(self.store, "2026-09-27", "UTC")["trips"][0]["mode"]), ([], "walking"))
+        save_mode_override(self.db, {"source": trip["source"], "mode": "transit", "started_at": trip["start"], "ended_at": trip["end"]})
+        self.assertEqual(len(self.db.corrections.mode_overrides()), 1)
+        self.assertEqual(day_summary(self.db, "2026-09-27", "UTC")["activity_totals"]["transit"]["count"], 1)
+        save_mode_override(self.db, {"source": trip["source"], "mode": "auto", "started_at": trip["start"], "ended_at": trip["end"]})
+        self.assertEqual((self.db.corrections.mode_overrides(), day_summary(self.db, "2026-09-27", "UTC")["trips"][0]["mode"]), ([], "walking"))
         with self.assertRaisesRegex(ValueError, "mode must be one of"):
-            self.store.save_mode_override({"source": "phone", "mode": "skateboard", "started_at": trip["start"], "ended_at": trip["end"]})
+            save_mode_override(self.db, {"source": "phone", "mode": "skateboard", "started_at": trip["start"], "ended_at": trip["end"]})
         with self.assertRaisesRegex(ValueError, "target must be"):
-            self.store.save_mode_override({"source": "phone", "target": "place", "mode": "driving", "started_at": trip["start"], "ended_at": trip["end"]})
+            save_mode_override(self.db, {"source": "phone", "target": "place", "mode": "driving", "started_at": trip["start"], "ended_at": trip["end"]})
 
     def test_corrected_ride_between_drives_is_not_turned_back_into_driving(self):
         lot_a, lot_b = shifted(CAMPUS, -200, -300), shifted(CAMPUS, 900, 500)
         middle = [line(CAMPUS, lot_a, 1), still(lot_a, 90), line(lot_a, lot_b, 4), still(lot_b, 80)]
         fixes = minute_fixes([still(HOME, 30), line(HOME, CAMPUS, 12), *middle, line(lot_b, HOME, 12), still(HOME, 30)])
-        self.store.ingest(fixes)
-        with patch("geologs.analysis.place_for_coordinate", return_value={"name": "Street"}):
-            move = [trip for trip in anchored_trips_for_day(self.store) if 1 < trip["distance_km"] < 2][0]
-            self.store.save_mode_override({"source": move["source"], "mode": "cycling", "started_at": move["start"], "ended_at": move["end"]})
-            day = day_summary(self.store, "2026-09-27", "UTC")
+        ingest(self.db, fixes)
+        with patch("geologs.services.places.place_for_coordinate", return_value={"name": "Street"}):
+            move = [trip for trip in anchored_trips_for_day(self.db) if 1 < trip["distance_km"] < 2][0]
+            save_mode_override(self.db, {"source": move["source"], "mode": "cycling", "started_at": move["start"], "ended_at": move["end"]})
+            day = day_summary(self.db, "2026-09-27", "UTC")
         modes = [trip["mode"] for trip in day["trips"]] + [item["mode"] for stay in day["stays"] for item in stay["internal_moves"]]
         self.assertIn("cycling", modes)
 
     def test_area_stay_activity_can_be_corrected(self):
-        self.store.ingest(lake_run_day())
-        lake = next(row for row in stays(self.store, limit=None) if row["kind"] == "area")
-        self.store.save_mode_override({"source": lake["source"], "target": "stay", "mode": "cycling",
+        ingest(self.db, lake_run_day())
+        lake = next(row for row in stays(self.db, limit=None) if row["kind"] == "area")
+        save_mode_override(self.db, {"source": lake["source"], "target": "stay", "mode": "cycling",
                                        "started_at": lake["started_at"], "ended_at": lake["ended_at"]})
-        corrected = next(row for row in stays(self.store, limit=None) if row["kind"] == "area")
+        corrected = next(row for row in stays(self.db, limit=None) if row["kind"] == "area")
         self.assertEqual((corrected["activity"], corrected["detected_activity"], corrected["activity_corrected"]), ("cycling", "running", True))
-        totals = day_summary(self.store, "2026-09-27", "UTC")["activity_totals"]
+        totals = day_summary(self.db, "2026-09-27", "UTC")["activity_totals"]
         self.assertEqual((totals["cycling"]["count"], totals["running"]["count"]), (1, 0))
 
     def test_parked_out_and_back_run_is_one_visit(self):
         trail = shifted(HOME, 15000, 0)
         turn = shifted(trail, 0, 3000)
-        self.store.ingest(minute_fixes([still(HOME, 30), line(HOME, trail, 15), line(trail, turn, 20),
+        ingest(self.db, minute_fixes([still(HOME, 30), line(HOME, trail, 15), line(trail, turn, 20),
                                         line(turn, trail, 20), line(trail, HOME, 15), still(HOME, 30)]))
-        area = [row for row in stays(self.store, limit=None) if row["kind"] == "area"]
+        area = [row for row in stays(self.db, limit=None) if row["kind"] == "area"]
         self.assertEqual(len(area), 1)
         self.assertEqual(area[0]["activity"], "running")
         self.assertGreaterEqual(area[0]["observed_minutes"], 38)
@@ -1887,7 +2018,7 @@ class StoreTests(unittest.TestCase):
 
     def test_activity_speeds_from_settings(self):
         minute = 60
-        brisk = {**self.store.settings(), "walking_max_kmh": 10}
+        brisk = {**self.db.settings.get(), "walking_max_kmh": 10}
         self.assertEqual(classify_motion([(150, minute, None)] * 10, brisk)["mode"], "walking")
         self.assertEqual(mode_for(2.5, None, brisk), "walking")
         # A slow drive through traffic still counts once stretches reach the driving speed.
@@ -1896,106 +2027,106 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(classify_motion(slow_traffic, {**brisk, "driving_min_kmh": 50})["mode"], "cycling")
 
     def test_changing_activity_speeds_recalculates_stored_stays(self):
-        self.store.ingest(lake_run_day())
-        area = lambda: [stay for stay in stays(self.store, limit=None) if stay["kind"] == "area"]
+        ingest(self.db, lake_run_day())
+        area = lambda: [stay for stay in stays(self.db, limit=None) if stay["kind"] == "area"]
         self.assertEqual(area()[0]["activity"], "running")
-        before = daily_overview(self.store, "2026-09-27", "UTC")
-        self.store.save_settings({"walking_max_kmh": 10})
+        before = daily_overview(self.db, "2026-09-27", "UTC")
+        save_settings(self.db, {"walking_max_kmh": 10})
         self.assertEqual(area()[0]["activity"], "walking")
-        record = stored_daily_record(self.store, "2026-09-27")
+        record = stored_daily_record(self.db, "2026-09-27")
         self.assertTrue(record["stale"])
-        self.assertNotEqual(daily_overview(self.store, "2026-09-27", "UTC")["activity_totals"], before["activity_totals"])
+        self.assertNotEqual(daily_overview(self.db, "2026-09-27", "UTC")["activity_totals"], before["activity_totals"])
 
     def test_minimum_stay_length_from_settings(self):
-        from geologs.core import metres
-        self.store.save_settings({"quick_stop_minutes": 0})
+        from geologs.domain.geo import metres
+        save_settings(self.db, {"quick_stop_minutes": 0})
         cafe = shifted(HOME, 3000, 0)
-        self.store.ingest(minute_fixes([still(HOME, 30), line(HOME, cafe, 6), still(cafe, 9),
+        ingest(self.db, minute_fixes([still(HOME, 30), line(HOME, cafe, 6), still(cafe, 9),
                                         line(cafe, HOME, 6), still(HOME, 30)]))
-        near_cafe = lambda: [stay for stay in stays(self.store, limit=None) if metres(*cafe, stay["lat"], stay["lon"]) < 100]
+        near_cafe = lambda: [stay for stay in stays(self.db, limit=None) if metres(*cafe, stay["lat"], stay["lon"]) < 100]
         self.assertEqual(near_cafe(), [])
-        self.store.save_settings({"stay_min_minutes": 5})
+        save_settings(self.db, {"stay_min_minutes": 5})
         self.assertEqual(len(near_cafe()), 1)
-        self.assertIn("at least 5 minutes", search_visits(self.store, "anything", timezone_name="UTC")["note"])
+        self.assertIn("at least 5 minutes", search_visits(self.db, "anything", timezone_name="UTC")["note"])
 
     def test_analysis_settings_are_validated(self):
         for bad in ({"stay_min_minutes": 2}, {"stay_min_minutes": 7.5}, {"walking_max_kmh": 20},
                     {"cycling_max_kmh": 40}, {"driving_min_kmh": 0}, {"summary_schedule": "weekly"},
                     {"summary_interval_hours": 24}):
             with self.assertRaises(ValueError, msg=bad):
-                self.store.save_settings(bad)
-        saved = self.store.save_settings({"summary_schedule": "interval", "summary_interval_hours": 2})
+                save_settings(self.db, bad)
+        saved = save_settings(self.db, {"summary_schedule": "interval", "summary_interval_hours": 2})
         self.assertEqual((saved["summary_schedule"], saved["summary_interval_hours"], saved["stay_min_minutes"]),
                          ("interval", 2, 15))
 
     def test_summary_schedule_saves_today_only_on_an_interval(self):
         start = datetime(2026, 9, 27, 13, tzinfo=timezone.utc)
-        self.store.ingest(minute_fixes([still(HOME, 60)], start=start))
-        saved_today = lambda: any(item["date"] == "2026-09-27" for item in self.store.daily_overviews())
-        save_scheduled_summaries(self.store, now=start + timedelta(hours=2))
+        ingest(self.db, minute_fixes([still(HOME, 60)], start=start))
+        saved_today = lambda: any(item["date"] == "2026-09-27" for item in daily_overviews(self.db, ))
+        save_scheduled_summaries(self.db, now=start + timedelta(hours=2))
         self.assertFalse(saved_today())
-        self.store.save_settings({"summary_schedule": "interval", "summary_interval_hours": 3})
-        save_scheduled_summaries(self.store, now=start + timedelta(hours=2))
+        save_settings(self.db, {"summary_schedule": "interval", "summary_interval_hours": 3})
+        save_scheduled_summaries(self.db, now=start + timedelta(hours=2))
         self.assertTrue(saved_today())
         # Not due again until the interval has passed.
-        with patch("geologs.analysis.daily_overview") as rebuild:
-            save_scheduled_summaries(self.store, now=start + timedelta(hours=3))
+        with patch("geologs.services.overview.daily_overview") as rebuild:
+            save_scheduled_summaries(self.db, now=start + timedelta(hours=3))
         self.assertNotIn("2026-09-27", [call.args[1] for call in rebuild.call_args_list])
 
     def test_deleting_samples_previews_then_removes_and_recalculates(self):
-        from geologs.analysis import delete_samples
+        from geologs.services.samples import delete_samples
         cafe = shifted(HOME, 5000, 0)
-        place = self.store.save_place({"name": "Cafe", "lat": cafe[0], "lon": cafe[1], "radius_m": 120})
-        self.store.create_reminder({"text": "Buy beans", "place_id": place["id"]})
+        place = save_place(self.db, {"name": "Cafe", "lat": cafe[0], "lon": cafe[1], "radius_m": 120})
+        create_reminder(self.db, {"text": "Buy beans", "place_id": place["id"]})
         fixes = minute_fixes([still(HOME, 30), line(HOME, cafe, 8), still(cafe, 25), line(cafe, HOME, 8), still(HOME, 30)])
-        with patch("geologs.core.datetime") as clock:
+        with patch("geologs.services.ingest.datetime") as clock:
             clock.now.return_value = datetime(2026, 9, 27, 13, 40, tzinfo=timezone.utc)
             clock.fromisoformat = datetime.fromisoformat
             clock.fromtimestamp = datetime.fromtimestamp
-            self.store.ingest(fixes)
-        daily_overview(self.store, "2026-09-27", "UTC")
-        at_cafe = [row for row in self.store.observations(limit=None)
+            ingest(self.db, fixes)
+        daily_overview(self.db, "2026-09-27", "UTC")
+        at_cafe = [row for row in self.db.points.observations(limit=None)
                    if metres_between(cafe, row) < 60]
         self.assertGreaterEqual(len(at_cafe), 20)
         ids = [row["id"] for row in at_cafe]
-        preview = delete_samples(self.store, ids)
+        preview = delete_samples(self.db, ids)
         self.assertFalse(preview["deleted"])
         self.assertEqual((preview["samples"], preview["sources"], preview["dates"]), (len(ids), ["phone"], ["2026-09-27"]))
         self.assertEqual([item["reminder"] for item in preview["reminder_triggers"]], ["Buy beans"])
-        self.assertEqual(self.store.observation_count(), len(fixes))  # a preview changes nothing
-        result = delete_samples(self.store, ids, confirm=True)
+        self.assertEqual(self.db.points.count(), len(fixes))  # a preview changes nothing
+        result = delete_samples(self.db, ids, confirm=True)
         self.assertTrue(result["deleted"])
-        self.assertEqual(self.store.observation_count(), len(fixes) - len(ids))
-        self.assertEqual(self.store._rows("SELECT * FROM events"), [])
+        self.assertEqual(self.db.points.count(), len(fixes) - len(ids))
+        self.assertEqual(self.db.rows("SELECT * FROM events"), [])
         # The cafe visit is gone from stays and from the stored summary.
-        self.assertFalse([stay for stay in stays(self.store, limit=None) if metres_between(cafe, stay) < 100])
-        record = stored_daily_record(self.store, "2026-09-27")
+        self.assertFalse([stay for stay in stays(self.db, limit=None) if metres_between(cafe, stay) < 100])
+        record = stored_daily_record(self.db, "2026-09-27")
         self.assertFalse(record["stale"])
         self.assertEqual(record["summary"]["totals"]["raw_fixes"], len(fixes) - len(ids))
         with self.assertRaises(ValueError):
-            delete_samples(self.store, ids, confirm=True)
+            delete_samples(self.db, ids, confirm=True)
 
     def test_deleting_every_sample_of_a_day_drops_its_summary(self):
-        from geologs.analysis import delete_samples
-        self.store.ingest(minute_fixes([still(HOME, 40)]))
-        daily_overview(self.store, "2026-09-27", "UTC")
-        ids = [row["id"] for row in self.store.observations(limit=None)]
-        delete_samples(self.store, ids, confirm=True)
-        self.assertEqual((self.store.daily_overviews(), self.store.latest()), ([], None))
+        from geologs.services.samples import delete_samples
+        ingest(self.db, minute_fixes([still(HOME, 40)]))
+        daily_overview(self.db, "2026-09-27", "UTC")
+        ids = [row["id"] for row in self.db.points.observations(limit=None)]
+        delete_samples(self.db, ids, confirm=True)
+        self.assertEqual((daily_overviews(self.db, ), latest(self.db)), ([], None))
         # The source can send again afterwards.
-        self.assertEqual(self.store.ingest(minute_fixes([still(HOME, 2)]))["inserted"], 2)
+        self.assertEqual(ingest(self.db, minute_fixes([still(HOME, 2)]))["inserted"], 2)
         for bad in ([], ["x"], list(range(1, 502))):
             with self.assertRaises(ValueError):
-                delete_samples(self.store, bad)
+                delete_samples(self.db, bad)
 
     def test_quick_stop_needs_stillness_and_travel_on_both_sides(self):
         fuel = shifted(HOME, 4000, 0)
         work = shifted(HOME, 9000, 0)
         jitter = [shifted(fuel, 4 * math.sin(i), 4 * math.cos(i)) for i in range(5)]
-        self.store.ingest(minute_fixes([still(HOME, 30), line(HOME, fuel, 5), jitter, line(fuel, work, 6), still(work, 30)]))
-        kinds = lambda: [stay["kind"] for stay in reversed(stays(self.store, limit=None))]
+        ingest(self.db, minute_fixes([still(HOME, 30), line(HOME, fuel, 5), jitter, line(fuel, work, 6), still(work, 30)]))
+        kinds = lambda: [stay["kind"] for stay in reversed(stays(self.db, limit=None))]
         self.assertEqual(kinds(), ["stationary", "stop", "stationary"])
-        trips = day_summary(self.store, "2026-09-27", "UTC")["trips"]
+        trips = day_summary(self.db, "2026-09-27", "UTC")["trips"]
         self.assertEqual([trip["mode"] for trip in reversed(trips)], ["driving", "driving"])
 
     def test_sparse_fuel_stop_from_owntracks_is_kept_only_near_a_place(self):
@@ -2007,51 +2138,51 @@ class StoreTests(unittest.TestCase):
                 ("00:28:11", 34.758368, -92.451837, 2), ("00:29:29", 34.757962, -92.451609, 16),
                 ("00:32:55", 34.75773, -92.452137, 5), ("00:34:44", 34.758283, -92.449974, 3),
                 ("00:34:58", 34.757837, -92.447753, 2), ("00:35:11", 34.757339, -92.445648, 2)]
-        self.store.ingest([{"source": source, "external_id": at, "timestamp": f"2026-10-11T{at}+00:00",
+        ingest(self.db, [{"source": source, "external_id": at, "timestamp": f"2026-10-11T{at}+00:00",
                             "lat": lat, "lon": lon, "accuracy_m": accuracy} for at, lat, lon, accuracy in rows])
         costco = {"place_name": "Costco Gas Station", "place_lat": 34.757878, "place_lon": -92.451721}
-        with patch("geologs.analysis.named_place_near", return_value=costco) as lookup:
-            kept = stays(self.store, limit=None)
+        with patch("geologs.services.places.named_place_near", return_value=costco) as lookup:
+            kept = stays(self.db, limit=None)
         self.assertEqual([(row["kind"], row["started_at"], row["ended_at"]) for row in kept],
                          [("stop", "2026-10-11T00:28:11+00:00", "2026-10-11T00:32:55+00:00")])
         self.assertFalse(lookup.call_args.args[4])  # a history sweep reads only the lookup cache
         # With no place there it was probably the road or a red light, so the day offers it to keep.
-        with patch("geologs.analysis.named_place_near", return_value=None):
-            self.assertEqual(stays(self.store, limit=None), [])
-            day = day_summary(self.store, "2026-10-11", "UTC")
+        with patch("geologs.services.places.named_place_near", return_value=None):
+            self.assertEqual(stays(self.db, limit=None), [])
+            day = day_summary(self.db, "2026-10-11", "UTC")
         self.assertEqual([(stop["started_at"], stop["minutes"]) for stop in day["possible_stops"]],
                          [("2026-10-11T00:28:11+00:00", 4.7)])
-        kept = self.store.save_stay_edit({"action": "add", **{key: day["possible_stops"][0][key] for key in ("source", "started_at", "ended_at")}})
-        with patch("geologs.analysis.named_place_near", return_value=None):
-            day = day_summary(self.store, "2026-10-11", "UTC")
+        kept = save_stay_edit(self.db, {"action": "add", **{key: day["possible_stops"][0][key] for key in ("source", "started_at", "ended_at")}})
+        with patch("geologs.services.places.named_place_near", return_value=None):
+            day = day_summary(self.db, "2026-10-11", "UTC")
         self.assertEqual(([stay["kind"] for stay in day["stays"]], day["possible_stops"]), (["manual"], []))
-        self.store.delete_stay_edit(kept["id"])
+        delete_stay_edit(self.db, kept["id"])
         # A saved place there is evidence too, with no lookup at all.
-        self.store.save_place({"name": "Fuel", "lat": 34.757878, "lon": -92.451721, "radius_m": 80})
-        with patch("geologs.analysis.named_place_near", side_effect=AssertionError("looked up")):
-            self.assertEqual(len(stays(self.store, limit=None)), 1)
+        save_place(self.db, {"name": "Fuel", "lat": 34.757878, "lon": -92.451721, "radius_m": 80})
+        with patch("geologs.services.places.named_place_near", side_effect=AssertionError("looked up")):
+            self.assertEqual(len(stays(self.db, limit=None)), 1)
 
     def test_a_cached_place_with_only_its_distance_still_confirms_a_stop(self):
-        from geologs.core import named_place_near
+        from geologs.services.places import named_place_near
         # The Mapbox result cached on the server: no position of its own, 11 m from the lookup point.
         cached = {"place_name": "Costco Gas Station", "lat": 34.75796, "lon": -92.4516, "distance_m": 11,
                   "category": "gas_station"}
-        with patch("geologs.core.reverse_geocode", return_value={**cached, "lat": 34.75802, "lon": -92.45186}):
-            self.assertEqual(named_place_near(self.store, 34.75802, -92.45186, 75)["place_name"], "Costco Gas Station")
-        with patch("geologs.core.reverse_geocode", return_value={**cached, "distance_m": 140}):
-            self.assertIsNone(named_place_near(self.store, 34.75802, -92.45186, 75))
+        with patch("geologs.services.places.reverse_geocode", return_value={**cached, "lat": 34.75802, "lon": -92.45186}):
+            self.assertEqual(named_place_near(self.db, 34.75802, -92.45186, 75)["place_name"], "Costco Gas Station")
+        with patch("geologs.services.places.reverse_geocode", return_value={**cached, "distance_m": 140}):
+            self.assertIsNone(named_place_near(self.db, 34.75802, -92.45186, 75))
 
     def test_leaving_after_a_quiet_stretch_ends_the_stay_near_the_departure(self):
         # Home at 13:00, the phone quiet until it reports 2.7 km away at 15:00.
         away = shifted(HOME, 2000, 0)  # line() starts one 700 m step past this
-        self.store.ingest(minute_fixes([still(HOME, 3)]) + minute_fixes(
+        ingest(self.db, minute_fixes([still(HOME, 3)]) + minute_fixes(
             [line(away, shifted(HOME, 9000, 0), 10), still(shifted(HOME, 9000, 0), 30)],
             start=datetime(2026, 9, 27, 15, tzinfo=timezone.utc)))
-        home = list(reversed(stays(self.store, limit=None)))[0]
+        home = list(reversed(stays(self.db, limit=None)))[0]
         self.assertEqual(home["started_at"], "2026-09-27T13:00:00+00:00")
         # 2.7 km at 30 km/h is 5 min 24 s before the fix.
         self.assertEqual(home["ended_at"], "2026-09-27T14:54:36+00:00")
-        day = day_summary(self.store, "2026-09-27", "UTC")
+        day = day_summary(self.db, "2026-09-27", "UTC")
         self.assertEqual(day["coverage_gaps"], [])
 
     def test_one_fix_between_quiet_stretches_is_a_stay(self):
@@ -2064,15 +2195,15 @@ class StoreTests(unittest.TestCase):
                 ("18:28:47", 34.74628, -92.37063, 2), ("18:34:14", 34.72709, -92.34091, 1000),
                 ("18:59:06", 34.72534, -92.34065, 14), ("19:57:26", 34.72534, -92.34065, 1000),
                 ("20:06:43", 34.72341, -92.33989, 14)]
-        self.store.ingest([{"source": source, "external_id": at, "timestamp": f"2026-10-13T{at}+00:00",
+        ingest(self.db, [{"source": source, "external_id": at, "timestamp": f"2026-10-13T{at}+00:00",
                             "lat": lat, "lon": lon, "accuracy_m": accuracy} for at, lat, lon, accuracy in rows])
-        kept = list(reversed(stays(self.store, limit=None)))
+        kept = list(reversed(stays(self.db, limit=None)))
         # Home until about the time it takes to reach 18:27:18; the building from about the time
         # it takes to get there from 18:28:47 until about the time it takes to walk to 20:06:43.
         self.assertEqual([(row["started_at"], row["ended_at"], row["point_count"]) for row in kept],
                          [("2026-10-13T16:40:00+00:00", "2026-10-13T18:26:52+00:00", 2),
                           ("2026-10-13T18:35:58+00:00", "2026-10-13T20:06:15+00:00", 1)])
-        day = day_summary(self.store, "2026-10-13", "UTC")
+        day = day_summary(self.db, "2026-10-13", "UTC")
         self.assertEqual([(trip["start"], trip["end"]) for trip in day["trips"]],
                          [("2026-10-13T18:26:52+00:00", "2026-10-13T18:35:58+00:00")])
         # The drive is recorded only near home; dashed legs join it to both stays.
@@ -2083,23 +2214,22 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(day["coverage_gaps"], [])
 
     def test_sparse_trip_follows_the_route_a_dense_trip_taught(self):
-        from geologs.analysis import learn_path_history
-        from geologs import paths
+        from geologs.services.paths import learn_path_history
         # Day one drives Home -> Work round a corner, a fix a minute; day two's phone
         # rolls away from home at bike speed, then says nothing until Work.
         corner, work = shifted(HOME, 6000, 0), shifted(HOME, 6000, 6000)
-        self.store.ingest(minute_fixes([still(HOME, 30), line(HOME, corner, 10), line(corner, work, 10), still(work, 30)]))
+        ingest(self.db, minute_fixes([still(HOME, 30), line(HOME, corner, 10), line(corner, work, 10), still(work, 30)]))
         day_two = datetime(2026, 9, 28, 13, tzinfo=timezone.utc)
-        self.store.ingest(minute_fixes([still(HOME, 30), line(HOME, shifted(HOME, 600, 0), 2)], start=day_two)
+        ingest(self.db, minute_fixes([still(HOME, 30), line(HOME, shifted(HOME, 600, 0), 2)], start=day_two)
                           + minute_fixes([still(work, 30)], start=day_two + timedelta(minutes=52)))
-        sparse = lambda: day_summary(self.store, "2026-09-28", "UTC")["trips"][0]
+        sparse = lambda: day_summary(self.db, "2026-09-28", "UTC")["trips"][0]
         # Nothing learned yet: the unrecorded leg is a straight line.
         trip = sparse()
         self.assertEqual((len(trip["route_gaps"]), trip["route_fills"], trip["mode"]), (1, [], "cycling"))
-        self.assertEqual(learn_path_history(self.store)["learned"], 1)
-        learned = paths.signature(self.store)
-        self.assertEqual(learn_path_history(self.store)["paths"], 1)
-        self.assertEqual(paths.signature(self.store), learned)  # learning again changes nothing
+        self.assertEqual(learn_path_history(self.db)["learned"], 1)
+        learned = self.db.paths.signature()
+        self.assertEqual(learn_path_history(self.db)["paths"], 1)
+        self.assertEqual(self.db.paths.signature(), learned)  # learning again changes nothing
         trip = sparse()
         self.assertEqual(trip["route_gaps"], [])
         (fill,) = trip["route_fills"]
@@ -2109,22 +2239,115 @@ class StoreTests(unittest.TestCase):
                          (1, "driving", "cycling", True))
         self.assertAlmostEqual(trip["distance_km"], 12.0, delta=.1)
         # The filled trip never teaches a path itself.
-        self.assertEqual(paths.signature(self.store), learned)
+        self.assertEqual(self.db.paths.signature(), learned)
+
+    def drive_to_work(self, source="phone", start=datetime(2026, 9, 27, 13, tzinfo=timezone.utc)):
+        """A dense drive Home -> Work round a corner: enough to teach a path."""
+        corner, work = shifted(HOME, 6000, 0), shifted(HOME, 6000, 6000)
+        ingest(self.db, minute_fixes([still(HOME, 30), line(HOME, corner, 10), line(corner, work, 10), still(work, 30)],
+                                     source=source, start=start))
+        return work
+
+    def test_deleting_a_tracker_forgets_its_routes_and_place_lookups(self):
+        from geologs.services.paths import fill_gap, learn_path_history
+        from geologs.services.samples import delete_source
+        work = self.drive_to_work(source="old-phone")
+        self.assertEqual(learn_path_history(self.db)["paths"], 1)
+        self.db.caches.save_reverse_region("provider", HOME[0], HOME[1], 15, {"name": "Home street"})
+        delete_source(self.db, "old-phone", confirm=True)
+        self.assertEqual(self.db.paths.summary_rows(), [])
+        # Its route no longer fills anyone's trips, and where it stopped is no longer on record.
+        self.assertIsNone(fill_gap(self.db, [HOME[1], HOME[0]], [work[1], work[0]]))
+        self.assertIsNone(self.db.caches.reverse_region("provider", HOME[0], HOME[1]))
+
+    def test_deleting_samples_forgets_routes_and_lookups_made_from_them(self):
+        from geologs.services.paths import learn_path_history
+        from geologs.services.samples import delete_samples
+        self.drive_to_work()
+        self.assertEqual(learn_path_history(self.db)["paths"], 1)
+        elsewhere = shifted(HOME, 0, -20000)
+        self.db.caches.save_reverse_region("provider", HOME[0], HOME[1], 15, {"name": "Home street"})
+        self.db.caches.save_reverse_region("provider", elsewhere[0], elsewhere[1], 15, {"name": "Far away"})
+        self.db.commit()
+        # The whole drive, and one fix from home: the route it taught goes, and is not learned
+        # again from what is left (deleting one fix of a dense drive would teach it again, without it).
+        drive = self.db.points.observations("2026-09-27T13:30:00+00:00", "2026-09-27T13:49:00+00:00", limit=None)
+        home = self.db.points.observations("2026-09-27T13:10:00+00:00", "2026-09-27T13:10:00+00:00")
+        delete_samples(self.db, [row["id"] for row in drive] + [home[0]["id"]], confirm=True)
+        self.assertEqual(self.db.paths.summary_rows(), [])
+        self.assertIsNone(self.db.caches.reverse_region("provider", HOME[0], HOME[1]))
+        self.assertEqual(self.db.caches.reverse_region("provider", elsewhere[0], elsewhere[1]), {"name": "Far away"})
+
+    def test_reading_a_day_never_adds_to_the_path_library(self):
+        from geologs.services.paths import learn_recent_paths
+        self.drive_to_work()
+        day_summary(self.db, "2026-09-27", "UTC")
+        self.assertEqual(self.db.paths.summary_rows(), [])
+        # The background worker learns it, once per new batch of samples.
+        now = datetime(2026, 9, 28, 1, tzinfo=timezone.utc)
+        self.assertEqual(learn_recent_paths(self.db, now=now)["learned"], 1)
+        self.assertIsNone(learn_recent_paths(self.db, now=now))
+        ingest(self.db, {"source": "phone", "timestamp": "2026-09-27T20:00:00Z", "lat": 41, "lon": -87.9})
+        self.assertIsNotNone(learn_recent_paths(self.db, now=now))
+
+    def test_place_details_are_filled_in_the_background_not_when_read(self):
+        from geologs.services.saved_places import enrich_saved_places
+        place_id = self.db.places.add("Market", 41.01, -87.9, 150, "", "", "")  # saved before lookups kept details
+        self.db.commit()
+        found = {"name": "Market", "named": True, "address": "1 Main St", "category": "commercial.supermarket",
+                 "categories": [], "provider_place_id": "market-1"}
+        with patch("geologs.services.places.place_for_coordinate", side_effect=AssertionError("looked up")):
+            self.assertEqual(self.db.places.saved_place(place_id)["address"], "")
+            visited_places(self.db)
+        with patch("geologs.services.places.place_for_coordinate", return_value=found):
+            enrich_saved_places(self.db)
+        self.assertEqual(self.db.places.saved_place(place_id)["address"], "1 Main St")
+
+    def test_two_requests_learning_one_day_at_once_both_succeed(self):
+        import threading
+        from geologs.data.paths import PathsRepository
+        from geologs.services.paths import learn_paths
+        self.drive_to_work()
+        start, end = "2026-09-27T00:00:00+00:00", "2026-09-27T23:59:59.999999+00:00"
+        trips = anchored_trips(self.db, start, end)
+        # The browser and the summary thread both read the library before either writes.
+        barrier, read = threading.Barrier(2, timeout=5), PathsRepository.starting_between
+        def read_then_wait(repository, *args):
+            rows = read(repository, *args)
+            barrier.wait()
+            return rows
+        errors = []
+        def view():
+            db = open_database(Path(self.tmp.name) / "test.db")
+            try:
+                learn_paths(db, trips, start, end)
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                db.close()
+        with patch.object(PathsRepository, "starting_between", read_then_wait):
+            threads = [threading.Thread(target=view) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+        self.assertEqual(errors, [])
+        self.assertEqual(len(self.db.paths.summary_rows()), 1)
 
     def test_gap_takes_the_most_travelled_route_either_way_round(self):
-        from geologs.analysis import learn_path_history
-        from geologs import paths
+        from geologs.services.paths import learn_path_history
+        from geologs.services.paths import fill_gap
         east, north, work = shifted(HOME, 6000, 0), shifted(HOME, 0, 6000), shifted(HOME, 6000, 6000)
         drive = lambda via: [still(HOME, 30), line(HOME, via, 10), line(via, work, 10), still(work, 30)]
         for day, via in enumerate((east, north, east)):
-            self.store.ingest(minute_fixes(drive(via), start=datetime(2026, 9, 27 + day, 13, tzinfo=timezone.utc)))
-        self.assertEqual(learn_path_history(self.store)["by_mode"], {"driving": 3})
+            ingest(self.db, minute_fixes(drive(via), start=datetime(2026, 9, 27 + day, 13, tzinfo=timezone.utc)))
+        self.assertEqual(learn_path_history(self.db)["by_mode"], {"driving": 3})
         # Home -> Work learned; Work -> Home asked.
-        fill = paths.fill_gap(self.store, [work[1], work[0]], [HOME[1], HOME[0]])
+        fill = fill_gap(self.db, [work[1], work[0]], [HOME[1], HOME[0]])
         self.assertEqual(fill["past_trips"], 2)
         self.assertLess(min(metres_between(east, {"lat": lat, "lon": lon}) for lon, lat in fill["coordinates"]), 20)
         # Nowhere near a known path: no route.
-        self.assertIsNone(paths.fill_gap(self.store, [LAKE[1], LAKE[0]], [work[1], work[0]]))
+        self.assertIsNone(fill_gap(self.db, [LAKE[1], LAKE[0]], [work[1], work[0]]))
 
     def test_coverage_gap_is_only_the_time_no_stay_covers(self):
         # The same morning with nothing yet from the building: Home (quiet since its last fix,
@@ -2134,9 +2357,9 @@ class StoreTests(unittest.TestCase):
                 ("home_assistant:device_tracker.phone", "17:22:57", 34.74312, -92.37473, 9),
                 (owntracks, "18:27:18", 34.74288, -92.37241, 38), (owntracks, "18:27:20", 34.74288, -92.37243, 27),
                 (owntracks, "18:28:47", 34.74628, -92.37063, 2), (owntracks, "20:00:00", 34.72534, -92.34065, 14)]
-        self.store.ingest([{"source": source, "external_id": at, "timestamp": f"2026-10-13T{at}+00:00",
+        ingest(self.db, [{"source": source, "external_id": at, "timestamp": f"2026-10-13T{at}+00:00",
                             "lat": lat, "lon": lon, "accuracy_m": accuracy} for source, at, lat, lon, accuracy in rows])
-        day = day_summary(self.store, "2026-10-13", "UTC")
+        day = day_summary(self.db, "2026-10-13", "UTC")
         self.assertEqual([(stay["started_at"], stay["ended_at"]) for stay in day["stays"]],
                          [("2026-10-13T16:40:00+00:00", "2026-10-13T18:26:52+00:00")])
         # Not 17:22-18:27, which Home covers; the 91 min to 20:00 are unknown.
@@ -2151,9 +2374,9 @@ class StoreTests(unittest.TestCase):
                 ("03:38:01", 34.742961, -92.374196, 2), ("03:41:01", 34.742993, -92.374631, 10),
                 ("03:44:01", 34.742994, -92.374673, 12), ("03:47:02", 34.743128, -92.374745, 12),
                 ("03:50:02", 34.743126, -92.374763, 12), ("03:59:02", 34.743127, -92.374760, 12)]
-        self.store.ingest([{"source": source, "external_id": at, "timestamp": f"2026-10-08T{at}+00:00",
+        ingest(self.db, [{"source": source, "external_id": at, "timestamp": f"2026-10-08T{at}+00:00",
                             "lat": lat, "lon": lon, "accuracy_m": accuracy} for at, lat, lon, accuracy in rows])
-        self.assertEqual([(stay["started_at"], stay["ended_at"]) for stay in stays(self.store, limit=None)],
+        self.assertEqual([(stay["started_at"], stay["ended_at"]) for stay in stays(self.db, limit=None)],
                          [("2026-10-08T03:38:01+00:00", "2026-10-08T03:59:02+00:00")])
 
     def test_switching_trackers_mid_visit_is_one_visit(self):
@@ -2161,9 +2384,9 @@ class StoreTests(unittest.TestCase):
         app = minute_fixes([still(CAMPUS, 30), line(CAMPUS, HOME, 10), still(HOME, 60)], source="ha:app")
         owntracks = minute_fixes([still(HOME, 40), line(HOME, CAMPUS, 10), still(CAMPUS, 30)], source="ha:owntracks",
                                  start=datetime(2026, 9, 27, 14, 42, tzinfo=timezone.utc))
-        self.store.ingest(app + owntracks)
-        with patch("geologs.analysis.place_for_coordinate", side_effect=campus_label):
-            day = day_summary(self.store, "2026-09-27", "UTC")
+        ingest(self.db, app + owntracks)
+        with patch("geologs.services.places.place_for_coordinate", side_effect=campus_label):
+            day = day_summary(self.db, "2026-09-27", "UTC")
         home = [stay for stay in day["stays"] if metres_between(HOME, stay) < 100]
         self.assertEqual([(stay["started_at"], stay["ended_at"], stay["sources"]) for stay in home],
                          [("2026-09-27T13:39:00+00:00", "2026-09-27T15:21:00+00:00", ["ha:app", "ha:owntracks"])])
@@ -2173,10 +2396,10 @@ class StoreTests(unittest.TestCase):
         queue = shifted(HOME, 4000, 0)
         crawl = line(queue, shifted(queue, 0, 60), 6)  # 60 m in six minutes: stop-and-go traffic
         light = still(shifted(HOME, 6000, 0), 2)  # a red light
-        self.store.ingest(minute_fixes([still(HOME, 30), line(HOME, queue, 5), crawl,
+        ingest(self.db, minute_fixes([still(HOME, 30), line(HOME, queue, 5), crawl,
                                         line(crawl[-1], light[0], 3), light, line(light[0], shifted(HOME, 9000, 0), 4),
                                         still(shifted(HOME, 9000, 0), 30)]))
-        self.assertEqual([stay["kind"] for stay in stays(self.store, limit=None)], ["stationary", "stationary"])
+        self.assertEqual([stay["kind"] for stay in stays(self.db, limit=None)], ["stationary", "stationary"])
 
     def test_still_fixes_after_a_coverage_gap_are_not_a_quick_stop(self):
         fuel = shifted(HOME, 4000, 0)
@@ -2184,157 +2407,158 @@ class StoreTests(unittest.TestCase):
         # Nothing for 20 minutes, then five still minutes and on to work.
         after = minute_fixes([still(fuel, 5), line(fuel, shifted(HOME, 9000, 0), 6), still(shifted(HOME, 9000, 0), 30)],
                              start=datetime(2026, 9, 27, 14, 0, tzinfo=timezone.utc))
-        self.store.ingest(before + after)
-        self.assertNotIn("stop", [stay["kind"] for stay in stays(self.store, limit=None)])
+        ingest(self.db, before + after)
+        self.assertNotIn("stop", [stay["kind"] for stay in stays(self.db, limit=None)])
 
     def test_a_pause_on_a_lake_loop_is_not_a_quick_stop(self):
         shore = shifted(LAKE, -500, 0)
         # 30 minutes at 9 km/h covers 4.5 km, 9 radians of a 500 m circle.
         first, second = laps(LAKE, 500, 30, 9), laps(LAKE, 500, 30, 9, start_angle=math.pi + 9)
         pause = [shifted(first[-1], 3 * math.sin(i), 3 * math.cos(i)) for i in range(5)]
-        self.store.ingest(minute_fixes([still(HOME, 31), line(HOME, shore, 12), first, pause, second,
+        ingest(self.db, minute_fixes([still(HOME, 31), line(HOME, shore, 12), first, pause, second,
                                         line(second[-1], HOME, 12), still(HOME, 30)]))
-        self.assertEqual([stay["kind"] for stay in reversed(stays(self.store, limit=None))],
+        self.assertEqual([stay["kind"] for stay in reversed(stays(self.db, limit=None))],
                          ["stationary", "area", "stationary"])
 
     def test_adding_and_removing_stops_by_hand(self):
         fuel, work = shifted(HOME, 4000, 0), shifted(HOME, 9000, 0)
-        self.store.save_settings({"quick_stop_minutes": 0})
+        save_settings(self.db, {"quick_stop_minutes": 0})
         # Two minutes at the pump: too short for any detector.
-        self.store.ingest(minute_fixes([still(HOME, 30), line(HOME, fuel, 5), still(fuel, 2), line(fuel, work, 6), still(work, 30)]))
-        trips = lambda: day_summary(self.store, "2026-09-27", "UTC")["trips"]
+        ingest(self.db, minute_fixes([still(HOME, 30), line(HOME, fuel, 5), still(fuel, 2), line(fuel, work, 6), still(work, 30)]))
+        trips = lambda: day_summary(self.db, "2026-09-27", "UTC")["trips"]
         self.assertEqual(len(trips()), 1)
-        overview = daily_overview(self.store, "2026-09-27", "UTC")
-        added = self.store.save_stay_edit({"action": "add", "source": "phone",
+        overview = daily_overview(self.db, "2026-09-27", "UTC")
+        added = save_stay_edit(self.db, {"action": "add", "source": "phone",
                                            "started_at": "2026-09-27T13:35:00+00:00", "ended_at": "2026-09-27T13:36:00+00:00"})
         self.assertLess(metres_between(fuel, added), 5)
-        rows = list(reversed(stays(self.store, limit=None)))
+        rows = list(reversed(stays(self.db, limit=None)))
         self.assertEqual([(row["kind"], row["id"]) for row in rows][1], ("manual", -added["id"]))
         self.assertEqual(len(trips()), 2)
-        self.assertTrue(stored_daily_record(self.store, "2026-09-27")["stale"])
-        self.assertNotEqual(daily_overview(self.store, "2026-09-27", "UTC")["totals"], overview["totals"])
+        self.assertTrue(stored_daily_record(self.db, "2026-09-27")["stale"])
+        self.assertNotEqual(daily_overview(self.db, "2026-09-27", "UTC")["totals"], overview["totals"])
         # Removing the work stay; undoing both edits restores what was detected.
         work_stay = rows[2]
-        removed = self.store.save_stay_edit({"action": "remove", "source": "phone",
+        removed = save_stay_edit(self.db, {"action": "remove", "source": "phone",
                                              "started_at": work_stay["started_at"], "ended_at": work_stay["ended_at"]})
-        self.assertEqual([row["kind"] for row in reversed(stays(self.store, limit=None))], ["stationary", "manual"])
-        self.assertEqual(len(self.store.stay_edits(source="phone")), 2)
+        self.assertEqual([row["kind"] for row in reversed(stays(self.db, limit=None))], ["stationary", "manual"])
+        self.assertEqual(len(self.db.corrections.stay_edits(source="phone")), 2)
         for edit in (added, removed):
-            self.store.delete_stay_edit(edit["id"])
-        self.assertEqual(len(stays(self.store, limit=None)), 2)
+            delete_stay_edit(self.db, edit["id"])
+        self.assertEqual(len(stays(self.db, limit=None)), 2)
         with self.assertRaises(ValueError):
-            self.store.delete_stay_edit(added["id"])
+            delete_stay_edit(self.db, added["id"])
         with self.assertRaises(ValueError):  # no samples in that window
-            self.store.save_stay_edit({"action": "add", "source": "phone",
+            save_stay_edit(self.db, {"action": "add", "source": "phone",
                                        "started_at": "2026-09-28T13:00:00+00:00", "ended_at": "2026-09-28T13:05:00+00:00"})
         with self.assertRaises(ValueError):
-            self.store.save_settings({"quick_stop_minutes": 15})
+            save_settings(self.db, {"quick_stop_minutes": 15})
 
     def fuel_day(self):
         """Home, a 10 km drive (50 km/h), half an hour there, and home again: 20 km driven."""
         away = shifted(HOME, 10000, 0)
-        self.store.ingest(minute_fixes([still(HOME, 30), line(HOME, away, 12), still(away, 30), line(away, HOME, 12), still(HOME, 30)]))
+        ingest(self.db, minute_fixes([still(HOME, 30), line(HOME, away, 12), still(away, 30), line(away, HOME, 12), still(HOME, 30)]))
         return away
 
     def test_fuel_cost_of_drives_with_your_own_price(self):
-        from geologs.fuel import set_manual_price
-        from geologs.analysis import fuel_cost_windows, fuel_costs
+        from geologs.services.fuel import set_manual_price
+        from geologs.services.fuel import fuel_cost_windows, fuel_costs
         self.fuel_day()
-        self.assertIsNone(day_summary(self.store, "2026-09-27", "UTC")["fuel"])  # no economy yet
-        self.store.save_settings({"fuel_economy_l100km": 8, "fuel_price_source": "manual", "currency": "$"})
-        set_manual_price(self.store, 1.10, "2026-09-01")
-        day = day_summary(self.store, "2026-09-27", "UTC")
+        self.assertIsNone(day_summary(self.db, "2026-09-27", "UTC")["fuel"])  # no economy yet
+        save_settings(self.db, {"fuel_economy_l100km": 8, "fuel_price_source": "manual", "currency": "$"})
+        set_manual_price(self.db, 1.10, "2026-09-01")
+        day = day_summary(self.db, "2026-09-27", "UTC")
         drives = [trip for trip in day["trips"] if trip["mode"] == "driving"]
         self.assertEqual(len(drives), 2)
         litres = sum(trip["distance_km"] for trip in drives) * 8 / 100
         self.assertAlmostEqual(day["fuel"]["litres"], litres, delta=0.02)
         self.assertAlmostEqual(day["fuel"]["cost"], litres * 1.10, delta=0.02)
         # A later price applies from its date on; this day keeps the price it had.
-        set_manual_price(self.store, 2.00, "2026-10-01")
-        self.assertAlmostEqual(day_summary(self.store, "2026-09-27", "UTC")["fuel"]["cost"], litres * 1.10, delta=0.02)
-        overview = daily_overview(self.store, "2026-09-27", "UTC")
+        set_manual_price(self.db, 2.00, "2026-10-01")
+        self.assertAlmostEqual(day_summary(self.db, "2026-09-27", "UTC")["fuel"]["cost"], litres * 1.10, delta=0.02)
+        overview = daily_overview(self.db, "2026-09-27", "UTC")
         self.assertAlmostEqual(overview["totals"]["fuel_cost"], litres * 1.10, delta=0.02)
         self.assertIn("Fuel about $", daily_brief(overview)["summary"])
-        costs = fuel_costs(self.store, 7, now=datetime(2026, 9, 28, 12, tzinfo=timezone.utc))
+        costs = fuel_costs(self.db, 7, now=datetime(2026, 9, 28, 12, tzinfo=timezone.utc))
         self.assertEqual((costs["drives"], costs["covered_days"]), (2, 2))
-        both = fuel_cost_windows(self.store, (7, 30), now=datetime(2026, 9, 28, 12, tzinfo=timezone.utc))
+        both = fuel_cost_windows(self.db, (7, 30), now=datetime(2026, 9, 28, 12, tzinfo=timezone.utc))
         self.assertEqual(both[7], costs)
         self.assertEqual((both[30]["drives"], both[30]["days"]), (2, 30))
         self.assertAlmostEqual(costs["cost_per_day"], costs["cost"] / 2, delta=0.01)
         for bad in ({"fuel_economy_l100km": 0.5}, {"fuel_grade": "jet"}, {"units": "nautical"}, {"currency": ""},
                     {"fuel_area": "MARS"}):
             with self.assertRaises(ValueError, msg=bad):
-                self.store.save_settings(bad)
+                save_settings(self.db, bad)
 
     def test_fuel_prices_from_the_eia_for_your_region(self):
-        from geologs.fuel import refresh_prices, state_from_address, fuel_status
+        from geologs.services.fuel import refresh_prices, fuel_status
+        from geologs.domain.fuel import state_from_address
         self.assertEqual(state_from_address("16801 Chenal Pkwy, Little Rock, Arkansas 72223, United States"), "AR")
         self.assertEqual(state_from_address("16801 Chenal Pkwy, Little Rock, AR 72223, United States of America"), "AR")
         self.assertIsNone(state_from_address("10 Downing St, London SW1A 2AA, United Kingdom"))
         self.fuel_day()
-        self.store.save_place({"name": "Home", "lat": HOME[0], "lon": HOME[1], "address": "12 Oak St, Little Rock, AR 72223, United States"})
-        self.store.save_settings({"fuel_economy_l100km": 8})
+        save_place(self.db, {"name": "Home", "lat": HOME[0], "lon": HOME[1], "address": "12 Oak St, Little Rock, AR 72223, United States"})
+        save_settings(self.db, {"fuel_economy_l100km": 8})
         with patch.dict(os.environ, {"EIA_API_KEY": ""}):
-            self.assertEqual(refresh_prices(self.store)["reason"], "no_key")
+            self.assertEqual(refresh_prices(self.db)["reason"], "no_key")
         weeks = {"response": {"data": [{"period": "2026-09-28", "value": "3.785411784"}, {"period": "2026-09-21", "value": "7.570823568"}]}}
         response = Mock()
         response.read.return_value = json.dumps(weeks).encode()
         response.__enter__ = Mock(return_value=response)
         response.__exit__ = Mock(return_value=False)
-        with patch.dict(os.environ, {"EIA_API_KEY": "key"}), patch("geologs.fuel.urllib.request.urlopen", return_value=response) as fetch:
-            self.assertEqual(refresh_prices(self.store)["fetched"], 2)
+        with patch.dict(os.environ, {"EIA_API_KEY": "key"}), patch("geologs.integrations.eia.urllib.request.urlopen", return_value=response) as fetch:
+            self.assertEqual(refresh_prices(self.db)["fetched"], 2)
             self.assertIn("facets%5Bduoarea%5D%5B%5D=R30", fetch.call_args.args[0])  # Arkansas is Gulf Coast
             self.assertIn("facets%5Bproduct%5D%5B%5D=EPMR", fetch.call_args.args[0])
-            self.assertEqual(refresh_prices(self.store)["reason"], "fresh")  # weekly data, fetched at most twice a day
-            status = fuel_status(self.store)
+            self.assertEqual(refresh_prices(self.db)["reason"], "fresh")  # weekly data, fetched at most twice a day
+            status = fuel_status(self.db)
         self.assertEqual((status["area"], status["area_label"], status["state"]), ("R30", "Gulf Coast", "AR"))
         # $3.785/gal is $1/L from Sept 28; this Sept 27 day uses the week before: $2/L.
-        day = day_summary(self.store, "2026-09-27", "UTC")
+        day = day_summary(self.db, "2026-09-27", "UTC")
         self.assertAlmostEqual(day["fuel"]["cost"], day["fuel"]["litres"] * 2, delta=0.02)
         # Using your own price still shows what Automatic would charge.
-        self.store.save_settings({"fuel_price_source": "manual"})
+        save_settings(self.db, {"fuel_price_source": "manual"})
         with patch.dict(os.environ, {"EIA_API_KEY": "key"}):
-            status = fuel_status(self.store)
+            status = fuel_status(self.db)
         self.assertEqual((status["eia"]["price_per_l"], status["price_per_l"]), (1.0, None))
 
     def test_search_visits_finds_named_places_by_word(self):
         costco, club = shifted(HOME, 5000, 0), shifted(HOME, -5000, 0)
         for day, place in ((25, costco), (26, club), (27, costco)):
-            self.store.ingest(minute_fixes([still(place, 40)], start=datetime(2026, 9, day, 18, tzinfo=timezone.utc)))
+            ingest(self.db, minute_fixes([still(place, 40)], start=datetime(2026, 9, day, 18, tzinfo=timezone.utc)))
         labels = {costco: {"name": "Costco Wholesale", "address": "1 Warehouse Way", "category": "commercial.supermarket",
                            "categories": ["commercial.supermarket"], "provider_place_id": "costco"},
                   club: {"name": "Sam's Club", "address": "9 Depot Road", "category": "commercial.supermarket",
                          "categories": ["commercial.supermarket"], "provider_place_id": "sams"}}
         def label(_store, lat, lon, _radius=None):
             return next(value for place, value in labels.items() if abs(place[0] - lat) + abs(place[1] - lon) < 1e-3)
-        with patch("geologs.analysis.place_for_coordinate", side_effect=label):
-            result = search_visits(self.store, "costco", timezone_name="America/Chicago")
+        with patch("geologs.services.places.place_for_coordinate", side_effect=label):
+            result = search_visits(self.db, "costco", timezone_name="America/Chicago")
             self.assertEqual([visit["date"] for visit in result["visits"]], ["2026-09-27", "2026-09-25"])
             self.assertEqual(result["visits"][0]["arrival"], "2026-09-27T13:00-05:00")
             self.assertEqual(result["visits"][0]["weekday"], "Sunday")
             self.assertEqual(result["places"][0]["name"], "Costco Wholesale")
-            self.assertEqual(search_visits(self.store, "sams club")["total_visits"], 1)
-            self.assertEqual(search_visits(self.store, "supermarket")["total_visits"], 3)
-            self.assertEqual(search_visits(self.store, "warehouse costco")["total_visits"], 2)
-            self.assertEqual(search_visits(self.store, "walmart")["visits"], [])
-            response = dispatch(self.store, {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            self.assertEqual(search_visits(self.db, "sams club")["total_visits"], 1)
+            self.assertEqual(search_visits(self.db, "supermarket")["total_visits"], 3)
+            self.assertEqual(search_visits(self.db, "warehouse costco")["total_visits"], 2)
+            self.assertEqual(search_visits(self.db, "walmart")["visits"], [])
+            response = dispatch(self.db, {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                                              "params": {"name": "search_visits", "arguments": {"query": "Costco"}}})
         self.assertEqual(response["result"]["structuredContent"]["result"]["total_visits"], 2)
         with self.assertRaisesRegex(ValueError, "query is required"):
-            search_visits(self.store, "  ")
+            search_visits(self.db, "  ")
 
     def test_area_stay_migration_rebuilds_an_existing_archive(self):
         path = Path(self.tmp.name) / "before-area-stays.db"
-        archive = Store(path)
-        archive.ingest(lake_run_day())
-        archive.db.execute("DELETE FROM observed_stays_v2 WHERE kind='area'")
-        archive.db.execute("PRAGMA user_version=10")
-        archive.db.commit()
+        archive = open_database(path)
+        ingest(archive, lake_run_day())
+        archive.conn.execute("DELETE FROM observed_stays_v2 WHERE kind='area'")
+        archive.conn.execute("PRAGMA user_version=10")
+        archive.commit()
         archive.close()
-        migrated = Store(path)
+        migrated = open_database(path)
         try:
             self.assertEqual([row["kind"] for row in reversed(stays(migrated, limit=None))], ["stationary", "area", "stationary"])
-            self.assertEqual(migrated.db.execute("PRAGMA user_version").fetchone()[0], 18)
+            self.assertEqual(migrated.conn.execute("PRAGMA user_version").fetchone()[0], 18)
         finally:
             migrated.close()
 
@@ -2344,7 +2568,7 @@ LAB = shifted(CAMPUS, 400, 0)
 
 
 def campus_label(_store, lat, lon, _radius=None):
-    from geologs.core import metres
+    from geologs.domain.geo import metres
     if metres(lat, lon, *CAMPUS) < 1500:
         return {"name": "University", "address": "Campus", "category": "education.university",
                 "categories": ["education.university"], "provider_place_id": "university"}
@@ -2353,20 +2577,20 @@ def campus_label(_store, lat, lon, _radius=None):
     return {"name": "Taco Place", "address": "", "category": "catering", "categories": ["catering"], "provider_place_id": "taco"}
 
 
-def anchored_trips_for_day(store):
-    from geologs.analysis import anchored_trips
-    return anchored_trips(store, "2026-09-27T00:00:00+00:00", "2026-09-27T23:59:59+00:00")
+def anchored_trips_for_day(db):
+    from geologs.services.stays import anchored_trips
+    return anchored_trips(db, "2026-09-27T00:00:00+00:00", "2026-09-27T23:59:59+00:00")
 
 
 def metres_from(row, place):
-    from geologs.core import metres
+    from geologs.domain.geo import metres
     return metres(row["lat"], row["lon"], place[0], place[1])
 
 
-def process_stays_rebuild(store):
-    from geologs.analysis import process_stays
-    process_stays(store, rebuild=True)
-    store.db.commit()
+def process_stays_rebuild(db):
+    from geologs.services.stays import process_stays
+    process_stays(db, rebuild=True)
+    db.commit()
 
 
 class LiveServerCase(unittest.TestCase):
@@ -2411,25 +2635,78 @@ class LiveServerCase(unittest.TestCase):
             return response.status, data, response
 
     def points(self):
-        store = Store(self.db)
+        db = open_database(self.db)
         try:
-            return store.points(limit=None)
+            return db.points.points(limit=None)
         finally:
-            store.close()
+            db.close()
 
 
 
 class IngestTests(LiveServerCase):
     """Tracking apps posting to a running server, each in its own format."""
 
+    def raw_request(self, request, wait=3):
+        """Send raw bytes; return what the server answers before it closes or `wait` passes (None)."""
+        import socket
+        connection = socket.create_connection(self.server.server_address[:2])
+        connection.settimeout(wait)
+        try:
+            connection.sendall(request)
+            return connection.recv(4096)
+        except socket.timeout:
+            return None
+        finally:
+            connection.close()
+
+    def test_an_unexpected_failure_is_logged_not_shown(self):
+        import contextlib
+        bearer = {"Authorization": "Bearer main-token"}
+        log = io.StringIO()
+        with patch("geologs.presentation.http.places_provider", side_effect=RuntimeError("/srv/secret.db is locked")), \
+                contextlib.redirect_stderr(log):
+            status, body, _ = self.send("GET", "/api/status", headers=bearer)
+        self.assertEqual((status, body), (500, {"error": "internal error"}))
+        self.assertIn("/srv/secret.db is locked", log.getvalue())  # the server's owner still sees why
+
+    def test_a_request_mistake_is_said_plainly(self):
+        import sqlite3
+        from geologs.presentation.errors import input_message
+        bearer = {"Authorization": "Bearer main-token"}
+        self.assertEqual(self.send("POST", "/api/places", {"name": "Market", "lat": 41, "lon": -87.9}, bearer)[0], 200)
+        status, body, _ = self.send("POST", "/api/places", {"name": "market", "lat": 41.1, "lon": -87.9}, bearer)
+        self.assertEqual((status, body), (400, {"error": "you already have a place named market"}))
+        self.assertEqual(self.send("POST", "/api/places/delete", {}, bearer)[1], {"error": "missing field: id"})
+        # Whatever else a database refuses is never shown in its own words.
+        self.assertEqual(input_message(sqlite3.IntegrityError("UNIQUE constraint failed: places.name")),
+                         "that conflicts with something already saved")
+
+    def test_a_bad_content_length_is_refused_without_waiting_for_the_body(self):
+        # Reading a negative length would wait until the client hangs up, on a route anyone may call.
+        for path in ("/api/session", "/api/points", "/api/ingest/owntracks"):
+            for length in (b"-1", b"12abc", "\N{SUPERSCRIPT TWO}".encode()):
+                with self.subTest(path=path, length=length):
+                    reply = self.raw_request(b"POST " + path.encode() + b" HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                                             b"Authorization: Bearer main-token\r\nContent-Type: application/json\r\n"
+                                             b"Content-Length: " + length + b"\r\n\r\n{}")
+                    self.assertIsNotNone(reply, "the server is still waiting")
+                    self.assertTrue(reply.startswith(b"HTTP/1.1 400"), reply[:40])
+
+    def test_a_client_that_stops_sending_is_let_go(self):
+        self.assertIsNotNone(Handler.timeout)  # the default would wait forever
+        self.assertLessEqual(Handler.timeout, 60)
+        with patch.object(Handler, "timeout", 0.3):
+            # Headers that never finish: the connection is closed instead of holding a thread.
+            self.assertEqual(self.raw_request(b"GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\n", wait=3), b"")
+
     def test_owntracks_http_mode_with_basic_auth_and_queued_fixes(self):
         basic = {"Authorization": "Basic " + __import__("base64").b64encode(b"karun:phone-token").decode(),
                  "X-Limit-U": "karun", "X-Limit-D": "pixel"}
         an_hour_ago = int((datetime.now(timezone.utc) - timedelta(hours=1)).timestamp())
-        store = Store(self.db)
-        place = store.save_place({"name": "Market", "lat": 41.0, "lon": -87.9})
-        store.create_reminder({"text": "Buy salt", "place_id": place["id"]})
-        store.close()
+        db = open_database(self.db)
+        place = save_place(db, {"name": "Market", "lat": 41.0, "lon": -87.9})
+        create_reminder(db, {"text": "Buy salt", "place_id": place["id"]})
+        db.close()
         # A fix queued while the phone was offline arrives an hour late, with its own time.
         fix = {"_type": "location", "lat": 41.0, "lon": -87.9, "tst": an_hour_ago, "acc": 12, "vel": 36, "tid": "px",
                "created_at": an_hour_ago + 3600}
@@ -2439,10 +2716,10 @@ class IngestTests(LiveServerCase):
         [point] = self.points()
         self.assertEqual((point["source"], point["external_id"], point["accuracy_m"]), ("owntracks:karun/pixel", str(an_hour_ago), 12))
         self.assertEqual(datetime.fromisoformat(point["timestamp"]).timestamp(), an_hour_ago)
-        store = Store(self.db)
-        self.assertEqual(store.events(), [])  # too late to announce an arrival
-        self.assertAlmostEqual(store.observations()[0]["speed_mps"], 10, places=3)  # 36 km/h
-        store.close()
+        db = open_database(self.db)
+        self.assertEqual(db.reminders.events(), [])  # too late to announce an arrival
+        self.assertAlmostEqual(db.points.observations()[0]["speed_mps"], 10, places=3)  # 36 km/h
+        db.close()
         # Other message types, and an empty body, are acknowledged and ignored.
         self.assertEqual(self.send("POST", "/api/ingest/owntracks", {"_type": "transition", "event": "enter"}, basic)[:2], (200, []))
         self.assertEqual(self.send("POST", "/api/ingest/owntracks", b"", basic)[:2], (200, []))
@@ -2474,9 +2751,9 @@ class IngestTests(LiveServerCase):
         body = {"device_id": "pixel", "location": {"timestamp": "2026-09-27T13:01:00Z",
                                                    "coords": {"latitude": 41.001, "longitude": -87.9, "accuracy": 6, "speed": 2}}}
         self.assertEqual(self.send("POST", "/api/ingest/osmand?token=phone-token", body)[0], 200)
-        store = Store(self.db)
-        speeds = {row["lat"]: row["speed_mps"] for row in store.observations(limit=None)}
-        store.close()
+        db = open_database(self.db)
+        speeds = {row["lat"]: row["speed_mps"] for row in db.points.observations(limit=None)}
+        db.close()
         self.assertEqual({point["source"] for point in self.points()}, {"osmand:pixel"})
         self.assertAlmostEqual(speeds[41.0], 5.14444, places=4)  # 10 knots
 
@@ -2527,9 +2804,9 @@ class IngestTests(LiveServerCase):
         self.assertEqual(refused["last_status"], 403)
 
     def test_device_tokens_alone_close_an_open_server(self):
-        store = Store(self.db)
-        token = store.create_ingest_token({"name": "Phone"})["token"]
-        store.close()
+        db = open_database(self.db)
+        token = create_ingest_token(db, {"name": "Phone"})["token"]
+        db.close()
         with patch.dict(os.environ, {"GEOLOGS_TOKEN": "", "GEOLOGS_INGEST_TOKEN": ""}):
             status, _, _ = self.send("POST", "/api/ingest/generic?device=x", {"lat": 41, "lon": -87.9})
             self.assertEqual(status, 401)
@@ -2625,12 +2902,12 @@ class IngestTests(LiveServerCase):
         self.assertEqual(self.send("GET", "/api/sources", headers={"Authorization": "Bearer phone-token"})[0], 401)
 
     def test_unreachable_database_is_reported_not_a_dropped_connection(self):
-        with patch("geologs.http.Store", side_effect=RuntimeError("password authentication failed for user \"geologs\"")):
+        with patch("geologs.presentation.http.open_database", side_effect=RuntimeError("password authentication failed for user \"geologs\"")):
             status, value, _ = self.send("GET", "/api/status", headers={"Authorization": "Bearer main-token"})
         self.assertEqual((status, value["error"]), (503, 'Database unavailable: password authentication failed for user "geologs"'))
 
 
-WEB = Path(__file__).resolve().parent.parent / "src" / "geologs" / "web"
+WEB = Path(__file__).resolve().parent.parent / "src" / "geologs" / "presentation" / "web"
 
 
 class WebAppTests(LiveServerCase):

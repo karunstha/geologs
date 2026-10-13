@@ -183,6 +183,18 @@ Each stored record also keeps a **brief**: the same day as a small JSON of plain
 
 Consecutive stays create transition counts. A next-destination estimate needs at least three observed departures and recent evidence; older transitions receive less weight. The current-location tool reports fix age and whether it is stale. Day summaries accept an IANA timezone and include a coverage note. No place or person is inferred from an IP address.
 
+### Likely routes for sparse trackers
+
+Apps that report only after you have moved a fair way leave most of a trip unrecorded. GeoLogs learns the
+route of every trip recorded end to end (fixes at most about 1 km apart) and fills a sparse trip's unrecorded
+stretches from the route most trips took between those two points, shown dashed as "likely route". A filled trip
+counts the route toward its distance and, when it is mostly filled, takes the mode of the trips that taught it.
+Filled routes never teach a route themselves.
+
+The server learns from the last two days in the background whenever new samples arrive; reading a day only uses
+what it has learned. Run `geologs learn-paths` once to learn from your whole history; it reports how many trips
+were recorded well enough. Deleting samples or a tracker deletes the routes learned from them.
+
 ## Reminders and notifications
 
 Create a reminder at a saved place, search for another place near the latest fix, or enter destination coordinates and a 20–5,000 m radius. An unsaved reminder destination remains attached to that reminder and does not appear under Saved Places. A reminder can also name a kind of place instead of one location: **Any place named “Starbucks”** fires the first time you have been still for about three minutes within 150 m of a place whose name matches, anywhere. Every named place in that radius is checked, not just the nearest, and each query word must start a word of the name or be a close spelling of one (“starbuks” matches “Starbucks Coffee”). The places around a stop are looked up once per stop, so this costs one cached nearby-place lookup per stop of three minutes or more, and only while a name reminder is active. The number of provider requests behind that lookup depends on the selected provider. A new point inside after an outside or stale previous fix creates an event and completes the reminder. Active reminders can be cancelled; triggered and cancelled reminders remain as passive history and cannot be re-enabled. Low accuracy readings larger than the geofence radius or 150 m are ignored for triggering.
@@ -278,9 +290,39 @@ All data `/api/*` routes and `/mcp` require authentication when a token is confi
 
 Good next additions are: PostGIS scale and concurrency testing; semantic Google Timeline and OwnTracks imports; home periods and city/country trip summaries; dwell/leave geofences; smarter activity detection using sensor data; geofence hysteresis and accuracy confidence; provider quotas and bulk enrichment jobs; configurable raw retention and privacy zones; optional offline road-graph map matching; and a background webhook retry queue.
 
+## Code structure
+
+The Python package is split into layers, each importing only what lies beneath it:
+
+```text
+src/geologs/
+  domain/        the rules, with no database, network, or framework code: finding stays one fix at a
+                 time, area stays, travel modes, trips and their routes, visits, place naming, your
+                 corrections, path matching, fuel cost, briefs, and settings validation
+  data/          every SQL statement: Database (one SQLite or PostgreSQL/PostGIS connection, its schema,
+                 migrations and transactions) and a repository per table group, each keeping to its own tables
+  integrations/  services outside GeoLogs: place providers (Photon, Geoapify, Mapbox), EIA fuel prices,
+                 webhooks, and Google Takeout files
+  services/      the use cases: each joins the rules to storage and outside services in one transaction
+                 (ingest and record_locations, stays, day, overview, places, reminders, paths, fuel, ...)
+  presentation/  ways in: the REST API and browser app (http.py, web/), MCP, the command line, tracker
+                 apps' payload formats, the Home Assistant poller, and what a client is told when a request fails
+  config.py      everything read from the environment, in one place
+```
+
+`domain` imports only the standard library; `integrations` and `data` add `domain`; `services` may use all
+three; `presentation` uses `services` and `domain`, never `data` or `integrations` directly; every layer but
+`domain` may read `config`. Each use case runs in one transaction (`@use_case`): one called by another joins
+it, and only the outermost commits, so no part saves half of the whole. Cached values (place lookups, a
+day's analysis) are kept at once unless the caller has uncommitted work. Reading never writes your data:
+the server's background worker learns paths, fills in place details, saves daily summaries, and fetches
+fuel prices. Open the archive with `geologs.services.open_database()`, which also lets an upgrade
+recalculate stays. `tests/test_architecture.py` keeps these rules: the imports, no SQL outside `data`,
+and no environment reads outside `config`.
+
 ## Browser app structure
 
-The browser app is plain HTML, CSS, and native ES modules served from `src/geologs/web`, with no build step:
+The browser app is plain HTML, CSS, and native ES modules served from `src/geologs/presentation/web`, with no build step:
 
 ```text
 web/
@@ -307,7 +349,7 @@ Each view exports an `init…()` function that `main.js` calls once to attach it
 
 ```bash
 PYTHONPATH=src python3 -m unittest discover -s tests -v
-for file in $(find src/geologs/web/js -name '*.js'); do node --check "$file"; done
+for file in $(find src/geologs/presentation/web/js -name '*.js'); do node --check "$file"; done
 ```
 
 The Python tests also check that every file `index.html` loads is served, and that every module import names something its target exports.

@@ -1,12 +1,12 @@
 # PostGIS storage migration
 
-`GEOLOGS_DATABASE_URL` selects the PostgreSQL/PostGIS store. Docker Compose configures it by default; SQLite remains available without that variable. The schema is implemented in `src/geologs/postgres.py`, and the one-time copy is in `src/geologs/migration.py`.
+`GEOLOGS_DATABASE_URL` selects the PostgreSQL/PostGIS store. Docker Compose configures it by default; SQLite remains available without that variable. The schema is implemented in `src/geologs/data/postgres.py`, and the one-time copy is in `src/geologs/data/migration.py`.
 
 The runtime schema keeps raw `point_observations`, a materialized `timeline_fixes` layer, and derived stays. It also adds generated geography columns with GiST indexes for recorded points, saved places, and reverse-cache centers. `near` and reverse-cache lookups use indexed `ST_DWithin`; historical stays, geofences, and reminders retain the existing behavior. Reverse geocoding remains cache-first and on demand.
 
 ## Sequence
 
-1. **Done:** Add a PostgreSQL connection behind the shared `Store` API and select it with `GEOLOGS_DATABASE_URL`.
+1. **Done:** Add a PostgreSQL connection behind the shared storage API (now `geologs.data.Database`) and select it with `GEOLOGS_DATABASE_URL`.
 2. **Done:** Create the spatial schema, preserve IDs and unique source keys, and add indexed nearby and reverse-cache searches.
 3. **Done:** Add `migrate-sqlite`, which copies an existing archive to an empty PostGIS database in one transaction and compares row counts.
 4. **Next:** Move arrival candidate selection and saved-place visit matching into indexed SQL. Add concurrency tests for simultaneous source updates and reminder delivery.

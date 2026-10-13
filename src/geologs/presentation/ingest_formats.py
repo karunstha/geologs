@@ -8,7 +8,7 @@ malformed fix would otherwise block everything queued behind it.
 import math
 import re
 
-from .core import parse_time
+from ..domain.timing import parse_time
 
 MAX_SOURCE_LENGTH = 80
 

@@ -3,11 +3,13 @@ import argparse
 import json
 import os
 import sys
-import urllib.request
-from datetime import datetime, timezone
-from pathlib import Path
 
-from .core import Store, deliver_webhook
+from . import home_assistant
+from .. import config
+from ..services import migrate_sqlite, open_database
+from ..services.imports import import_csv
+from ..services.ingest import record_locations
+from ..services.stays import rebuild_stays
 from .http import serve
 
 
@@ -32,7 +34,7 @@ def adopt_legacy_names():
 
 def load_env_file():
     """Use local .env values when the process environment has no override."""
-    path = Path(os.environ.get("GEOLOGS_ENV_FILE", ".env"))
+    path = config.env_file()
     if not path.is_file():
         return
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -49,40 +51,16 @@ def load_env_file():
 
 
 def poll_home_assistant():
-    base = os.environ.get("HA_URL", "").rstrip("/")
-    token = os.environ.get("HA_TOKEN", "")
-    entity = os.environ.get("HA_ENTITY", "")
-    if not base or not token or not entity:
-        raise ValueError("HA_URL, HA_TOKEN and HA_ENTITY are required")
-    req = urllib.request.Request(base + "/api/states/" + entity, headers={"Authorization": "Bearer " + token})
-    with urllib.request.urlopen(req, timeout=12) as response:
-        state = json.load(response)
-    attrs = state.get("attributes") or {}
-    if attrs.get("latitude") is None or attrs.get("longitude") is None:
-        raise ValueError("Home Assistant entity has no latitude/longitude attributes")
-    # Every poll is a received sample. Keep the Home Assistant update as the
-    # canonical event ID, but date each sample at the time it was received.
-    polled_at = datetime.now(timezone.utc).isoformat(timespec="microseconds")
-    point = {"source": "home_assistant:" + entity, "external_id": state.get("last_updated"),
-             "timestamp": polled_at,
-             "lat": attrs["latitude"], "lon": attrs["longitude"],
-             "accuracy_m": attrs.get("gps_accuracy")}
-    endpoint = os.environ.get("GEOLOGS_URL")
+    """Record the Home Assistant entity's position once: on the server at GEOLOGS_URL, else locally."""
+    point = home_assistant.read_point()
+    endpoint, token = config.remote_server()
     if endpoint:
-        headers = {"Content-Type": "application/json"}
-        api_token = os.environ.get("GEOLOGS_TOKEN")
-        if api_token:
-            headers["Authorization"] = "Bearer " + api_token
-        request = urllib.request.Request(endpoint.rstrip("/") + "/api/points", json.dumps(point).encode(), headers=headers, method="POST")
-        with urllib.request.urlopen(request, timeout=12) as response:
-            return json.load(response)
-    store = Store()
+        return home_assistant.push(endpoint, token, point)
+    db = open_database()
     try:
-        result = store.ingest(point)
-        deliver_webhook(store, result["events"])
-        return result
+        return record_locations(db, [point])
     finally:
-        store.close()
+        db.close()
 
 
 def main():
@@ -95,8 +73,8 @@ def main():
     parser = argparse.ArgumentParser(prog="geologs")
     sub = parser.add_subparsers(dest="command", required=True)
     web = sub.add_parser("serve", help="run local browser, REST API and MCP HTTP")
-    web.add_argument("--host", default=os.environ.get("GEOLOGS_HOST", "127.0.0.1"))
-    web.add_argument("--port", type=int, default=int(os.environ.get("GEOLOGS_PORT", "8765")))
+    web.add_argument("--host", default=config.host())
+    web.add_argument("--port", type=int, default=config.port())
     sub.add_parser("poll-ha", help="poll a Home Assistant device tracker once (run from cron)")
     sub.add_parser("rebuild-stays", help="rebuild observed stays after historical import or algorithm changes")
     sub.add_parser("learn-paths", help="learn known paths from every well-recorded trip and report the library")
@@ -113,39 +91,35 @@ def main():
         if args.command == "serve": serve(args.host, args.port)
         elif args.command == "poll-ha": print(json.dumps(poll_home_assistant()))
         elif args.command == "rebuild-stays":
-            from .analysis import process_stays
-            store = Store()
+            db = open_database()
             try:
-                result = process_stays(store, rebuild=True)
-                store.db.commit()
-                print(json.dumps(result))
+                print(json.dumps(rebuild_stays(db)))
             finally:
-                store.close()
+                db.close()
         elif args.command == "learn-paths":
-            from .analysis import learn_path_history
-            store = Store()
+            from ..services.paths import learn_path_history
+            db = open_database()
             try:
-                print(json.dumps(learn_path_history(store), indent=2))
+                print(json.dumps(learn_path_history(db), indent=2))
             finally:
-                store.close()
+                db.close()
         elif args.command == "import-csv":
-            store = Store()
+            db = open_database()
             try:
                 with open(args.file, encoding="utf-8-sig") as file:
-                    print(json.dumps(store.import_csv(file, args.source)))
+                    print(json.dumps(import_csv(db, file, args.source)))
             finally:
-                store.close()
+                db.close()
         elif args.command == "import-takeout":
-            from .imports import import_takeout
-            store = Store()
+            from ..services.imports import import_takeout
+            db = open_database()
             try:
                 with open(args.file, encoding="utf-8-sig") as file:
-                    print(json.dumps(import_takeout(store, file, args.source)))
+                    print(json.dumps(import_takeout(db, file, args.source)))
             finally:
-                store.close()
+                db.close()
         elif args.command == "migrate-sqlite":
-            from .migration import migrate_sqlite
-            url = os.environ.get("GEOLOGS_DATABASE_URL")
+            url = config.database_url()
             if not url:
                 raise ValueError("GEOLOGS_DATABASE_URL is required for migration")
             print(json.dumps(migrate_sqlite(args.file, url)))
