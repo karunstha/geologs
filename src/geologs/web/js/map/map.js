@@ -157,10 +157,37 @@ export function drawMap(fit = false) {
       })
         .on("click", () => selectItem("trip", tripKey(trip)))
         .addTo(pathLayer);
+    // Unrecorded stretches filled from past trips: probably this way.
+    for (const fill of trip.route_fills || [])
+      L.polyline(mapPath(fill.coordinates), {
+        color: modeInfo[trip.mode]?.color || "#176d69",
+        weight: 4,
+        opacity: 0.55,
+        dashArray: "10 6",
+      })
+        .bindTooltip(`Likely route · from ${fill.past_trips === 1 ? "1 past trip" : fill.past_trips + " past trips"}`, {
+          sticky: true,
+        })
+        .on("click", () => selectItem("trip", tripKey(trip)))
+        .addTo(pathLayer);
+    // Unrecorded stretches: you went this way, but not along this line.
+    for (const segment of trip.route_gaps || [])
+      L.polyline(mapPath(segment), {
+        color: modeInfo[trip.mode]?.color || "#176d69",
+        weight: 3,
+        opacity: 0.6,
+        dashArray: "2 7",
+      })
+        .on("click", () => selectItem("trip", tripKey(trip)))
+        .addTo(pathLayer);
   }
   for (const stay of day?.stays || []) {
     for (const move of stay.internal_moves || [])
-      for (const segment of move.route_segments || [])
+      for (const segment of [
+        ...(move.route_segments || []),
+        ...(move.route_fills || []).map((fill) => fill.coordinates),
+        ...(move.route_gaps || []),
+      ])
         L.polyline(mapPath(segment), {
           color: modeInfo[move.mode]?.color || "#176d69",
           weight: 3,
@@ -294,10 +321,24 @@ export function drawSelection(zoom) {
     ...(subject.route_segments || []),
     ...(subject.internal_moves || []).flatMap((move) => move.route_segments || []),
   ].map(mapPath);
+  const gaps = [
+    ...(subject.route_gaps || []),
+    ...(subject.internal_moves || []).flatMap((move) => move.route_gaps || []),
+  ].map(mapPath);
+  const fills = [
+    ...(subject.route_fills || []),
+    ...(subject.internal_moves || []).flatMap((move) => move.route_fills || []),
+  ].map((fill) => mapPath(fill.coordinates));
   for (const line of lines) {
     L.polyline(line, { color: "#fff", weight: 10, opacity: 0.95, interactive: false }).addTo(highlightLayer);
     L.polyline(line, { color, weight: 6, opacity: 1, interactive: false }).addTo(highlightLayer);
   }
+  for (const line of fills) {
+    L.polyline(line, { color: "#fff", weight: 9, opacity: 0.7, interactive: false }).addTo(highlightLayer);
+    L.polyline(line, { color, weight: 5, opacity: 0.75, dashArray: "10 6", interactive: false }).addTo(highlightLayer);
+  }
+  for (const line of gaps)
+    L.polyline(line, { color, weight: 5, opacity: 0.9, dashArray: "2 9", interactive: false }).addTo(highlightLayer);
   if (item.type === "stay")
     L.circleMarker([item.stay.lat, item.stay.lon], {
       radius: item.stay.kind === "area" ? 6 : 10,
@@ -343,7 +384,8 @@ export function drawSelection(zoom) {
     map.fitBounds(L.latLng(item.stay.lat, item.stay.lon).toBounds((item.stay.radius_m || 100) * 2.4), {
       maxZoom: 16,
     });
-  else if (lines.flat().length > 1) map.fitBounds(L.latLngBounds(lines.flat()).pad(0.2), { maxZoom: 16 });
+  else if ([...lines, ...fills, ...gaps].flat().length > 1)
+    map.fitBounds(L.latLngBounds([...lines, ...fills, ...gaps].flat()).pad(0.2), { maxZoom: 16 });
   else map.setView([subject.lat ?? subject.from_lat, subject.lon ?? subject.from_lon], 16);
 }
 

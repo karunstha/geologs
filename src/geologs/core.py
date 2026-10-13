@@ -54,6 +54,8 @@ FUEL_GRADES = ("regular", "midgrade", "premium", "diesel")
 # this close to the newest fix from any tracker.
 PRIORITY_FRESH_SECONDS = 900
 MAX_CONNECTED_GAP_SECONDS = 900
+# A trip's unrecorded leg shorter than this (its first fix inside the stay it left) is not drawn.
+ROUTE_GAP_MIN_M = 25
 MAX_PLAUSIBLE_SPEED_MPS = 55.6
 # Transit (bus, train) is never guessed from speed; it only comes from a correction.
 MOVEMENT_MODES = ("driving", "transit", "cycling", "running", "walking")
@@ -399,16 +401,20 @@ def trips_between_stays(points, stay_rows, start=None, end=None, speeds=None):
                 continue
             # Named only for round trips, where it says where you went.
             trip["turnaround"] = trip_turnaround(trip_points[1:-1] or trip_points, origin)
-            route_segments = [smooth_route_segment(segment) for segment in route_segments_from_points(trip_points)]
-            trip.update({"route_segments": route_segments,
+            pieces = [smooth_route_segment(segment) for segment in route_segments_from_points(trip_points, keep_lone=True)]
+            route_segments = [piece for piece in pieces if len(piece) > 1]
+            trip.update({"route_segments": route_segments, "route_gaps": route_gaps(pieces, origin, destination),
                          "coordinates": route_segments[0] if len(route_segments) == 1 else [],
                          "coverage_complete": len(route_segments) == 1})
             trips.append(trip)
     return sorted(trips, key=lambda trip: trip["start"], reverse=True)
 
 
-def route_segments_from_points(points):
-    """Connect plausible fixes per source and skip readings too inaccurate to route."""
+def route_segments_from_points(points, keep_lone=False):
+    """Connect plausible fixes per source and skip readings too inaccurate to route.
+
+    keep_lone also returns a fix connected to neither neighbour, as a one-point segment.
+    """
     segments = []
     by_source = {}
     for point in points:
@@ -420,7 +426,7 @@ def route_segments_from_points(points):
         for point in source_points:
             connected = previous is not None and _connected_elapsed(previous, point, held_since) is not None
             if not connected:
-                if len(current) > 1:
+                if len(current) > 1 or current and keep_lone:
                     segments.append(current)
                 current = [[point["lon"], point["lat"]]]
             else:
@@ -428,9 +434,21 @@ def route_segments_from_points(points):
             if previous is None or not _same_source_state(previous, point):
                 held_since = point
             previous = point
-        if len(current) > 1:
+        if len(current) > 1 or current and keep_lone:
             segments.append(current)
     return segments
+
+
+def route_gaps(pieces, origin, destination):
+    """Straight [lon, lat] legs over a trip's unrecorded stretches.
+
+    A trip runs from one stay to the next, so where its recorded pieces (in
+    time order) stop short of those stays or of each other, you still went
+    that way; a sparse tracker leaves most of a trip like this.
+    """
+    ends = [[[origin["lon"], origin["lat"]]], *pieces, [[destination["lon"], destination["lat"]]]]
+    return [[before[-1], after[0]] for before, after in zip(ends, ends[1:])
+            if metres(before[-1][1], before[-1][0], after[0][1], after[0][0]) > ROUTE_GAP_MIN_M]
 
 
 def smooth_route_segment(coordinates, samples_per_leg=4):
@@ -608,6 +626,13 @@ class Store:
             source TEXT PRIMARY KEY, last_observation_id INTEGER NOT NULL,
             last_timestamp TEXT NOT NULL, candidate TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS known_paths (
+            id INTEGER PRIMARY KEY, source TEXT NOT NULL, started_at TEXT NOT NULL, ended_at TEXT NOT NULL,
+            mode TEXT NOT NULL, distance_m REAL NOT NULL,
+            min_lat REAL NOT NULL, min_lon REAL NOT NULL, max_lat REAL NOT NULL, max_lon REAL NOT NULL,
+            coordinates TEXT NOT NULL, UNIQUE(source, started_at)
+        );
+        CREATE INDEX IF NOT EXISTS known_paths_bounds ON known_paths(min_lat,max_lat);
         CREATE TABLE IF NOT EXISTS geocode_cache (
             cache_key TEXT PRIMARY KEY, provider TEXT NOT NULL, value TEXT NOT NULL,
             created_at TEXT NOT NULL

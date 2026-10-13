@@ -8,7 +8,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from . import fuel
+from . import fuel, paths
 from .core import (ANALYSIS_DEFAULTS, MAX_CONNECTED_GAP_SECONDS, MAX_QUIET_STAY_SECONDS, QUIET_DEPARTURE_SPEED_MPS, MODE_OVERRIDE_MIN_OVERLAP, MAX_PLAUSIBLE_SPEED_MPS, MAX_SAMPLE_GAP_SECONDS, MOVEMENT_MODES,
                    _label_place, classify_motion, is_excursion, is_home_place, label_at, place_in_zone, zone_at, mode_override_for, went_elsewhere_between, windows_overlap, metres, name_matches, named_place_near,
                    nearby_places,
@@ -900,11 +900,14 @@ def _apply_stay_edits(rows, edits):
     return kept
 
 
-def anchored_trips(store, start=None, end=None, source=None):
-    """Return travel intervals bounded by consecutive stays (of the length set in Settings)."""
+def anchored_trips(store, start=None, end=None, source=None, lookup_places=True):
+    """Return travel intervals bounded by consecutive stays (of the length set in Settings).
+
+    lookup_places=False confirms quick stops from the lookup cache only, for history sweeps.
+    """
     context_start = (datetime.fromisoformat(parse_time(start)) - timedelta(days=1)).isoformat() if start else None
     context_end = (datetime.fromisoformat(parse_time(end)) + timedelta(days=1)).isoformat() if end else None
-    anchors = stays(store, context_start, context_end, source=source, limit=None, lookup_places=True)
+    anchors = stays(store, context_start, context_end, source=source, limit=None, lookup_places=lookup_places)
     points = list(reversed(store.observations(context_start, context_end, source=source, limit=None)))
     trips = trips_between_stays(points, anchors, start, end, store.settings())
     overrides = store.mode_overrides()
@@ -915,6 +918,28 @@ def anchored_trips(store, start=None, end=None, source=None):
             trip.update(detected_mode=trip["mode"], mode=override["mode"], mode_corrected=True,
                         modes={override["mode"]: sum(trip["modes"].values())})
     return trips
+
+
+def learn_path_history(store, days=7):
+    """Teach the path library from every trip on record, a week at a time.
+
+    Returns how many trips there were and how many were recorded well enough
+    to learn from, with what the library now holds.
+    """
+    row = store.db.execute("SELECT MIN(timestamp) AS first,MAX(timestamp) AS last FROM point_observations").fetchone()
+    trips = learned = 0
+    if row["first"]:
+        window = datetime.fromisoformat(row["first"]).astimezone(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        last = datetime.fromisoformat(row["last"])
+        while window <= last:
+            first = window
+            window += timedelta(days=days)
+            start, end = first.isoformat(), (window - timedelta(microseconds=1)).isoformat()
+            found = [trip for trip in anchored_trips(store, start, end, lookup_places=False)
+                     if first <= datetime.fromisoformat(trip["start"]) < window]
+            trips += len(found)
+            learned += paths.learn_paths(store, found, start, end)
+    return {"trips": trips, "learned": learned, **paths.report(store)}
 
 
 def _bucket(lat, lon):
@@ -1393,9 +1418,14 @@ def day_summary(store, date, timezone_name="UTC", source=None):
     end = (day_end - timedelta(microseconds=1)).isoformat()
     # Switching the places provider in Settings re-resolves every day's names.
     provider = places_provider_identity(store)
-    cache_identity = json.dumps(["day-v17", date, timezone_name, source, provider, store.settings()["source_priority"],
-                                 fuel.fuel_signature(store)], separators=(",", ":"))
-    cache_key = "day:" + hashlib.sha256(cache_identity.encode()).hexdigest()
+
+    def day_cache_key():
+        # Filled routes come from paths learned on other days too.
+        cache_identity = json.dumps(["day-v18", date, timezone_name, source, provider, store.settings()["source_priority"],
+                                     fuel.fuel_signature(store), paths.signature(store)], separators=(",", ":"))
+        return "day:" + hashlib.sha256(cache_identity.encode()).hexdigest()
+
+    cache_key = day_cache_key()
     watermark = store.analysis_watermark(start, end, source)
     cached = store.cached_analysis(cache_key, watermark)
     if cached is not None:
@@ -1405,9 +1435,15 @@ def day_summary(store, date, timezone_name="UTC", source=None):
     for point in points:
         samples_by_source[point["source"]] = samples_by_source.get(point["source"], 0) + 1
     unconfirmed = []
+    # Every source's well-recorded trips teach the path library, before
+    # fusing picks one source's account of the day.
+    all_trips = anchored_trips(store, start, end, source)
+    paths.learn_paths(store, all_trips, start, end, source)
     day_stays, trips, timeline_sources = _fuse_sources(
         list(reversed(stays(store, start, end, source=source, limit=None, lookup_places=True, rejected=unconfirmed))),
-        anchored_trips(store, start, end, source), samples_by_source, store.settings()["source_priority"])
+        all_trips, samples_by_source, store.settings()["source_priority"])
+    for trip in trips:
+        paths.fill_trip(store, trip)
     # Stops the detector found but no place confirmed, for you to keep or ignore;
     # none you already added or removed by hand.
     edits = store.stay_edits(start, end, source)
@@ -1470,7 +1506,7 @@ def day_summary(store, date, timezone_name="UTC", source=None):
             # off campus, a run from home) stays; drift is dropped.
             if trip.get("went_elsewhere") is False:
                 move = {key: trip.get(key) for key in ("source", "start", "end", "mode", "distance_km", "duration_minutes",
-                                                       "route_segments", "mode_corrected")}
+                                                       "route_segments", "route_gaps", "route_fills", "mode_corrected")}
                 # Crossing a campus from sparse fixes looks fast: the phone held
                 # its last position, then jumped. Under 1 km inside one place is
                 # walking between buildings, not a ride or the car you arrived
@@ -1547,7 +1583,8 @@ def day_summary(store, date, timezone_name="UTC", source=None):
             "first_location": {"lat": points[-1]["lat"], "lon": points[-1]["lon"]} if points else None,
             "last_location": {"lat": points[0]["lat"], "lon": points[0]["lon"]} if points else None,
             "coverage_note": "Stays are observed from samples; time in unobserved gaps is unknown"}
-    store.save_analysis(cache_key, watermark, result)
+    # Learning this day may have changed the library the key depends on.
+    store.save_analysis(day_cache_key(), watermark, result)
     return result
 
 
@@ -1648,6 +1685,8 @@ def daily_overview(store, date, timezone_name=None, source=None):
                       "round_trip": bool(trip.get("loop")), "via": (trip.get("turnaround") or {}).get("name") if trip.get("loop") else None,
                       "mode_corrected": bool(trip.get("mode_corrected")),
                       "coverage_complete": trip["coverage_complete"],
+                      # Distance along routes taken from past trips rather than recorded.
+                      "filled_km": trip.get("filled_km", 0),
                       "fuel_cost": (trip.get("fuel") or {}).get("cost"), "fuel_litres": (trip.get("fuel") or {}).get("litres")})
     visits = [{"place": stay.get("display_name") or stay.get("place_name"), "zone": stay.get("zone"),
                "arrival": stay["started_at"], "departure": stay["ended_at"],

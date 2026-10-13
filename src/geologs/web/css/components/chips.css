@@ -52,3 +52,14 @@
   background: var(--mode);
   vertical-align: middle;
 }
+
+/* Matches a trip's stretch filled in from past trips. */
+.legend-fill {
+  background: repeating-linear-gradient(90deg, var(--mode) 0 6px, transparent 6px 9px);
+  opacity: 0.7;
+}
+
+/* Matches the dashed leg drawn over a trip's unrecorded stretch. */
+.legend-gap {
+  background: repeating-linear-gradient(90deg, var(--mode) 0 3px, transparent 3px 7px);
+}

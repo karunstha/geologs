@@ -99,6 +99,7 @@ def main():
     web.add_argument("--port", type=int, default=int(os.environ.get("GEOLOGS_PORT", "8765")))
     sub.add_parser("poll-ha", help="poll a Home Assistant device tracker once (run from cron)")
     sub.add_parser("rebuild-stays", help="rebuild observed stays after historical import or algorithm changes")
+    sub.add_parser("learn-paths", help="learn known paths from every well-recorded trip and report the library")
     imp = sub.add_parser("import-csv", help="import CSV with timestamp,lat,lon and optional accuracy_m,speed_mps")
     imp.add_argument("file")
     imp.add_argument("--source", default="csv")
@@ -118,6 +119,13 @@ def main():
                 result = process_stays(store, rebuild=True)
                 store.db.commit()
                 print(json.dumps(result))
+            finally:
+                store.close()
+        elif args.command == "learn-paths":
+            from .analysis import learn_path_history
+            store = Store()
+            try:
+                print(json.dumps(learn_path_history(store), indent=2))
             finally:
                 store.close()
         elif args.command == "import-csv":

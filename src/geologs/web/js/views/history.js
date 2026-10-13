@@ -70,7 +70,13 @@ function renderStats(day) {
         (mode) =>
           `<span><i class="legend-line" style="--mode:${modeInfo[mode].color}"></i>${modeInfo[mode].noun}</span>`,
       )
-      .join("");
+      .join("") +
+    (day.trips.some((trip) => trip.route_fills?.length)
+      ? '<span><i class="legend-line legend-fill" style="--mode:#8ea8a2"></i>Likely route</span>'
+      : "") +
+    (day.trips.some((trip) => trip.route_gaps?.length)
+      ? '<span><i class="legend-line legend-gap" style="--mode:#8ea8a2"></i>Unrecorded</span>'
+      : "");
 }
 
 // The most recent local day any source recorded, for "jump to latest".

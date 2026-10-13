@@ -19,7 +19,7 @@ export function stayActivityText(stay) {
 export const TRIP_MODES = ["walking", "running", "cycling", "driving", "transit"],
   AREA_MODES = ["walking", "running", "cycling"];
 
-export function modeStrip(subject, options, current, corrected, detected, caption) {
+export function modeStrip(subject, options, current, corrected, detected, caption, basis = "Detected from speed") {
   // subject: what the correction is for (source, target, start, end).
   const buttons = options
     .map(
@@ -29,9 +29,15 @@ export function modeStrip(subject, options, current, corrected, detected, captio
     .join("");
   const note = corrected
     ? `<span class="mode-note">Set by you${detected ? ` · detected ${safe(modeName(detected).toLowerCase())}` : ""}</span><button type="button" class="button ghost small" data-set-mode="auto">Use detected</button>`
-    : '<span class="mode-note">Detected from speed</span>';
+    : `<span class="mode-note">${safe(basis)}</span>`;
   return `<li class="tl-mode-picker" data-mode-subject='${safe(JSON.stringify(subject))}'><div class="mode-head"><span class="mode-caption">${safe(caption)}</span></div><div class="mode-options" role="group" aria-label="${safe(caption)}">${buttons}</div><div class="mode-meta">${note}</div></li>`;
 }
+
+// The most trips behind any of a trip's filled-in routes.
+const pastTrips = (trip) => {
+  const count = Math.max(...(trip.route_fills || []).map((fill) => fill.past_trips));
+  return count === 1 ? "1 past trip" : `${count} past trips`;
+};
 
 export function renderModePicker() {
   document.querySelectorAll("#day-timeline .tl-mode-picker").forEach((item) => item.remove());
@@ -51,6 +57,7 @@ export function renderModePicker() {
       trip.mode_corrected,
       trip.detected_mode,
       "How did you travel?",
+      trip.mode_from_paths ? `From ${pastTrips(trip)} on this route` : undefined,
     );
   } else {
     const stay = item.stay;
@@ -181,7 +188,8 @@ export function renderTimeline(day) {
           info = modeInfo[trip.mode] || { label: "Trip", color: "#6f7b76" };
         const notes = [`${clock(trip.start)} – ${clock(trip.end)}`, durationText(trip.duration_minutes)];
         if (trip.fuel) notes.push(`${fuelText(trip.fuel.cost, trip.fuel.litres)} fuel`);
-        if (!trip.coverage_complete) notes.push("coverage gap");
+        if (trip.route_fills?.length) notes.push("route from past trips");
+        else if (!trip.coverage_complete) notes.push("coverage gap");
         if (trip.mode_corrected) notes.push("set by you");
         // A trip that ends where it began left and came back; say so rather than implying travel to where you already were.
         const title = trip.loop

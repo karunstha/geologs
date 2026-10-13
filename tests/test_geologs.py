@@ -2075,7 +2075,56 @@ class StoreTests(unittest.TestCase):
         day = day_summary(self.store, "2026-10-13", "UTC")
         self.assertEqual([(trip["start"], trip["end"]) for trip in day["trips"]],
                          [("2026-10-13T18:26:52+00:00", "2026-10-13T18:35:58+00:00")])
+        # The drive is recorded only near home; dashed legs join it to both stays.
+        trip, home, building = day["trips"][0], kept[0], kept[1]
+        self.assertEqual(len(trip["route_segments"]), 1)
+        self.assertEqual(trip["route_gaps"], [[[home["lon"], home["lat"]], trip["route_segments"][0][0]],
+                                              [trip["route_segments"][0][-1], [building["lon"], building["lat"]]]])
         self.assertEqual(day["coverage_gaps"], [])
+
+    def test_sparse_trip_follows_the_route_a_dense_trip_taught(self):
+        from geologs.analysis import learn_path_history
+        from geologs import paths
+        # Day one drives Home -> Work round a corner, a fix a minute; day two's phone
+        # rolls away from home at bike speed, then says nothing until Work.
+        corner, work = shifted(HOME, 6000, 0), shifted(HOME, 6000, 6000)
+        self.store.ingest(minute_fixes([still(HOME, 30), line(HOME, corner, 10), line(corner, work, 10), still(work, 30)]))
+        day_two = datetime(2026, 9, 28, 13, tzinfo=timezone.utc)
+        self.store.ingest(minute_fixes([still(HOME, 30), line(HOME, shifted(HOME, 600, 0), 2)], start=day_two)
+                          + minute_fixes([still(work, 30)], start=day_two + timedelta(minutes=52)))
+        sparse = lambda: day_summary(self.store, "2026-09-28", "UTC")["trips"][0]
+        # Nothing learned yet: the unrecorded leg is a straight line.
+        trip = sparse()
+        self.assertEqual((len(trip["route_gaps"]), trip["route_fills"], trip["mode"]), (1, [], "cycling"))
+        self.assertEqual(learn_path_history(self.store)["learned"], 1)
+        learned = paths.signature(self.store)
+        self.assertEqual(learn_path_history(self.store)["paths"], 1)
+        self.assertEqual(paths.signature(self.store), learned)  # learning again changes nothing
+        trip = sparse()
+        self.assertEqual(trip["route_gaps"], [])
+        (fill,) = trip["route_fills"]
+        # Round the corner, not across the diagonal, and as the drive it was.
+        self.assertLess(min(metres_between(corner, {"lat": lat, "lon": lon}) for lon, lat in fill["coordinates"]), 20)
+        self.assertEqual((fill["past_trips"], trip["mode"], trip["detected_mode"], trip["mode_from_paths"]),
+                         (1, "driving", "cycling", True))
+        self.assertAlmostEqual(trip["distance_km"], 12.0, delta=.1)
+        # The filled trip never teaches a path itself.
+        self.assertEqual(paths.signature(self.store), learned)
+
+    def test_gap_takes_the_most_travelled_route_either_way_round(self):
+        from geologs.analysis import learn_path_history
+        from geologs import paths
+        east, north, work = shifted(HOME, 6000, 0), shifted(HOME, 0, 6000), shifted(HOME, 6000, 6000)
+        drive = lambda via: [still(HOME, 30), line(HOME, via, 10), line(via, work, 10), still(work, 30)]
+        for day, via in enumerate((east, north, east)):
+            self.store.ingest(minute_fixes(drive(via), start=datetime(2026, 9, 27 + day, 13, tzinfo=timezone.utc)))
+        self.assertEqual(learn_path_history(self.store)["by_mode"], {"driving": 3})
+        # Home -> Work learned; Work -> Home asked.
+        fill = paths.fill_gap(self.store, [work[1], work[0]], [HOME[1], HOME[0]])
+        self.assertEqual(fill["past_trips"], 2)
+        self.assertLess(min(metres_between(east, {"lat": lat, "lon": lon}) for lon, lat in fill["coordinates"]), 20)
+        # Nowhere near a known path: no route.
+        self.assertIsNone(paths.fill_gap(self.store, [LAKE[1], LAKE[0]], [work[1], work[0]]))
 
     def test_coverage_gap_is_only_the_time_no_stay_covers(self):
         # The same morning with nothing yet from the building: Home (quiet since its last fix,
