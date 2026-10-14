@@ -47,6 +47,9 @@ FILL_MODE_SHARE = .5
 PLACE_FOLLOW_M = 150
 PLACE_FOLLOW_SHARE = .1
 PLACE_FOLLOW_MAX_M = 400
+# ...and pass them in the order they were recorded, from the place you left to the one
+# you reached: no fix may lie farther back along it than this from the one before.
+PLACE_ORDER_SLACK_M = 100
 
 
 def to_xy(lon, lat, lat0):
@@ -237,7 +240,7 @@ def best_route(a, b, known, reach_a=MATCH_M, reach_b=MATCH_M):
 def place_route(a, b, fixes, known):
     """The known route from stay a to stay b ([lon, lat]) that a trip's [lon, lat] fixes follow most closely, or None.
 
-    Each fix must lie near it (see PLACE_FOLLOW_M); returns a fill as best_route does.
+    Each fix must lie near it, in order (see PLACE_FOLLOW_M); returns a fill as best_route does.
     """
     reach = stay_reach(a, b)
     lat0 = a[1]
@@ -248,16 +251,18 @@ def place_route(a, b, fixes, known):
         for before, fix, after in zip(ends, ends[1:], ends[2:])]
     fitting = []
     for candidate in _candidates(a, b, known, reach, reach):
+        # The stretch runs from a to b whichever way it was learned, so distance along it is progress.
         way = [to_xy(a[0], a[1], lat0), *candidate["points"], to_xy(b[0], b[1], lat0)]
-        offsets = [project_onto(way, fix)[0] for fix in xy_fixes]
-        if all(offset <= limit for offset, limit in zip(offsets, allowed)):
-            candidate["offset"] = sum(offsets) / max(1, len(offsets))
+        on_way = [project_onto(way, fix) for fix in xy_fixes]
+        if (all(on[0] <= limit for on, limit in zip(on_way, allowed))
+                and all(later[1] >= earlier[1] - PLACE_ORDER_SLACK_M for earlier, later in zip(on_way, on_way[1:]))):
+            candidate["offset"] = sum(on[0] for on in on_way) / max(1, len(on_way))
             fitting.append(candidate)
     if not fitting:
         return None
-    # The closest fit, then the most travelled route, then one travelled this way round, then the latest.
+    # One travelled this way round (one-way streets, ramps), then the closest fit, then the most travelled, then the latest.
     return _fill(a, b, max(_group_routes(fitting), key=lambda item: (
-        -item["offset"], len(item["route"]), not item["reverse"], item["started_at"])))
+        not item["reverse"], -item["offset"], len(item["route"]), item["started_at"])))
 
 
 def with_fills(trip, filled):

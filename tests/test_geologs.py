@@ -2628,6 +2628,21 @@ class StoreTests(unittest.TestCase):
         # The same fix with neighbours 400 m away went another way.
         self.assertIsNone(place_route(home, campus, [[-87.855, 41.01], [-87.85, 41.0117], [-87.845, 41.01]], known))
 
+    def test_a_trip_takes_a_route_travelled_its_way_round_and_passes_its_fixes_in_order(self):
+        from geologs.domain.paths import place_route
+        home, campus = [-87.90, 41.0], [-87.80, 41.0]
+        # Home -> campus along 41.0100; campus -> home along 41.0105 (a one-way pair, 55 m apart).
+        there = [home, [-87.90, 41.0100], [-87.80, 41.0100], campus]
+        back = [campus, [-87.80, 41.0105], [-87.90, 41.0105], home]
+        known = [{"mode": "driving", "started_at": "2026-10-11T08:00:00+00:00", "coordinates": there},
+                 {"mode": "driving", "started_at": "2026-10-12T17:00:00+00:00", "coordinates": back}]
+        # Going home, fixes that sit right on the way there still take the way back.
+        fixes = [[-87.82, 41.0100], [-87.85, 41.0100], [-87.88, 41.0100]]
+        fill = place_route(campus, home, fixes, known)
+        self.assertAlmostEqual(max(lat for _lon, lat in fill["coordinates"]), 41.0105)
+        # Fixes that go back on themselves did not follow either road.
+        self.assertIsNone(place_route(campus, home, [fixes[1], fixes[0], fixes[2]], known))
+
     def test_an_excluded_route_is_never_learned_again_until_used_again(self):
         from geologs.services.paths import exclude_path, fill_gap, include_path, learn_path_history
         work = self.drive_to_work()
