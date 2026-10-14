@@ -2270,7 +2270,7 @@ class StoreTests(unittest.TestCase):
         # Round the corner, not across the diagonal, and as the drive it was.
         self.assertLess(min(metres_between(corner, {"lat": lat, "lon": lon}) for lon, lat in fill["coordinates"]), 20)
         self.assertEqual((fill["past_trips"], trip["mode"], trip["detected_mode"], trip["mode_from_paths"]),
-                         (1, "driving", "cycling", True))
+                         (1, "driving", "cycling", True))  # the trip itself joined the route: not a past trip
         self.assertAlmostEqual(trip["distance_km"], 12.0, delta=.1)
         # The filled trip never teaches a path itself.
         self.assertEqual(self.db.paths.signature(), learned)
@@ -2654,6 +2654,77 @@ class StoreTests(unittest.TestCase):
         self.assertAlmostEqual(max(lat for _lon, lat in fill["coordinates"]), 41.0105)
         # Fixes that go back on themselves did not follow either road.
         self.assertIsNone(place_route(campus, home, [fixes[1], fixes[0], fixes[2]], known))
+
+    def campus_tracks(self):
+        """Two drives home -> campus along a road that bends north: each recorded part of the way."""
+        home, campus = [-87.90, 41.0], [-87.80, 41.0]
+        road = [[-87.899, 41.0], [-87.88, 41.0], [-87.87, 41.005], [-87.86, 41.01], [-87.84, 41.01],
+                [-87.83, 41.01], [-87.82, 41.005], [-87.81, 41.0], [-87.801, 41.0]]
+        track = lambda started_at, pieces: {
+            "source": "phone", "started_at": started_at, "ended_at": started_at, "mode": "driving",
+            "from": home, "to": campus, "from_name": "Home", "to_name": "Campus", "pieces": pieces,
+            "distance_m": 9000.0, "observed_m": sum(path_length(piece) for piece in pieces)}
+        from geologs.domain.paths import path_length
+        # The first recorded the way to 41.01 and on, then lost signal; the second only the far end.
+        first = track("2026-10-01T08:00:00+00:00", [road[:6], [road[7]]])
+        second = track("2026-10-02T08:00:00+00:00", [[road[1]], road[4:]])
+        return home, campus, road, first, second
+
+    def test_trips_that_each_recorded_part_of_a_way_piece_it_together(self):
+        from geologs.domain.place_routes import group
+        home, campus, road, first, second = self.campus_tracks()
+        (route,) = group([first, second])
+        self.assertEqual([member["started_at"] for member in route["members"]], [first["started_at"], second["started_at"]])
+        # The first trip's gap is the second's recording: the way bends at 41.005 on both ends.
+        way = [point for part in route["parts"] if part["observed"] for point in part["coordinates"]]
+        self.assertIn(road[2], way)
+        self.assertIn(road[6], way)
+        self.assertGreater(route["observed_m"], .95 * route["distance_m"])
+
+    def test_a_trip_on_another_road_is_another_way_and_each_direction_its_own(self):
+        from geologs.domain.place_routes import best_place_route, group
+        home, campus, road, first, second = self.campus_tracks()
+        south = {**first, "started_at": "2026-10-03T08:00:00+00:00",
+                 "pieces": [[[-87.899, 41.0], [-87.88, 40.99], [-87.82, 40.99], [-87.801, 41.0]]]}
+        back = {**first, "started_at": "2026-10-04T17:00:00+00:00", "from": campus, "to": home,
+                "pieces": [list(reversed(road))]}
+        routes = group([first, second, south, back])
+        self.assertEqual(sorted(len(route["members"]) for route in routes), [1, 1, 2])
+        # Three fixes along the north road on the way home: the way back wins over the way there reversed...
+        fixes = [[-87.83, 41.0101], [-87.86, 41.0099], [-87.88, 41.0001]]
+        route, fit = best_place_route(routes, campus, home, fixes, "driving")
+        self.assertEqual((route["members"][0]["started_at"], fit["reverse"]), (back["started_at"], False))
+        # ...and without one, the way there serves, reversed; the south road never does.
+        route, fit = best_place_route([item for item in routes if item is not route], campus, home, fixes, "driving")
+        self.assertEqual((len(route["members"]), fit["reverse"]), (2, True))
+        # A walk does not take a road learned by driving.
+        self.assertIsNone(best_place_route([item for item in routes if item["mode"] == "driving" and item is not route
+                                            and item["members"][0]["started_at"] == south["started_at"]],
+                                           home, campus, fixes[::-1], "walking"))
+
+    def test_a_sparse_trip_is_drawn_along_the_way_its_places_pieced_together(self):
+        from geologs.services.paths import exclude_path, fill_trip
+        from geologs.services.place_routes import regroup
+        home, campus, road, first, second = self.campus_tracks()
+        for track in (first, second):
+            self.db.place_routes.add_track(track)
+        regroup(self.db, [(home, campus)])
+        fixes = [[-87.86, 41.0101], [-87.82, 41.0049]]
+        legs = [{"kind": "gap", "coordinates": [home, fixes[0]]}, {"kind": "gap", "coordinates": fixes, "jump": True},
+                {"kind": "gap", "coordinates": [fixes[1], campus]}]
+        trip = {"source": "phone", "start": "2026-10-05T08:00:00+00:00", "route": legs, "fixes": fixes, "distance_km": 9.0,
+                "mode": None, "modes": {}, "recorded": False,
+                "from_lon": home[0], "from_lat": home[1], "to_lon": campus[0], "to_lat": campus[1]}
+        filled = fill_trip(self.db, trip)
+        # The whole way between the stays is the route, but the short legs onto it from each stay.
+        self.assertEqual([leg["kind"] for leg in filled["route"]], ["gap", "fill", "gap"])
+        self.assertEqual(filled["route"][1]["past_trips"], 2)
+        self.assertEqual((filled["mode"], filled.get("mode_from_paths")), ("driving", True))
+        self.assertTrue(any(math.dist(point, road[6]) < 1e-9 for point in filled["route"][1]["coordinates"]))
+        # A trip excluded leaves its way: the other recorded too little to stand alone.
+        exclude_path(self.db, "phone", first["started_at"])
+        self.assertEqual(self.db.place_routes.recent(), [])
+        self.assertIsNone(self.db.place_routes.track("phone", first["started_at"]))
 
     def test_an_excluded_route_is_never_learned_again_until_used_again(self):
         from geologs.services.paths import exclude_path, fill_gap, include_path, learn_path_history

@@ -294,16 +294,26 @@ def with_fills(trip, filled):
     return _with_fill_mode(trip, fills, filled_km)
 
 
-def with_place_fill(trip, fill):
-    """A copy of a trip drawn whole along a known route between its places (see place_route).
+def with_place_legs(trip, legs):
+    """A copy of a trip drawn whole along known ways between its places: "fill" legs (each with its
+    "past_trips", "mode" and "distance_m") and "gap" legs nobody has recorded yet, from stay to stay.
 
-    The route stands for its way and its distance; route_segments still hold what was recorded.
+    The legs stand for its way and its distance; route_segments still hold what was recorded.
     """
-    leg = {"kind": "fill", "coordinates": fill["coordinates"], "past_trips": fill["past_trips"], "mode": fill["mode"]}
-    filled_km = fill["distance_m"] / 1000
-    trip = {**trip, "route": [leg], "route_fills": [fill], "route_gaps": [], "recorded_km": 0.0,
-            "filled_km": round(filled_km, 2), "distance_km": round(filled_km, 2)}
-    return _with_fill_mode(trip, [fill], filled_km)
+    fills = [{"coordinates": leg["coordinates"], "past_trips": leg["past_trips"], "mode": leg["mode"],
+              "distance_m": leg["distance_m"]} for leg in legs if leg["kind"] == "fill"]
+    filled_km = sum(fill["distance_m"] for fill in fills) / 1000
+    gaps = [leg["coordinates"] for leg in legs if leg["kind"] == "gap"]
+    distance_km = filled_km + sum(path_length(gap) for gap in gaps) / 1000
+    trip = {**trip, "route": [{key: value for key, value in leg.items() if key != "distance_m"} for leg in legs],
+            "route_fills": fills, "route_gaps": gaps, "recorded_km": 0.0,
+            "filled_km": round(filled_km, 2), "distance_km": round(distance_km, 2)}
+    return _with_fill_mode(trip, fills, filled_km) if fills else trip
+
+
+def with_place_fill(trip, fill):
+    """A copy of a trip drawn whole along one known route between its places (see place_route)."""
+    return with_place_legs(trip, [{"kind": "fill", **fill}])
 
 
 def _with_fill_mode(trip, fills, filled_km):
@@ -311,7 +321,7 @@ def _with_fill_mode(trip, fills, filled_km):
     for fill in fills:
         by_mode[fill["mode"]] += fill["distance_m"]
     mode = by_mode.most_common(1)[0][0]
-    if filled_km > FILL_MODE_SHARE * trip["distance_km"] and mode != trip["mode"] and not trip.get("mode_corrected"):
+    if mode and filled_km > FILL_MODE_SHARE * trip["distance_km"] and mode != trip["mode"] and not trip.get("mode_corrected"):
         trip.update(detected_mode=trip["mode"], mode=mode, modes={mode: sum(trip["modes"].values()) or 1},
                     mode_from_paths=True)
     return trip

@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 from ..domain.trips import stats_from_points
 from .overview import daily_overview
 from .paths import learn_path_history
+from .place_routes import rebuild_routes, regroup
 from .stays import process_stays
 from .use_case import use_case
 
@@ -44,8 +45,10 @@ def delete_samples(db, ids, confirm=False):
         db.points.delete_points(plan["points"])
     # Nothing derived from them may outlive the samples: routes learned from
     # trips under way at the time, and place lookups made around them.
+    forgotten = []
     for fix in plan["fixes"]:
         db.paths.delete_through(fix["source"], fix["timestamp"])
+        forgotten += [(track["from"], track["to"]) for track in db.place_routes.delete_tracks_through(fix["source"], fix["timestamp"])]
         db.caches.forget_reverse_regions_near(fix["lat"], fix["lon"], FORGET_LOOKUPS_WITHIN_M)
     process_stays(db, plan["sources"], rebuild=True)
     # Trips around the deleted samples changed: learn their paths again from what is left.
@@ -53,6 +56,8 @@ def delete_samples(db, ids, confirm=False):
         (datetime.fromisoformat(plan["last"]) + timedelta(days=1)).isoformat()
     for source in plan["sources"]:
         learn_path_history(db, source=source, start=span[0], end=span[1])
+    if forgotten:
+        regroup(db, forgotten)  # routes those trips took, even when nothing took their place
     for date in dates:
         # Rebuild (or drop, when nothing is left) each stored record for those days.
         if db.summaries.get(date, timezone_name) is not None:
@@ -125,6 +130,8 @@ def remove_source(db, source):
     db.reminders.delete_events_of_source(source)
     db.points.delete_source(source)
     db.paths.delete_source(source)
+    db.place_routes.delete_source(source)
+    rebuild_routes(db)
     db.caches.forget_reverse_regions()
     priority = db.settings.get()["source_priority"]
     if source in priority:

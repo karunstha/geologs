@@ -4,7 +4,9 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 
 from ..domain.paths import best_route, learnable, MAX_CANDIDATES, path_bounds, path_length, search_box, simplify, with_fills
-from ..domain.paths import place_route, with_place_fill
+from ..domain.paths import place_route, with_place_fill, with_place_legs
+from ..domain.place_routes import best_place_route, route_stretch
+from .place_routes import learn_tracks, regroup, routes_between
 from .stays import anchored_trips
 from .use_case import use_case
 from ..domain.timing import parse_time
@@ -45,6 +47,10 @@ def learn_paths(db, trips, start, end, source=None):
             continue
         db.paths.add(path_source, started_at, want["ended_at"], want["mode"], want["distance_m"],
                      path_bounds(json.loads(want["coordinates"])), want["coordinates"])
+    # Every trip between two places, however sparse, adds to the routes between them.
+    changed = learn_tracks(db, trips, start, end, excluded, source)
+    if changed:
+        regroup(db, changed)
     return len(wanted)
 
 
@@ -73,6 +79,9 @@ def fill_trip(db, trip):
     if fixes is not None:  # only a trip mostly nobody recorded has them (see trips_between_stays)
         trip = {key: value for key, value in trip.items() if key != "fixes"}
         a, b = [trip["from_lon"], trip["from_lat"]], [trip["to_lon"], trip["to_lat"]]
+        found = best_place_route(routes_between(db, a, b), a, b, fixes, trip.get("mode"))
+        if found:
+            return with_place_legs(trip, _route_legs(db, trip, *found, a, b))
         fill = place_route(a, b, fixes, _known(db, a, b, stay_reach(a, b)))
         if fill:
             return with_place_fill(trip, fill)
@@ -85,6 +94,26 @@ def fill_trip(db, trip):
             if fill:
                 filled[index] = fill
     return with_fills(trip, filled)
+
+
+def _route_legs(db, trip, route, fit, a, b):
+    """The legs of a route between a trip's places (see route_stretch): what its trips recorded, as
+    fills from them; a stretch none of them recorded, filled from another known path where one
+    fits, else a gap."""
+    legs = []
+    mode = route["mode"] or trip.get("mode")
+    # The trip may have joined the route itself: it is not a past trip of its own.
+    past_trips = sum((member["source"], member["started_at"]) != (trip["source"], trip["start"]) for member in route["members"])
+    for part in route_stretch(route, fit, a, b):
+        coordinates = part["coordinates"]
+        if part["observed"]:
+            legs.append({"kind": "fill", "coordinates": coordinates, "past_trips": max(1, past_trips),
+                         "mode": mode, "distance_m": part["distance_m"]})
+            continue
+        fill = fill_gap(db, coordinates[0], coordinates[-1])
+        legs.append({"kind": "fill", **fill} if fill else
+                    {"kind": "gap", "coordinates": coordinates, "distance_m": 0})
+    return legs
 
 
 @use_case
@@ -103,17 +132,24 @@ def report(db):
 def list_paths(db, limit=200):
     """What the library holds (see report), with its latest paths and the ones you excluded: which trips
     taught a route, for checking."""
-    return {**report(db), "recent": db.paths.recent(limit), "excluded": db.paths.excluded()}
+    return {**report(db), "recent": db.paths.recent(limit), "excluded": db.paths.excluded(),
+            "place_routes": db.place_routes.recent(limit)}
 
 
 @use_case
 def exclude_path(db, source, started_at):
-    """Stop using a learned path (a trip that recorded the way badly) and never learn it again."""
-    path = db.paths.get(source, started_at)
-    if path is None:
+    """Stop using a trip's learned path and its part in routes between places (a trip that recorded
+    the way badly), and never learn either again."""
+    path, track = db.paths.get(source, started_at), db.place_routes.track(source, started_at)
+    if path is None and track is None:
         raise ValueError("that path is not in the library")
-    db.paths.exclude(path, parse_time(None))
-    db.paths.delete(path["id"])
+    db.paths.exclude(path or {"source": source, "started_at": started_at, "ended_at": track["ended_at"],
+                              "mode": track["mode"] or "unknown", "distance_m": track["distance_m"]}, parse_time(None))
+    if path is not None:
+        db.paths.delete(path["id"])
+    if track is not None:
+        db.place_routes.delete_track(source, started_at)
+        regroup(db, [(track["from"], track["to"])])
     return list_paths(db)
 
 

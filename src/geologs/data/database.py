@@ -16,6 +16,7 @@ from .corrections import CorrectionsRepository
 from .devices import DevicesRepository
 from .fuel import FuelRepository
 from .paths import PathsRepository
+from .place_routes import PlaceRoutesRepository
 from .places import PlacesRepository
 from .points import PointsRepository
 from .postgres import PostgresConnection
@@ -77,6 +78,7 @@ class Database:
         self.caches = CachesRepository(self)
         self.summaries = SummariesRepository(self)
         self.paths = PathsRepository(self)
+        self.place_routes = PlaceRoutesRepository(self)
         self.fuel = FuelRepository(self)
         if not self.postgres:
             self.conn.executescript("""
@@ -215,6 +217,21 @@ class Database:
             id INTEGER PRIMARY KEY, source TEXT NOT NULL, started_at TEXT NOT NULL, ended_at TEXT NOT NULL,
             mode TEXT NOT NULL, distance_m REAL NOT NULL, created_at TEXT NOT NULL, UNIQUE(source, started_at)
         );
+        CREATE TABLE IF NOT EXISTS trip_tracks (
+            id INTEGER PRIMARY KEY, source TEXT NOT NULL, started_at TEXT NOT NULL, ended_at TEXT NOT NULL, mode TEXT,
+            from_lat REAL NOT NULL, from_lon REAL NOT NULL, to_lat REAL NOT NULL, to_lon REAL NOT NULL,
+            from_name TEXT, to_name TEXT, distance_m REAL NOT NULL, observed_m REAL NOT NULL,
+            pieces TEXT NOT NULL, UNIQUE(source, started_at)
+        );
+        CREATE INDEX IF NOT EXISTS trip_tracks_ends ON trip_tracks(from_lat,to_lat);
+        CREATE TABLE IF NOT EXISTS place_routes (
+            id INTEGER PRIMARY KEY, mode TEXT,
+            from_lat REAL NOT NULL, from_lon REAL NOT NULL, to_lat REAL NOT NULL, to_lon REAL NOT NULL,
+            from_name TEXT, to_name TEXT, distance_m REAL NOT NULL, observed_m REAL NOT NULL,
+            min_lat REAL NOT NULL, min_lon REAL NOT NULL, max_lat REAL NOT NULL, max_lon REAL NOT NULL,
+            parts TEXT NOT NULL, members TEXT NOT NULL, latest TEXT NOT NULL, seed TEXT NOT NULL UNIQUE
+        );
+        CREATE INDEX IF NOT EXISTS place_routes_ends ON place_routes(from_lat,to_lat);
         CREATE TABLE IF NOT EXISTS geocode_cache (
             cache_key TEXT PRIMARY KEY, provider TEXT NOT NULL, value TEXT NOT NULL,
             created_at TEXT NOT NULL

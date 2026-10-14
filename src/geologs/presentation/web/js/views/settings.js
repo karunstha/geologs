@@ -574,7 +574,7 @@ function renderPaths(data) {
   const excluded = data.excluded || [];
   $("path-list").innerHTML =
     ((data.recent || []).map((path) => pathRow(path, "exclude")).join("") ||
-      '<li class="empty-block"><strong>Nothing learned yet</strong><span>A route is learned from a trip recorded end to end, with no two fixes more than about 750 m apart.</span></li>') +
+      '<li class="empty-block"><strong>Nothing learned yet</strong><span>A route is learned from a trip recorded end to end, with no stretch over about 750 m that the tracker left unwatched for more than two minutes.</span></li>') +
     (excluded.length
       ? `<li class="list-heading">Excluded · ${plural(excluded.length, "route")} never learned again</li>` +
         excluded.map((path) => pathRow(path, "include")).join("")
@@ -594,8 +594,23 @@ function renderPaths(data) {
           }
         }),
     );
+  renderPlaceRoutes(data.place_routes || []);
   act("data-exclude-path", "/api/paths/exclude", "Route excluded: it won't be learned or used again");
   act("data-include-path", "/api/paths/include", "Route can be learned again");
+}
+
+// Ways between places, each pieced together from the trips that took it.
+function renderPlaceRoutes(routes) {
+  $("place-routes-summary").textContent = routes.length ? `Between places · ${plural(routes.length, "way")}` : "Between places";
+  $("place-route-list").innerHTML =
+    routes
+      .map((route) => {
+        const seen = route.distance_m ? Math.round((100 * route.observed_m) / route.distance_m) : 0;
+        const name = `${route.from_name || "A place"} → ${route.to_name || "a place"}`;
+        return `<li class="list-item"><div class="place-main">${modeIcon(route.mode)}<div><strong>${safe(name)}</strong><small>${safe(plural(route.trips, "trip"))} · ${safe(distanceText(route.distance_m / 1000))} · ${seen}% recorded · last ${safe(formatTime(route.latest))}</small></div></div><span class="row-actions"><a class="button ghost small" href="#date=${localDateKey(new Date(route.latest))}">Open day</a></span></li>`;
+      })
+      .join("") ||
+    '<li class="empty-block"><strong>No ways yet</strong><span>A way starts from a trip whose tracker recorded at least half of it; sparser trips between the same places join it.</span></li>';
 }
 
 async function refreshPaths() {
