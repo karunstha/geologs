@@ -40,7 +40,7 @@ def day_summary(db, date, timezone_name="UTC", source=None):
 
     def day_cache_key():
         # Filled routes come from paths learned on other days too.
-        cache_identity = json.dumps(["day-v19", date, timezone_name, source, provider, db.settings.get()["source_priority"],
+        cache_identity = json.dumps(["day-v20", date, timezone_name, source, provider, db.settings.get()["source_priority"],
                                      fuel_signature(db), db.paths.signature()], separators=(",", ":"))
         return "day:" + hashlib.sha256(cache_identity.encode()).hexdigest()
 

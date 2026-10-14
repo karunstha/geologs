@@ -4,7 +4,7 @@ from datetime import datetime
 
 from .geo import metres
 from .motion import classify_motion, connected_elapsed, move_uncertainty, reported_speed, same_source_state, select_best_timed_fixes
-from .routes import legs_length_m, route_legs, route_segments_from_points, smooth_route_segment
+from .routes import connected_runs, legs_length_m, mostly_unrecorded, route_legs, smooth_route_segment, split_at_jumps
 from .timing import parse_time
 from .visits import MAX_SAMPLE_GAP_SECONDS
 
@@ -159,8 +159,12 @@ def trips_between_stays(points, stay_rows, start=None, end=None, speeds=None):
                 if not same_source_state(previous, point):
                     held_since = point
             motion = classify_motion(moves, speeds)
-            pieces = [smooth_route_segment(segment) for segment in route_segments_from_points(trip_points, keep_lone=True)]
-            legs = route_legs(pieces, origin, destination)
+            pieces, jumps = [], set()
+            for run in connected_runs(trip_points, keep_lone=True):
+                split = split_at_jumps(run)
+                jumps.update(range(len(pieces) + 1, len(pieces) + len(split)))
+                pieces += [smooth_route_segment([[point["lon"], point["lat"]] for point in piece]) for piece in split]
+            legs = route_legs(pieces, origin, destination, jumps)
             # Stays carry this flag from analysis; compute it for hand-built rows.
             left = (destination["went_elsewhere"] if "went_elsewhere" in destination
                     else went_elsewhere_between(trip_points[1:-1], origin, destination))
@@ -191,6 +195,9 @@ def trips_between_stays(points, stay_rows, start=None, end=None, speeds=None):
                 "to_lat": destination["lat"], "to_lon": destination["lon"],
                 "recorded_points": len(trip_points),
             }
+            if mostly_unrecorded(legs):
+                # What a known route between the stays must pass near to stand for the trip (see place_route).
+                trip["fixes"] = [[point["lon"], point["lat"]] for point in accurate]
             # Two stays at one spot joined by drift or a GPS jump are one visit, not a trip.
             if loop and not is_excursion(trip):
                 continue

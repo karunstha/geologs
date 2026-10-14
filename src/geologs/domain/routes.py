@@ -1,10 +1,17 @@
 """Drawing recorded paths: which fixes connect, and the legs between them nobody recorded."""
+from datetime import datetime
+
 from .geo import metres
 from .motion import connected_elapsed, same_source_state
 
 
 # A trip's unrecorded leg shorter than this (its first fix inside the stay it left) is not drawn.
 ROUTE_GAP_MIN_M = 25
+# Consecutive fixes this far apart, and this long apart, are not a recorded way:
+# a straight chord cuts corners a road doesn't (a tracker that reports every few
+# minutes), so the way between them is a gap to fill. A fix a minute is a recorded way at any speed.
+ROUTE_JUMP_M = 750
+ROUTE_JUMP_SECONDS = 120
 
 
 def route_segments_from_points(points, keep_lone=False):
@@ -12,6 +19,11 @@ def route_segments_from_points(points, keep_lone=False):
 
     keep_lone also returns a fix connected to neither neighbour, as a one-point segment.
     """
+    return [[[point["lon"], point["lat"]] for point in run] for run in connected_runs(points, keep_lone)]
+
+
+def connected_runs(points, keep_lone=False):
+    """The fixes route_segments_from_points connects, as runs of point rows."""
     segments = []
     by_source = {}
     for point in points:
@@ -25,9 +37,9 @@ def route_segments_from_points(points, keep_lone=False):
             if not connected:
                 if len(current) > 1 or current and keep_lone:
                     segments.append(current)
-                current = [[point["lon"], point["lat"]]]
+                current = [point]
             else:
-                current.append([point["lon"], point["lat"]])
+                current.append(point)
             if previous is None or not same_source_state(previous, point):
                 held_since = point
             previous = point
@@ -36,18 +48,33 @@ def route_segments_from_points(points, keep_lone=False):
     return segments
 
 
-def route_legs(pieces, origin, destination):
+def split_at_jumps(run):
+    """A connected run of fixes as the runs between its jumps (see ROUTE_JUMP_M)."""
+    runs = [[run[0]]] if run else []
+    for before, point in zip(run, run[1:]):
+        seconds = (datetime.fromisoformat(point["timestamp"]) - datetime.fromisoformat(before["timestamp"])).total_seconds()
+        if metres(before["lat"], before["lon"], point["lat"], point["lon"]) > ROUTE_JUMP_M and seconds > ROUTE_JUMP_SECONDS:
+            runs.append([])
+        runs[-1].append(point)
+    return runs
+
+
+def route_legs(pieces, origin, destination, jumps=()):
     """A trip's way from one stay to the next, in order: {"kind", "coordinates"} legs.
 
     Recorded pieces (in time order) are "recorded" legs; where they stop short
     of the stays or of each other, a straight "gap" leg joins them: you still
     went that way. A sparse tracker leaves most of a trip like this, and a fix
-    on its own is only a point the way passed through.
+    on its own is only a point the way passed through. `jumps` holds the
+    indexes of pieces split from the one before at a jump (see split_at_jumps):
+    the gap before one is marked "jump", as the trip's distance already runs along it.
     """
     ends = [[[origin["lon"], origin["lat"]]], *pieces, [[destination["lon"], destination["lat"]]]]
     legs = []
     for index, (before, after) in enumerate(zip(ends, ends[1:])):
-        if metres(before[-1][1], before[-1][0], after[0][1], after[0][0]) > ROUTE_GAP_MIN_M:
+        if index in jumps:
+            legs.append({"kind": "gap", "coordinates": [before[-1], after[0]], "jump": True})
+        elif metres(before[-1][1], before[-1][0], after[0][1], after[0][0]) > ROUTE_GAP_MIN_M:
             legs.append({"kind": "gap", "coordinates": [before[-1], after[0]]})
         if index < len(pieces) and len(after) > 1:
             legs.append({"kind": "recorded", "coordinates": after})
@@ -57,6 +84,11 @@ def route_legs(pieces, origin, destination):
 def route_gaps(pieces, origin, destination):
     """Straight [lon, lat] legs over a trip's unrecorded stretches (see route_legs)."""
     return [leg["coordinates"] for leg in route_legs(pieces, origin, destination) if leg["kind"] == "gap"]
+
+
+def mostly_unrecorded(legs):
+    """Whether nobody recorded most of a trip's way, so a known route between its places draws it better."""
+    return legs_length_m(legs, "gap") > legs_length_m(legs, "recorded")
 
 
 def legs_length_m(legs, kind):

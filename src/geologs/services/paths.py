@@ -4,6 +4,7 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 
 from ..domain.paths import best_route, learnable, MAX_CANDIDATES, path_bounds, path_length, search_box, simplify, with_fills
+from ..domain.paths import place_route, with_place_fill
 from .stays import anchored_trips
 from .use_case import use_case
 from ..domain.timing import parse_time
@@ -50,18 +51,31 @@ def learn_paths(db, trips, start, end, source=None):
 @use_case
 def fill_gap(db, a, b, reach_a=MATCH_M, reach_b=MATCH_M):
     """The likeliest known route from [lon, lat] a to b, or None (see best_route)."""
-    known = [{**row, "coordinates": json.loads(row["coordinates"])}
-             for row in db.paths.covering(*search_box(a, b, max(reach_a, reach_b)), MAX_CANDIDATES)]
-    return best_route(a, b, known, reach_a, reach_b)
+    return best_route(a, b, _known(db, a, b, max(reach_a, reach_b)), reach_a, reach_b)
+
+
+def _known(db, a, b, reach):
+    return [{**row, "coordinates": json.loads(row["coordinates"])}
+            for row in db.paths.covering(*search_box(a, b, reach), MAX_CANDIDATES)]
 
 
 @use_case
 def fill_trip(db, trip):
-    """Fill a trip's unrecorded legs with known routes where there is one (see with_fills).
+    """Fill a trip's unrecorded way with known routes where there is one.
 
-    The first leg starts at the stay the trip left and the last ends at the
-    stay it reached; a route may pass farther from a stay than from a fix.
+    A trip mostly nobody recorded takes the known route between its two places
+    that its fixes follow most closely (see place_route). Otherwise, or failing
+    that, each unrecorded leg is filled on its own (see with_fills): the first
+    starts at the stay the trip left and the last ends at the stay it reached,
+    and a route may pass farther from a stay than from a fix.
     """
+    fixes = trip.get("fixes")
+    if fixes is not None:  # only a trip mostly nobody recorded has them (see trips_between_stays)
+        trip = {key: value for key, value in trip.items() if key != "fixes"}
+        a, b = [trip["from_lon"], trip["from_lat"]], [trip["to_lon"], trip["to_lat"]]
+        fill = place_route(a, b, fixes, _known(db, a, b, stay_reach(a, b)))
+        if fill:
+            return with_place_fill(trip, fill)
     legs, filled = trip.get("route") or [], {}
     for index, leg in enumerate(legs):
         if leg["kind"] == "gap":

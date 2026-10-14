@@ -3,6 +3,7 @@ import math
 
 from .geo import metres
 from .motion import MOVEMENT_MODES
+from .routes import ROUTE_JUMP_M
 from collections import Counter
 
 
@@ -11,7 +12,7 @@ from collections import Counter
 # road doesn't (a tracker that holds one position for several polls, then
 # jumps kilometres, records a drive that only looks dense); a fix a minute at
 # 45 km/h is fine. Shorter trips teach little but clutter the library.
-LEARN_MAX_GAP_M = 750
+LEARN_MAX_GAP_M = ROUTE_JUMP_M
 LEARN_MIN_FIXES = 5
 LEARN_MIN_DISTANCE_M = 300
 # Stored paths keep their shape to within this.
@@ -38,6 +39,14 @@ SAME_ROUTE_SAMPLES = 8
 MAX_CANDIDATES = 60
 # A trip that is mostly filled takes its mode from the trips that taught the fill.
 FILL_MODE_SHARE = .5
+# A trip mostly nobody recorded takes a known route between its two places whole:
+# the one its fixes lie closest to, so long as each lies near enough to it. A fix
+# among close neighbours pins the way down, so it must lie within PLACE_FOLLOW_M;
+# a lone fix far from the next says less (a sparse tracker's fix a street over),
+# so it may lie this share of the way to its farther neighbour off, up to PLACE_FOLLOW_MAX_M.
+PLACE_FOLLOW_M = 150
+PLACE_FOLLOW_SHARE = .1
+PLACE_FOLLOW_MAX_M = 400
 
 
 def to_xy(lon, lat, lat0):
@@ -167,14 +176,8 @@ def search_box(a, b, reach=MATCH_M):
     return (min(a[1], b[1]) + pad_lat, max(a[1], b[1]) - pad_lat, min(a[0], b[0]) + pad_lon, max(a[0], b[0]) - pad_lon)
 
 
-def best_route(a, b, known, reach_a=MATCH_M, reach_b=MATCH_M):
-    """The likeliest of `known` paths from [lon, lat] a to b, or None.
-
-    A path must pass within reach_a of a and reach_b of b (see STAY_MATCH_M).
-    `known` holds paths as {"mode", "started_at", "coordinates"}. Returns
-    {"coordinates", "past_trips", "mode", "distance_m"}: past_trips counts
-    the trips that went this way between these two points.
-    """
+def _candidates(a, b, known, reach_a, reach_b):
+    """The stretches of `known` paths that run from near [lon, lat] a to near b without a long detour."""
     straight = metres(a[1], a[0], b[1], b[0])
     lat0 = a[1]
     start, end = to_xy(a[0], a[1], lat0), to_xy(b[0], b[1], lat0)
@@ -192,21 +195,69 @@ def best_route(a, b, known, reach_a=MATCH_M, reach_b=MATCH_M):
             continue
         candidates.append({"points": stretch, "reverse": reverse, "mode": row["mode"],
                            "started_at": row["started_at"], "length": length})
-    if not candidates:
-        return None
+    return candidates
+
+
+def _group_routes(candidates):
+    """Give each candidate its "route": the candidates whose stretches follow each other's (see SAME_ROUTE_M)."""
     for candidate in candidates:
         candidate["samples"] = samples_along(candidate["points"], SAME_ROUTE_SAMPLES)
     for candidate in candidates:
         candidate["route"] = [other for other in candidates
                               if other is candidate or (follows(candidate["samples"], other["points"])
                                                         and follows(other["samples"], candidate["points"]))]
-    # The most travelled route, then one travelled this way round, then the latest.
-    best = max(candidates, key=lambda item: (len(item["route"]), not item["reverse"], item["started_at"]))
-    points = [start, *best["points"], end]
+    return candidates
+
+
+def _fill(a, b, best):
+    """A chosen candidate as a fill from [lon, lat] a to b (see best_route)."""
+    lat0 = a[1]
+    points = [to_xy(a[0], a[1], lat0), *best["points"], to_xy(b[0], b[1], lat0)]
     coordinates = [[a[0], a[1]], *(to_lonlat(x, y, lat0) for x, y in best["points"]), [b[0], b[1]]]
     modes = Counter(item["mode"] for item in best["route"])
     return {"coordinates": coordinates, "past_trips": len(best["route"]), "mode": modes.most_common(1)[0][0],
             "distance_m": round(sum(math.hypot(bx - ax, by - ay) for (ax, ay), (bx, by) in zip(points, points[1:])), 1)}
+
+
+def best_route(a, b, known, reach_a=MATCH_M, reach_b=MATCH_M):
+    """The likeliest of `known` paths from [lon, lat] a to b, or None.
+
+    A path must pass within reach_a of a and reach_b of b (see STAY_MATCH_M).
+    `known` holds paths as {"mode", "started_at", "coordinates"}. Returns
+    {"coordinates", "past_trips", "mode", "distance_m"}: past_trips counts
+    the trips that went this way between these two points.
+    """
+    candidates = _group_routes(_candidates(a, b, known, reach_a, reach_b))
+    if not candidates:
+        return None
+    # The most travelled route, then one travelled this way round, then the latest.
+    return _fill(a, b, max(candidates, key=lambda item: (len(item["route"]), not item["reverse"], item["started_at"])))
+
+
+def place_route(a, b, fixes, known):
+    """The known route from stay a to stay b ([lon, lat]) that a trip's [lon, lat] fixes follow most closely, or None.
+
+    Each fix must lie near it (see PLACE_FOLLOW_M); returns a fill as best_route does.
+    """
+    reach = stay_reach(a, b)
+    lat0 = a[1]
+    xy_fixes = [to_xy(lon, lat, lat0) for lon, lat in fixes]
+    ends = [a, *fixes, b]
+    allowed = [min(PLACE_FOLLOW_MAX_M, max(PLACE_FOLLOW_M, PLACE_FOLLOW_SHARE * max(
+        metres(before[1], before[0], fix[1], fix[0]), metres(fix[1], fix[0], after[1], after[0]))))
+        for before, fix, after in zip(ends, ends[1:], ends[2:])]
+    fitting = []
+    for candidate in _candidates(a, b, known, reach, reach):
+        way = [to_xy(a[0], a[1], lat0), *candidate["points"], to_xy(b[0], b[1], lat0)]
+        offsets = [project_onto(way, fix)[0] for fix in xy_fixes]
+        if all(offset <= limit for offset, limit in zip(offsets, allowed)):
+            candidate["offset"] = sum(offsets) / max(1, len(offsets))
+            fitting.append(candidate)
+    if not fitting:
+        return None
+    # The closest fit, then the most travelled route, then one travelled this way round, then the latest.
+    return _fill(a, b, max(_group_routes(fitting), key=lambda item: (
+        -item["offset"], len(item["route"]), not item["reverse"], item["started_at"])))
 
 
 def with_fills(trip, filled):
@@ -221,19 +272,38 @@ def with_fills(trip, filled):
     legs = [{"kind": "fill", "coordinates": filled[index]["coordinates"], "past_trips": filled[index]["past_trips"],
              "mode": filled[index]["mode"]} if index in filled else leg for index, leg in enumerate(trip.get("route") or [])]
     fills = [filled[index] for index in sorted(filled)]
+    jumps_m = sum(path_length(leg["coordinates"]) for index, leg in enumerate(trip.get("route") or [])
+                  if index in filled and leg.get("jump"))
     trip = {**trip, "route": legs, "route_fills": fills,
             "route_gaps": [leg["coordinates"] for leg in legs if leg["kind"] == "gap"]}
     if not fills:
         return trip
     filled_km = sum(fill["distance_m"] for fill in fills) / 1000
     if trip.get("recorded", True):
-        recorded_km = trip["distance_km"]
+        # A filled jump replaces the straight chord the trip's distance ran along.
+        recorded_km = round(max(0.0, trip["distance_km"] - jumps_m / 1000), 2)
         distance_km = recorded_km + filled_km
     else:
         recorded_km = 0.0
         distance_km = filled_km + sum(metres(a[1], a[0], b[1], b[0]) for leg in legs if leg["kind"] == "gap"
                                       for a, b in zip(leg["coordinates"], leg["coordinates"][1:])) / 1000
     trip.update(recorded_km=recorded_km, filled_km=round(filled_km, 2), distance_km=round(distance_km, 2))
+    return _with_fill_mode(trip, fills, filled_km)
+
+
+def with_place_fill(trip, fill):
+    """A copy of a trip drawn whole along a known route between its places (see place_route).
+
+    The route stands for its way and its distance; route_segments still hold what was recorded.
+    """
+    leg = {"kind": "fill", "coordinates": fill["coordinates"], "past_trips": fill["past_trips"], "mode": fill["mode"]}
+    filled_km = fill["distance_m"] / 1000
+    trip = {**trip, "route": [leg], "route_fills": [fill], "route_gaps": [], "recorded_km": 0.0,
+            "filled_km": round(filled_km, 2), "distance_km": round(filled_km, 2)}
+    return _with_fill_mode(trip, [fill], filled_km)
+
+
+def _with_fill_mode(trip, fills, filled_km):
     by_mode = Counter()
     for fill in fills:
         by_mode[fill["mode"]] += fill["distance_m"]

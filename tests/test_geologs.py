@@ -2571,6 +2571,63 @@ class StoreTests(unittest.TestCase):
         fill = best_route(last_fix, building, known, reach_b=STAY_MATCH_M)  # ...a stay may lie beside it
         self.assertEqual((fill["past_trips"], fill["coordinates"][-1]), (1, building))
 
+    def test_a_long_wait_between_far_fixes_is_a_gap_not_a_recorded_way(self):
+        from geologs.domain.routes import split_at_jumps
+        at = lambda minute, lat, lon: {"timestamp": f"2026-10-14T03:{minute:02d}:00+00:00", "lat": lat, "lon": lon}
+        # Real OwnTracks fixes from 2026-10-13: 3.6 km in five minutes, then 560 m home.
+        sparse = [at(40, 34.72701, -92.341763), at(45, 34.747564, -92.371794), at(53, 34.743145, -92.374742)]
+        self.assertEqual([len(run) for run in split_at_jumps(sparse)], [1, 2])
+        # A fix a minute is a recorded way however fast you went.
+        dense = [at(minute, 41.0 + minute * .01, -87.9) for minute in range(5)]
+        self.assertEqual([len(run) for run in split_at_jumps(dense)], [5])
+
+    def test_a_filled_jump_replaces_the_chord_in_a_trips_distance(self):
+        from geologs.domain.paths import with_fills
+        from geologs.domain.routes import route_legs
+        origin, destination = {"lat": 41.0, "lon": -87.9}, {"lat": 41.0, "lon": -87.8}
+        legs = route_legs([[[-87.9, 41.0], [-87.89, 41.0]], [[-87.81, 41.0], [-87.8, 41.0]]], origin, destination, {1})
+        self.assertEqual([(leg["kind"], leg.get("jump")) for leg in legs],
+                         [("recorded", None), ("gap", True), ("recorded", None)])
+        trip = {"route": legs, "distance_km": 8.4, "mode": "driving", "modes": {"driving": 3}}
+        fill = {"coordinates": [[-87.89, 41.0], [-87.85, 41.01], [-87.81, 41.0]], "past_trips": 1, "mode": "driving", "distance_m": 7000}
+        filled = with_fills(trip, {1: fill})
+        self.assertAlmostEqual(filled["recorded_km"], 1.69, delta=.01)  # 8.4 km less the 6.7 km chord
+        self.assertAlmostEqual(filled["distance_km"], 8.69, delta=.01)
+
+    def test_a_sparse_trip_takes_the_known_route_between_its_places_that_its_fixes_follow(self):
+        from geologs.domain.paths import path_bounds
+        from geologs.services.paths import fill_trip
+        home, campus = [-87.90, 41.0], [-87.80, 41.0]
+        south = [home, [-87.90, 40.99], [-87.80, 40.99], campus]
+        north = [home, [-87.90, 41.01], [-87.80, 41.01], campus]
+        for day, way in enumerate([south, south, north], start=1):
+            self.db.paths.add("phone", f"2026-10-0{day}T08:00:00+00:00", f"2026-10-0{day}T08:20:00+00:00",
+                              "driving", 13000, path_bounds(way), json.dumps(way))
+        # Three fixes, all within 200 m of the north road; the south one is travelled more.
+        fixes = [[-87.899, 41.0105], [-87.85, 41.0115], [-87.81, 41.0095]]
+        legs = [{"kind": "gap", "coordinates": [home, fixes[0]]}, {"kind": "gap", "coordinates": [fixes[0], fixes[1]], "jump": True},
+                {"kind": "recorded", "coordinates": fixes[1:]}, {"kind": "gap", "coordinates": [fixes[-1], campus]}]
+        trip = {"route": legs, "fixes": fixes, "distance_km": 9.0, "mode": "driving", "modes": {"driving": 2}, "recorded": True,
+                "from_lon": home[0], "from_lat": home[1], "to_lon": campus[0], "to_lat": campus[1]}
+        filled = fill_trip(self.db, trip)
+        self.assertEqual([leg["kind"] for leg in filled["route"]], ["fill"])
+        self.assertAlmostEqual(max(lat for _lon, lat in filled["route"][0]["coordinates"]), 41.01)  # the north road
+        self.assertEqual((filled["recorded_km"], filled["filled_km"], filled["distance_km"]), (0.0, 10.61, 10.61))
+        self.assertNotIn("fixes", filled)
+        # A fix far off every known route: each leg is filled on its own, where one fits.
+        stray = fill_trip(self.db, {**trip, "fixes": [*fixes, [-87.85, 41.05]]})
+        self.assertNotEqual([leg["kind"] for leg in stray["route"]], ["fill"])
+
+    def test_a_lone_fix_may_lie_farther_off_a_known_route_than_one_among_close_neighbours(self):
+        from geologs.domain.paths import place_route
+        home, campus = [-87.90, 41.0], [-87.80, 41.0]
+        known = [{"mode": "driving", "started_at": "2026-10-12T22:24:00+00:00",
+                  "coordinates": [home, [-87.90, 41.01], [-87.80, 41.01], campus]}]
+        # 190 m off the road, 4 km from the fixes either side: a sparse tracker's fix a street over.
+        self.assertIsNotNone(place_route(home, campus, [[-87.90, 41.01], [-87.85, 41.0117], [-87.80, 41.01]], known))
+        # The same fix with neighbours 400 m away went another way.
+        self.assertIsNone(place_route(home, campus, [[-87.855, 41.01], [-87.85, 41.0117], [-87.845, 41.01]], known))
+
     def test_an_excluded_route_is_never_learned_again_until_used_again(self):
         from geologs.services.paths import exclude_path, fill_gap, include_path, learn_path_history
         work = self.drive_to_work()
