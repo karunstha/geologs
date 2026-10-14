@@ -4,7 +4,7 @@ from datetime import datetime
 
 from .geo import metres
 from .motion import classify_motion, connected_elapsed, move_uncertainty, reported_speed, same_source_state, select_best_timed_fixes
-from .routes import route_gaps, route_segments_from_points, smooth_route_segment
+from .routes import legs_length_m, route_legs, route_segments_from_points, smooth_route_segment
 from .timing import parse_time
 from .visits import MAX_SAMPLE_GAP_SECONDS
 
@@ -115,7 +115,15 @@ def stats_from_points(points):
 
 
 def trips_between_stays(points, stay_rows, start=None, end=None, speeds=None):
-    """Build one trip between each pair of consecutive confirmed stays."""
+    """Build one trip between each pair of consecutive confirmed stays.
+
+    Every move from one place to the next is a trip, even when the tracker
+    recorded too little of it to read a speed (an app that reports only after
+    you have moved a fair way, walking between two buildings). Such a trip is
+    `recorded: False`: its way is straight legs (or known routes, filled in
+    later), and it has no mode until a known route or your correction gives
+    it one; its times are estimates, so a speed from them would be made up.
+    """
     points_by_source, stays_by_source = {}, {}
     for point in select_best_timed_fixes(points):
         points_by_source.setdefault(point["source"], []).append(point)
@@ -138,9 +146,7 @@ def trips_between_stays(points, stay_rows, start=None, end=None, speeds=None):
                 continue
             trip_points = [point for point in source_points
                            if departure <= datetime.fromisoformat(point["timestamp"]) <= arrival]
-            if len(trip_points) < 2:
-                continue
-            moves, held_since = [], trip_points[0]
+            moves, held_since = [], trip_points[0] if trip_points else None
             for previous, point in zip(trip_points, trip_points[1:]):
                 seconds = connected_elapsed(previous, point, held_since)
                 distance = metres(previous["lat"], previous["lon"], point["lat"], point["lon"])
@@ -149,25 +155,31 @@ def trips_between_stays(points, stay_rows, start=None, end=None, speeds=None):
                 if not same_source_state(previous, point):
                     held_since = point
             motion = classify_motion(moves, speeds)
-            if motion is None:
-                continue
+            pieces = [smooth_route_segment(segment) for segment in route_segments_from_points(trip_points, keep_lone=True)]
+            legs = route_legs(pieces, origin, destination)
             # Stays carry this flag from analysis; compute it for hand-built rows.
             left = (destination["went_elsewhere"] if "went_elsewhere" in destination
                     else went_elsewhere_between(trip_points[1:-1], origin, destination))
             # Area stays (a lake loop) have an extent; distance inside it is not an excursion.
             origin_reach = origin.get("radius_m") or 0
             destination_reach = destination.get("radius_m") or 0
-            excursion = max(metres(origin["lat"], origin["lon"], point["lat"], point["lon"]) for point in trip_points) - origin_reach
+            excursion = max((metres(origin["lat"], origin["lon"], point["lat"], point["lon"]) for point in trip_points),
+                            default=0) - origin_reach
             loop = (metres(origin["lat"], origin["lon"], destination["lat"], destination["lon"])
                     <= max(100, origin_reach + 50, destination_reach + 50))
+            if motion is not None:
+                reading = {"distance_km": round(motion["distance_m"] / 1000, 2),
+                           "moving_minutes": round(motion["moving_seconds"] / 60, 1), "median_kmh": motion["median_kmh"],
+                           "speed_reported": motion["speed_reported"], "mode": motion["mode"],
+                           "modes": {motion["mode"]: len(moves)}}
+            else:
+                reading = {"distance_km": round(legs_length_m(legs, "gap") / 1000, 2), "moving_minutes": 0,
+                           "median_kmh": None, "speed_reported": False, "mode": None, "modes": {}}
             trip = {
-                "start": origin["ended_at"], "end": destination["started_at"],
-                "source": source, "distance_km": round(motion["distance_m"] / 1000, 2),
+                "start": origin["ended_at"], "end": destination["started_at"], "source": source, **reading,
+                "recorded": motion is not None,
                 "duration_minutes": round((arrival - departure).total_seconds() / 60, 1),
-                "moving_minutes": round(motion["moving_seconds"] / 60, 1),
-                "median_kmh": motion["median_kmh"], "speed_reported": motion["speed_reported"],
-                "max_excursion_m": max(0, round(excursion)),
-                "mode": motion["mode"], "modes": {motion["mode"]: len(moves)}, "loop": loop,
+                "max_excursion_m": max(0, round(excursion)), "loop": loop,
                 "went_elsewhere": None if left is None else bool(left),
                 "from_stay_id": origin["id"], "to_stay_id": destination["id"],
                 "from_name": origin.get("place_name"), "to_name": destination.get("place_name"),
@@ -179,11 +191,11 @@ def trips_between_stays(points, stay_rows, start=None, end=None, speeds=None):
             if loop and not is_excursion(trip):
                 continue
             # Named only for round trips, where it says where you went.
-            trip["turnaround"] = trip_turnaround(trip_points[1:-1] or trip_points, origin)
-            pieces = [smooth_route_segment(segment) for segment in route_segments_from_points(trip_points, keep_lone=True)]
-            route_segments = [piece for piece in pieces if len(piece) > 1]
-            trip.update({"route_segments": route_segments, "route_gaps": route_gaps(pieces, origin, destination),
+            trip["turnaround"] = trip_turnaround(trip_points[1:-1] or trip_points, origin) if trip_points else None
+            route_segments = [leg["coordinates"] for leg in legs if leg["kind"] == "recorded"]
+            trip.update({"route": legs, "route_segments": route_segments,
+                         "route_gaps": [leg["coordinates"] for leg in legs if leg["kind"] == "gap"],
                          "coordinates": route_segments[0] if len(route_segments) == 1 else [],
-                         "coverage_complete": len(route_segments) == 1})
+                         "coverage_complete": motion is not None and len(route_segments) == 1})
             trips.append(trip)
     return sorted(trips, key=lambda trip: trip["start"], reverse=True)

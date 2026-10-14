@@ -45,5 +45,10 @@ class PathsRepository(Repository):
             WHERE min_lat<=? AND max_lat>=? AND min_lon<=? AND max_lon>=? ORDER BY started_at DESC LIMIT ?""",
             (min_lat, max_lat, min_lon, max_lon, limit))
 
+    def recent(self, limit=200):
+        """The latest learned paths, newest trip first (without their coordinates)."""
+        return self.rows("""SELECT id,source,started_at,ended_at,mode,distance_m FROM known_paths
+            ORDER BY started_at DESC,id DESC LIMIT ?""", (min(max(int(limit), 1), 2000),))
+
     def summary_rows(self):
         return self.rows("SELECT source,mode,distance_m,started_at FROM known_paths")

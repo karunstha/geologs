@@ -4,7 +4,7 @@ import { $, safe, toast } from "../core/dom.js";
 import { clock, clockPrecise, durationText, formatTime, kmh, lengthText, longDate, plural, speedUnit, toSpeedUnit, zonedMidnight } from "../core/format.js";
 import { state } from "../core/state.js";
 import { onEach, rowActions } from "../ui/actions.js";
-import { modeInfo, modeName, pinBadge, sourceName, zoneText } from "../ui/icons.js";
+import { modeInfo, modeName, pinBadge, sourceName, visitNumbers, zoneText } from "../ui/icons.js";
 import { focusPlaceOnMap, params, refreshExplore } from "./history.js";
 import { refreshInsights } from "./patterns.js";
 import { dayVisits, editVisitedPlace } from "./place-dialogs.js";
@@ -15,7 +15,7 @@ import { openSampleStayDialog, stayEditsSection, undoStayEdit } from "./stay-edi
 const ROLES = { arrival: "Arrival", departure: "Departure", latest: "Latest at stop", movement: "Moving" };
 
 export function renderDayPlaces(day) {
-  const numbers = new Map(day.visited_places.map((place, index) => [place.cluster_id, index + 1]));
+  const numbers = visitNumbers(day).byPlace;
   const box = $("visited-places");
   box.innerHTML =
     day.places_including_home

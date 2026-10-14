@@ -248,7 +248,7 @@ def overview_watermark(db, start, end, source=None, home_context_start=None, hom
     settings = db.settings.get()
     # Stay length and mode speeds change what a day contains.
     analysis = {key: settings[key] for key in ANALYSIS_DEFAULTS}
-    value = ["stay-trips-v12", modes, stay_edits, analysis, settings["source_priority"],
+    value = ["stay-trips-v13", modes, stay_edits, analysis, settings["source_priority"],
              fuel_signature(db), db.points.watermark(start, end, source),
              db.points.watermark(context_start, context_end, source),
              *events, places, reminders, labels]

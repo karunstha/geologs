@@ -23,7 +23,7 @@ from ..services.fuel import fuel_cost_windows, fuel_status, refresh_prices, upda
 from ..services.ingest import record_locations
 from ..services.location import current_location
 from ..services.overview import daily_briefs, daily_overview, daily_overviews, save_scheduled_summaries, stored_daily_record
-from ..services.paths import learn_recent_paths
+from ..services.paths import learn_path_history, learn_recent_paths, list_paths
 from ..services.patterns import insights, place_overview, place_patterns, predict_next, resolve_place_patterns, search_visits, transitions, visited_places
 from ..services.places import geocode, nearby_places, place_details, places_provider, reverse_geocode
 from ..services.reminders import cancel_reminder, create_reminder
@@ -359,6 +359,7 @@ class Handler(BaseHTTPRequestHandler):
             elif url.path == "/api/reverse": value = reverse_geocode(db, q["lat"], q["lon"], q.get("radius_m"))
             elif url.path == "/api/nearby-places": value = nearby_places(db, q["lat"], q["lon"], q.get("radius_m"), q.get("limit", 15))
             elif url.path == "/api/export.geojson": value = export_geojson(db, q.get("start"), q.get("end"))
+            elif url.path == "/api/paths": value = list_paths(db, q.get("limit", 200))
             else:
                 self.error_json(404, "not found"); return
             self.send_json(200, value)
@@ -467,6 +468,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/observations/delete":
                 result = delete_samples(db, payload.get("ids") or [], payload.get("confirm") is True)
             elif path == "/api/settings": result = save_settings(db, payload)
+            elif path == "/api/paths/learn": result = {**learn_path_history(db), "recent": list_paths(db)["recent"]}
             elif path == "/api/places": result = save_place(db, payload)
             elif path == "/api/places/delete": result = delete_place(db, payload["id"])
             elif path == "/api/place-labels": result = save_place_label(db, payload)

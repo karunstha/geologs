@@ -2185,6 +2185,40 @@ class StoreTests(unittest.TestCase):
         day = day_summary(self.db, "2026-09-27", "UTC")
         self.assertEqual(day["coverage_gaps"], [])
 
+    def test_every_move_between_places_is_a_trip_even_unrecorded(self):
+        # Real fixes from 2026-10-13 (Chicago + 5 h): two buildings 225 m apart, one fix in each, and
+        # nothing in between: the walk is still a trip, said to be unrecorded and without a mode.
+        source = "owntracks:phone"
+        rows = [("18:59:06", 34.72534, -92.34065), ("20:06:43", 34.72341, -92.33989), ("20:40:00", 34.72341, -92.33989)]
+        ingest(self.db, [{"source": source, "external_id": at, "timestamp": f"2026-10-13T{at}+00:00",
+                          "lat": lat, "lon": lon, "accuracy_m": 14} for at, lat, lon in rows])
+        ingest(self.db, [{"source": source, "external_id": "before", "timestamp": "2026-10-13T18:28:47+00:00",
+                          "lat": 34.74628, "lon": -92.37063, "accuracy_m": 2}])
+        day = day_summary(self.db, "2026-10-13", "UTC")
+        (walk,) = [trip for trip in day["trips"] if trip["start"] > "2026-10-13T20:00"]
+        self.assertEqual((walk["recorded"], walk["mode"], walk["coverage_complete"]), (False, None, False))
+        self.assertAlmostEqual(walk["distance_km"], 0.22, delta=0.02)
+        self.assertEqual([leg["kind"] for leg in walk["route"]], ["gap"])
+        # Not counted as any activity, and the brief says only that you moved.
+        self.assertEqual(sum(totals["count"] for totals in day["activity_totals"].values()), 0)
+        self.assertIn("moved 0.2 km", " ".join(daily_brief(daily_overview(self.db, "2026-10-13", "UTC"))["timeline"]))
+        # Nothing it recorded may hide a coverage gap.
+        self.assertEqual(day["coverage_gaps"], [])
+
+    def test_a_trip_way_runs_in_order_and_fills_take_their_gaps_place(self):
+        from geologs.domain.paths import with_fills
+        from geologs.domain.routes import route_legs
+        origin, destination = {"lat": 41.0, "lon": -87.9}, {"lat": 41.0, "lon": -87.8}
+        pieces = [[[-87.89, 41.0], [-87.88, 41.0]], [[-87.85, 41.0]], [[-87.83, 41.0], [-87.82, 41.0]]]
+        legs = route_legs(pieces, origin, destination)
+        self.assertEqual([leg["kind"] for leg in legs], ["gap", "recorded", "gap", "gap", "recorded", "gap"])
+        trip = {"route": legs, "distance_km": 1.0, "mode": "driving", "modes": {"driving": 3}}
+        fill = {"coordinates": [[-87.88, 41.0], [-87.86, 41.01], [-87.85, 41.0]], "past_trips": 2, "mode": "driving", "distance_m": 2500}
+        filled = with_fills(trip, {2: fill})
+        self.assertEqual([leg["kind"] for leg in filled["route"]], ["gap", "recorded", "fill", "gap", "recorded", "gap"])
+        self.assertEqual(trip["route"][2]["kind"], "gap")  # the trip it was given is left as it was
+        self.assertEqual(filled["distance_km"], 3.5)
+
     def test_one_fix_between_quiet_stretches_is_a_stay(self):
         # Real OwnTracks fixes from 2026-10-13 (Chicago time + 5 h): home, a drive, an hour in
         # one building (one 14 m fix), then a walk to another building 225 m away. The 1 km fixes
@@ -2908,6 +2942,42 @@ class IngestTests(LiveServerCase):
 
 
 WEB = Path(__file__).resolve().parent.parent / "src" / "geologs" / "presentation" / "web"
+
+
+class PathSettingsTests(LiveServerCase):
+    """Learned routes in Settings: what the library holds, and learning again on request."""
+
+    def test_learned_routes_are_listed_and_learned_again_on_request(self):
+        bearer = {"Authorization": "Bearer main-token"}
+        corner, work = shifted(HOME, 6000, 0), shifted(HOME, 6000, 6000)
+        db = open_database(self.db)
+        try:
+            ingest(db, minute_fixes([still(HOME, 30), line(HOME, corner, 10), line(corner, work, 10), still(work, 30)]))
+        finally:
+            db.close()
+        self.assertEqual(self.send("GET", "/api/paths", headers=bearer)[1]["paths"], 0)
+        status, learned, _ = self.send("POST", "/api/paths/learn", {}, bearer)
+        self.assertEqual((status, learned["trips"], learned["learned"], learned["paths"]), (200, 1, 1, 1))
+        (path,) = self.send("GET", "/api/paths", headers=bearer)[1]["recent"]
+        self.assertEqual((path["source"], path["mode"], path["started_at"]), ("phone", "driving", "2026-09-27T13:29:00+00:00"))
+        self.assertNotIn("coordinates", path)
+
+
+class DeploymentTests(unittest.TestCase):
+    """What the Docker deployment hands the server."""
+
+    def test_every_setting_the_server_reads_reaches_its_container(self):
+        # The app container gets an explicit list of variables: one left off (EIA_API_KEY was)
+        # is silently missing however it is set in .env.
+        root = Path(__file__).resolve().parent.parent
+        read = set(re.findall(r'_env\("([A-Z_]+)"', (root / "src/geologs/config.py").read_text()))
+        compose = (root / "docker-compose.yaml").read_text()
+        app = compose[compose.index("\n  app:"):]
+        passed = set(re.findall(r"^\s+([A-Z_]+):", app[app.index("environment:"):app.index("ports:")], re.M))
+        # Set by the image (host, port), read from the mounted token file, or only for the command line.
+        elsewhere = {"GEOLOGS_HOST", "GEOLOGS_PORT", "GEOLOGS_INGEST_TOKEN", "GEOLOGS_DB", "GEOLOGS_ENV_FILE",
+                     "GEOLOGS_URL", "HA_URL", "HA_TOKEN", "HA_ENTITY"}
+        self.assertEqual(read - passed - elsewhere, set())
 
 
 class WebAppTests(LiveServerCase):

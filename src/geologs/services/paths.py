@@ -49,15 +49,14 @@ def fill_gap(db, a, b):
 
 @use_case
 def fill_trip(db, trip):
-    """Replace a trip's unrecorded legs with known routes where there is one (see with_fills)."""
-    fills, gaps = [], []
-    for gap in trip.get("route_gaps") or []:
-        fill = fill_gap(db, gap[0], gap[-1])
-        if fill:
-            fills.append(fill)
-        else:
-            gaps.append(gap)
-    return with_fills(trip, fills, gaps)
+    """Fill a trip's unrecorded legs with known routes where there is one (see with_fills)."""
+    filled = {}
+    for index, leg in enumerate(trip.get("route") or []):
+        if leg["kind"] == "gap":
+            fill = fill_gap(db, leg["coordinates"][0], leg["coordinates"][-1])
+            if fill:
+                filled[index] = fill
+    return with_fills(trip, filled)
 
 
 @use_case
@@ -70,6 +69,12 @@ def report(db):
             "by_source": dict(Counter(row["source"] for row in rows).most_common()),
             "first": min((row["started_at"] for row in rows), default=None),
             "last": max((row["started_at"] for row in rows), default=None)}
+
+
+@use_case
+def list_paths(db, limit=200):
+    """What the library holds (see report), with its latest paths: which trips taught a route, for checking."""
+    return {**report(db), "recent": db.paths.recent(limit)}
 
 
 @use_case

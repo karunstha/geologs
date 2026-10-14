@@ -363,6 +363,13 @@
   font-size: 12px;
   font-weight: 700;
 }
+.pin-badge.many {
+  flex: 0 0 auto;
+  width: auto;
+  min-width: 26px;
+  padding: 0 8px;
+  border-radius: 13px;
+}
 .pin-badge.home {
   background: #5b7286;
   color: #fff;

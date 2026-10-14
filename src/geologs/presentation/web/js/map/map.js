@@ -3,7 +3,7 @@ import { api } from "../core/api.js";
 import { $, copyText, safe, toast } from "../core/dom.js";
 import { clock, coordinateText, durationText, formatTime, kmh, lengthText, localDateKey } from "../core/format.js";
 import { state } from "../core/state.js";
-import { modeInfo, modeName, placeIcons } from "../ui/icons.js";
+import { modeInfo, modeName, placeIcons, visitNumbers } from "../ui/icons.js";
 import { params } from "../views/history.js";
 import { dayVisits, editVisitedPlace } from "../views/place-dialogs.js";
 import { renderModePicker, stayWhen } from "../views/timeline.js";
@@ -134,6 +134,64 @@ export function fitDay() {
     map.fitBounds(L.latLngBounds(state.places.map((p) => [p.lat, p.lon])).pad(0.2), { maxZoom: 13 });
 }
 
+// How each kind of leg is drawn: recorded solid, a likely route (from past trips) dashed,
+// and a stretch nothing recorded dotted.
+const LEG_STYLES = {
+  recorded: { weight: 4, opacity: 0.95 },
+  fill: { weight: 4, opacity: 0.8, dashArray: "10 6" },
+  gap: { weight: 3, opacity: 0.75, dashArray: "2 7" },
+};
+const SHADE_BANDS = 8;
+
+// A mode's colour, lighter at the start of a path (t = 0) and darker at its end (t = 1).
+function shade(hex, t) {
+  const rgb = [1, 3, 5].map((index) => parseInt(hex.slice(index, index + 2), 16));
+  const towards = t < 0.5 ? 255 : 0;
+  const amount = t < 0.5 ? 0.55 * (1 - 2 * t) : 0.35 * (2 * t - 1);
+  return "#" + rgb.map((value) => Math.round(value + (towards - value) * amount).toString(16).padStart(2, "0")).join("");
+}
+
+// Draw one trip (or a move within a place) leg by leg in the order it went, shaded light to dark
+// along its length, so the way it went reads at a glance.
+function drawRoute(trip, onClick, dashArray) {
+  const color = modeInfo[trip.mode]?.color || "#6f7b76";
+  const legs = trip.route || [
+    ...(trip.route_segments || []).map((coordinates) => ({ kind: "recorded", coordinates })),
+    ...(trip.route_fills || []).map((fill) => ({ kind: "fill", ...fill })),
+    ...(trip.route_gaps || []).map((coordinates) => ({ kind: "gap", coordinates })),
+  ];
+  const step = (a, b) => Math.hypot((b[0] - a[0]) * Math.cos((a[1] * Math.PI) / 180), b[1] - a[1]);
+  const total = legs.reduce((sum, leg) => sum + leg.coordinates.slice(1).reduce((acc, point, index) => acc + step(leg.coordinates[index], point), 0), 0) || 1;
+  let travelled = 0;
+  for (const leg of legs) {
+    // Split the leg where its shade changes band, so a long leg darkens along its way.
+    let run = [leg.coordinates[0]],
+      band = Math.min(SHADE_BANDS - 1, Math.floor((travelled / total) * SHADE_BANDS));
+    const flush = () => {
+      if (run.length < 2) return;
+      const line = L.polyline(mapPath(run), {
+        ...LEG_STYLES[leg.kind],
+        ...(dashArray ? { dashArray, weight: 3 } : {}),
+        color: shade(color, (band + 0.5) / SHADE_BANDS),
+      }).on("click", onClick);
+      if (leg.kind === "fill")
+        line.bindTooltip(`Likely route · from ${leg.past_trips === 1 ? "1 past trip" : leg.past_trips + " past trips"}`, { sticky: true });
+      line.addTo(pathLayer);
+    };
+    for (let index = 1; index < leg.coordinates.length; index++) {
+      travelled += step(leg.coordinates[index - 1], leg.coordinates[index]);
+      run.push(leg.coordinates[index]);
+      const next = Math.min(SHADE_BANDS - 1, Math.floor((travelled / total) * SHADE_BANDS));
+      if (next !== band) {
+        flush();
+        run = [leg.coordinates[index]];
+        band = next;
+      }
+    }
+    flush();
+  }
+}
+
 export function drawMap(fit = false) {
   if (!map) return;
   pathLayer.clearLayers();
@@ -148,54 +206,10 @@ export function drawMap(fit = false) {
     L.polyline(mapPath(segment), { color: "#8ea8a2", weight: 3, opacity: 0.7, interactive: false }).addTo(
       pathLayer,
     );
-  for (const trip of day?.trips || []) {
-    for (const segment of trip.route_segments || [])
-      L.polyline(mapPath(segment), {
-        color: modeInfo[trip.mode]?.color || "#176d69",
-        weight: 4,
-        opacity: 0.9,
-      })
-        .on("click", () => selectItem("trip", tripKey(trip)))
-        .addTo(pathLayer);
-    // Unrecorded stretches filled from past trips: probably this way.
-    for (const fill of trip.route_fills || [])
-      L.polyline(mapPath(fill.coordinates), {
-        color: modeInfo[trip.mode]?.color || "#176d69",
-        weight: 4,
-        opacity: 0.55,
-        dashArray: "10 6",
-      })
-        .bindTooltip(`Likely route · from ${fill.past_trips === 1 ? "1 past trip" : fill.past_trips + " past trips"}`, {
-          sticky: true,
-        })
-        .on("click", () => selectItem("trip", tripKey(trip)))
-        .addTo(pathLayer);
-    // Unrecorded stretches: you went this way, but not along this line.
-    for (const segment of trip.route_gaps || [])
-      L.polyline(mapPath(segment), {
-        color: modeInfo[trip.mode]?.color || "#176d69",
-        weight: 3,
-        opacity: 0.6,
-        dashArray: "2 7",
-      })
-        .on("click", () => selectItem("trip", tripKey(trip)))
-        .addTo(pathLayer);
-  }
+  for (const trip of day?.trips || []) drawRoute(trip, () => selectItem("trip", tripKey(trip)));
   for (const stay of day?.stays || []) {
-    for (const move of stay.internal_moves || [])
-      for (const segment of [
-        ...(move.route_segments || []),
-        ...(move.route_fills || []).map((fill) => fill.coordinates),
-        ...(move.route_gaps || []),
-      ])
-        L.polyline(mapPath(segment), {
-          color: modeInfo[move.mode]?.color || "#176d69",
-          weight: 3,
-          opacity: 0.8,
-          dashArray: "6 6",
-        })
-          .on("click", () => selectItem("stay", stay.id))
-          .addTo(pathLayer);
+    // A move within a place (between buildings) keeps its own dashes, shaded the same way.
+    for (const move of stay.internal_moves || []) drawRoute(move, () => selectItem("stay", stay.id), "6 6");
     if (stay.kind !== "area") continue;
     L.circle([stay.lat, stay.lon], {
       radius: stay.radius_m || 50,
@@ -246,14 +260,16 @@ export function drawMap(fit = false) {
       )
       .addTo(placeLayer);
   }
-  const numbers = new Map((day?.visited_places || []).map((place, index) => [place.cluster_id, index + 1]));
+  const numbers = visitNumbers(day).byPlace;
   for (const place of day?.places_including_home || []) {
     const number = numbers.get(place.cluster_id);
+    // A place visited more than once carries every visit's number ("1·3"), in a pill as wide as they need.
+    const width = number && number.length > 2 ? 14 + 7 * number.length : 28;
     const icon = L.divIcon({
-      className: "visit-pin" + (number ? "" : " home"),
-      html: number ? String(number) : placeIcons.home,
-      iconSize: [28, 28],
-      iconAnchor: [14, 14],
+      className: "visit-pin" + (number ? (number.length > 2 ? " many" : "") : " home"),
+      html: number ? number : placeIcons.home,
+      iconSize: [width, 28],
+      iconAnchor: [width / 2, 14],
     });
     const minutes = durationText(place.observed_minutes);
     L.marker([place.lat, place.lon], { icon, title: place.name || place.display_name })

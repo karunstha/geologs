@@ -36,16 +36,33 @@ def route_segments_from_points(points, keep_lone=False):
     return segments
 
 
-def route_gaps(pieces, origin, destination):
-    """Straight [lon, lat] legs over a trip's unrecorded stretches.
+def route_legs(pieces, origin, destination):
+    """A trip's way from one stay to the next, in order: {"kind", "coordinates"} legs.
 
-    A trip runs from one stay to the next, so where its recorded pieces (in
-    time order) stop short of those stays or of each other, you still went
-    that way; a sparse tracker leaves most of a trip like this.
+    Recorded pieces (in time order) are "recorded" legs; where they stop short
+    of the stays or of each other, a straight "gap" leg joins them: you still
+    went that way. A sparse tracker leaves most of a trip like this, and a fix
+    on its own is only a point the way passed through.
     """
     ends = [[[origin["lon"], origin["lat"]]], *pieces, [[destination["lon"], destination["lat"]]]]
-    return [[before[-1], after[0]] for before, after in zip(ends, ends[1:])
-            if metres(before[-1][1], before[-1][0], after[0][1], after[0][0]) > ROUTE_GAP_MIN_M]
+    legs = []
+    for index, (before, after) in enumerate(zip(ends, ends[1:])):
+        if metres(before[-1][1], before[-1][0], after[0][1], after[0][0]) > ROUTE_GAP_MIN_M:
+            legs.append({"kind": "gap", "coordinates": [before[-1], after[0]]})
+        if index < len(pieces) and len(after) > 1:
+            legs.append({"kind": "recorded", "coordinates": after})
+    return legs
+
+
+def route_gaps(pieces, origin, destination):
+    """Straight [lon, lat] legs over a trip's unrecorded stretches (see route_legs)."""
+    return [leg["coordinates"] for leg in route_legs(pieces, origin, destination) if leg["kind"] == "gap"]
+
+
+def legs_length_m(legs, kind):
+    """How far a trip's legs of one kind run."""
+    return sum(metres(a[1], a[0], b[1], b[0]) for leg in legs if leg["kind"] == kind
+               for a, b in zip(leg["coordinates"], leg["coordinates"][1:]))
 
 
 def smooth_route_segment(coordinates, samples_per_leg=4):

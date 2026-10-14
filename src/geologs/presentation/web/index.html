@@ -100,7 +100,7 @@
         <section class="card flush map-shell" aria-label="Recorded location map">
           <div class="map-topline"><strong id="map-note" class="map-note">Recorded route</strong><div class="map-actions"><button id="fit-day" class="button secondary small" type="button" hidden>Whole day</button><button id="locate" class="button secondary small" type="button" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/></svg><span>Current location</span></button></div></div>
           <div class="map-stage"><div id="map" role="application" aria-label="Location map"></div></div>
-          <div id="map-footer" class="map-footer" hidden><span id="map-legend" class="map-legend"></span><span class="map-caveat">Unrecorded stretches follow past trips where they can, else run straight</span></div>
+          <div id="map-footer" class="map-footer" hidden><span id="map-legend" class="map-legend"></span><span class="map-caveat">Paths run light to dark from start to end; unrecorded stretches follow past trips where they can, else run straight</span></div>
         </section>
         <aside id="inspector" class="card flush inspector" hidden aria-label="Day timeline">
           <section class="timeline-section"><div class="card-head compact"><h2>Timeline</h2><span class="timeline-tools"><span id="timeline-count" class="badge"></span><button id="add-stay" type="button" class="button ghost small" title="Add a stay or stop the timeline missed"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span>Add a stay</span></button></span></div><ol id="day-timeline" class="day-timeline"></ol></section>
@@ -182,6 +182,7 @@
             <button type="button" class="settings-tab" data-settings-page="settings-stays"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21s-6.5-5.4-6.5-11a6.5 6.5 0 0 1 13 0c0 5.6-6.5 11-6.5 11Z"/><circle cx="12" cy="10" r="2.3"/></svg><span>Stays &amp; stops</span></button>
             <button type="button" class="settings-tab" data-settings-page="settings-movement"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 16a8 8 0 1 1 16 0"/><path d="m12 16 4-5"/><path d="M4 19.5h16"/></svg><span>Movement</span></button>
             <button type="button" class="settings-tab" data-settings-page="settings-places"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6.5 9 4l6 2.5L20 4v13.5L15 20l-6-2.5L4 20Z"/><path d="M9 4v13.5M15 6.5V20"/></svg><span>Place names</span></button>
+            <button type="button" class="settings-tab" data-settings-page="settings-paths"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="18" r="2"/><circle cx="18" cy="6" r="2"/><path d="M8 18h5a3 3 0 0 0 0-6h-2a3 3 0 0 1 0-6h5"/></svg><span>Learned routes</span></button>
             <button type="button" class="settings-tab" data-settings-page="settings-summaries"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="15.5" rx="2"/><path d="M3.5 9.5h17M8 3v4M16 3v4M8 13.5h4M8 16.5h7"/></svg><span>Days &amp; summaries</span></button>
           </div>
           <div class="settings-group" data-group="preferences" role="group" aria-labelledby="settings-group-preferences"><p id="settings-group-preferences" class="settings-group-label">Preferences</p>
@@ -264,6 +265,14 @@
               <p class="help setting-note">After switching, names are looked up again with the new provider as you view them. Your own name corrections always win.</p>
               <div class="card-foot"><button class="button primary">Save changes</button></div>
             </form>
+          </section>
+
+          <section id="settings-paths" class="settings-section" aria-labelledby="paths-title" hidden>
+            <div class="section-intro"><h2 id="paths-title">Learned routes</h2><p>Routes learned from trips your trackers recorded end to end. They fill in the unrecorded stretches of sparse trips, shown dashed as a likely route.</p></div>
+            <div class="card" id="paths-card">
+              <div class="card-head"><div><h3 id="paths-summary">Learned routes</h3><p>Learned in the background as new samples arrive. Learn again after importing history or changing how stays are found; it reads every trip on record, so it can take a while.</p></div><button id="learn-paths" type="button" class="button secondary small">Learn again</button></div>
+              <ul id="path-list" class="list rows"></ul>
+            </div>
           </section>
 
           <section id="settings-summaries" class="settings-section" aria-labelledby="summaries-settings-title" hidden>

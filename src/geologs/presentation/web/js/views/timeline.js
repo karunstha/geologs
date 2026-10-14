@@ -4,7 +4,7 @@ import { $, safe, toast } from "../core/dom.js";
 import { clock, distanceText, durationText, fuelText, lengthText } from "../core/format.js";
 import { state } from "../core/state.js";
 import { selectItem, selectedItem, stayColor, tripKey } from "../map/map.js";
-import { modeIcon, modeInfo, modeName, pinBadge, zoneText } from "../ui/icons.js";
+import { modeIcon, modeInfo, modeName, pinBadge, visitNumbers, zoneText } from "../ui/icons.js";
 import { refreshExplore } from "./history.js";
 import { keepPossibleStop, openStopDialog, removeStay } from "./stay-edits.js";
 
@@ -154,7 +154,7 @@ export function movedWithin(stay) {
 }
 
 export function renderTimeline(day) {
-  const numbers = new Map(day.visited_places.map((place, index) => [place.cluster_id, index + 1]));
+  const numbers = visitNumbers(day).byStay;
   const items = [
     ...day.stays.map((stay) => ({ type: "stay", at: stay.started_at, stay })),
     ...day.trips.map((trip) => ({ type: "trip", at: trip.start, trip })),
@@ -182,13 +182,15 @@ export function renderTimeline(day) {
           return `<li class="tl-gap"><span>No location data</span><small>${safe(clock(item.gap.start))} – ${safe(clock(item.gap.end))} · ${safe(durationText(item.gap.minutes))}</small></li>`;
         if (item.type === "stay") {
           const stay = item.stay;
-          return `<li><button type="button" class="tl-stay" data-item="stay:${stay.id}" aria-pressed="false">${pinBadge(numbers.get(stay.cluster_id))}<span class="tl-body"><strong>${safe(stay.display_name || stay.place_name || "Observed stay")}</strong><small>${safe([zoneText(stay.zone, stay.display_name), stayWhen(stay, day), durationText(stay.observed_minutes)].filter(Boolean).join(" · "))}</small>${originTag(stay)}${activityTag(stay)}${movedWithin(stay)}</span></button></li>`;
+          return `<li><button type="button" class="tl-stay" data-item="stay:${stay.id}" aria-pressed="false">${pinBadge(numbers.get(stay.id))}<span class="tl-body"><strong>${safe(stay.display_name || stay.place_name || "Observed stay")}</strong><small>${safe([zoneText(stay.zone, stay.display_name), stayWhen(stay, day), durationText(stay.observed_minutes)].filter(Boolean).join(" · "))}</small>${originTag(stay)}${activityTag(stay)}${movedWithin(stay)}</span></button></li>`;
         }
         const trip = item.trip,
-          info = modeInfo[trip.mode] || { label: "Trip", color: "#6f7b76" };
+          // A move nothing recorded has no mode until you set one (or a past trip's route gives it one).
+          info = modeInfo[trip.mode] || { label: "Moved", color: "#6f7b76" };
         const notes = [`${clock(trip.start)} – ${clock(trip.end)}`, durationText(trip.duration_minutes)];
         if (trip.fuel) notes.push(`${fuelText(trip.fuel.cost, trip.fuel.litres)} fuel`);
         if (trip.route_fills?.length) notes.push("route from past trips");
+        else if (trip.recorded === false) notes.push("not recorded");
         else if (!trip.coverage_complete) notes.push("coverage gap");
         if (trip.mode_corrected) notes.push("set by you");
         // A trip that ends where it began left and came back; say so rather than implying travel to where you already were.

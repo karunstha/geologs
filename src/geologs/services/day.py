@@ -40,7 +40,7 @@ def day_summary(db, date, timezone_name="UTC", source=None):
 
     def day_cache_key():
         # Filled routes come from paths learned on other days too.
-        cache_identity = json.dumps(["day-v18", date, timezone_name, source, provider, db.settings.get()["source_priority"],
+        cache_identity = json.dumps(["day-v19", date, timezone_name, source, provider, db.settings.get()["source_priority"],
                                      fuel_signature(db), db.paths.signature()], separators=(",", ":"))
         return "day:" + hashlib.sha256(cache_identity.encode()).hexdigest()
 
@@ -123,7 +123,7 @@ def day_summary(db, date, timezone_name="UTC", source=None):
             # off campus, a run from home) stays; drift is dropped.
             if trip.get("went_elsewhere") is False:
                 move = {key: trip.get(key) for key in ("source", "start", "end", "mode", "distance_km", "duration_minutes",
-                                                       "route_segments", "route_gaps", "route_fills", "mode_corrected")}
+                                                       "route", "route_segments", "route_gaps", "route_fills", "mode_corrected", "recorded")}
                 # Crossing a campus from sparse fixes looks fast: the phone held
                 # its last position, then jumped. Under 1 km inside one place is
                 # walking between buildings, not a ride or the car you arrived
@@ -161,7 +161,8 @@ def day_summary(db, date, timezone_name="UTC", source=None):
             stay["route_segments"] = [smooth_route_segment(segment) for segment in route_segments_from_points(path)]
     route_segments = [smooth_route_segment(segment) for segment in route_segments_from_points(chronological)]
     activity_totals = {mode: {"count": 0, "distance_km": 0.0, "minutes": 0.0} for mode in MOVEMENT_MODES}
-    for trip in trips:
+    # A move nothing recorded has no mode yet: it is not counted as any activity.
+    for trip in (trip for trip in trips if trip["mode"] in activity_totals):
         totals = activity_totals[trip["mode"]]
         totals["count"] += 1
         totals["distance_km"] += trip["distance_km"]
@@ -172,7 +173,7 @@ def day_summary(db, date, timezone_name="UTC", source=None):
             totals["count"] += 1
             totals["distance_km"] += (stay.get("distance_m") or 0) / 1000
             totals["minutes"] += stay["observed_minutes"]
-        for move in stay["internal_moves"]:
+        for move in (move for move in stay["internal_moves"] if move["mode"] in activity_totals):
             totals = activity_totals[move["mode"]]
             totals["count"] += 1
             totals["distance_km"] += move["distance_km"]
@@ -191,7 +192,7 @@ def day_summary(db, date, timezone_name="UTC", source=None):
             "activity_counts": activity_counts, "activity_totals": activity_totals,
             "movement_minutes": round(sum(totals["minutes"] for totals in activity_totals.values()), 1),
             "movement_km": round(sum(totals["distance_km"] for totals in activity_totals.values()), 2),
-            "coverage_gaps": coverage_gaps(points, trips, day_stays), "timeline_sources": timeline_sources,
+            "coverage_gaps": coverage_gaps(points, [trip for trip in trips if trip.get("recorded", True)], day_stays), "timeline_sources": timeline_sources,
             "samples_by_source": samples_by_source,
             "stay_edits": edits, "possible_stops": possible_stops, "fuel": day_fuel,
             "visited_places": visited_places, "places_including_home": places_including_home,

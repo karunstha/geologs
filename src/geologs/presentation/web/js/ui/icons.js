@@ -97,10 +97,27 @@ export function placeIcon(place) {
   return `<span class="place-icon ${kind}" title="${safe(kind)}" aria-hidden="true">${placeIcons[kind]}</span>`;
 }
 
-export function pinBadge(number) {
-  return number
-    ? `<span class="pin-badge">${number}</span>`
+// A stop's number (or a place's numbers, such as "1·3"); Home keeps its house.
+export function pinBadge(label) {
+  return label
+    ? `<span class="pin-badge${String(label).length > 2 ? " many" : ""}">${label}</span>`
     : `<span class="pin-badge home" title="Home">${placeIcons.home}</span>`;
+}
+
+// Stops numbered in the order you reached them: each stay's number, and every number of
+// each place, so a return visit is the next number, not the place's first one again.
+export function visitNumbers(day) {
+  const visited = new Set((day?.visited_places || []).map((place) => place.cluster_id));
+  const byStay = new Map(),
+    byPlace = new Map();
+  let next = 1;
+  for (const stay of [...(day?.stays || [])].sort((a, b) => a.started_at.localeCompare(b.started_at))) {
+    if (!visited.has(stay.cluster_id)) continue; // Home
+    byStay.set(stay.id, next);
+    byPlace.set(stay.cluster_id, [...(byPlace.get(stay.cluster_id) || []), next]);
+    next += 1;
+  }
+  return { byStay, byPlace: new Map([...byPlace].map(([place, numbers]) => [place, numbers.join("·")])) };
 }
 
 export const summaryIcons = {

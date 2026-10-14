@@ -46,7 +46,8 @@ def money_text(amount, currency):
 
 
 def _brief_move(mode, distance_km):
-    return BRIEF_MOVES.get(mode, mode + " {}").format(f"{distance_km or 0:.1f} km")
+    # A move nothing recorded has no mode: say only that you moved.
+    return BRIEF_MOVES.get(mode, (mode or "moved") + " {}").format(f"{distance_km or 0:.1f} km")
 
 
 def _brief_count(count, noun):

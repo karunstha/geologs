@@ -176,26 +176,36 @@ def best_route(a, b, known):
             "distance_m": round(sum(math.hypot(bx - ax, by - ay) for (ax, ay), (bx, by) in zip(points, points[1:])), 1)}
 
 
-def with_fills(trip, fills, gaps):
+def with_fills(trip, filled):
     """A copy of a trip whose unrecorded legs were filled from known routes where there was one.
 
-    Filled legs move from route_gaps to route_fills and count toward the
-    trip's distance. A trip mostly made of them takes their mode, unless you
-    corrected it: a few fixes rolling away from home say little about how
-    you crossed town.
+    `filled` maps the index of a gap leg in trip["route"] to its fill (see
+    best_route). A filled leg becomes a "fill" leg in place and counts toward
+    the trip's distance (an unrecorded trip's distance is its legs'). A trip
+    mostly made of them takes their mode, unless you corrected it: a few fixes
+    rolling away from home say little about how you crossed town.
     """
-    trip = {**trip, "route_fills": fills, "route_gaps": gaps}
+    legs = [{"kind": "fill", "coordinates": filled[index]["coordinates"], "past_trips": filled[index]["past_trips"],
+             "mode": filled[index]["mode"]} if index in filled else leg for index, leg in enumerate(trip.get("route") or [])]
+    fills = [filled[index] for index in sorted(filled)]
+    trip = {**trip, "route": legs, "route_fills": fills,
+            "route_gaps": [leg["coordinates"] for leg in legs if leg["kind"] == "gap"]}
     if not fills:
         return trip
     filled_km = sum(fill["distance_m"] for fill in fills) / 1000
-    recorded_km = trip["distance_km"]
-    trip.update(recorded_km=recorded_km, filled_km=round(filled_km, 2), distance_km=round(recorded_km + filled_km, 2))
+    if trip.get("recorded", True):
+        recorded_km = trip["distance_km"]
+        distance_km = recorded_km + filled_km
+    else:
+        recorded_km = 0.0
+        distance_km = filled_km + sum(metres(a[1], a[0], b[1], b[0]) for leg in legs if leg["kind"] == "gap"
+                                      for a, b in zip(leg["coordinates"], leg["coordinates"][1:])) / 1000
+    trip.update(recorded_km=recorded_km, filled_km=round(filled_km, 2), distance_km=round(distance_km, 2))
     by_mode = Counter()
     for fill in fills:
         by_mode[fill["mode"]] += fill["distance_m"]
     mode = by_mode.most_common(1)[0][0]
     if filled_km > FILL_MODE_SHARE * trip["distance_km"] and mode != trip["mode"] and not trip.get("mode_corrected"):
-        trip.update(detected_mode=trip["mode"], mode=mode, modes={mode: sum(trip["modes"].values())},
+        trip.update(detected_mode=trip["mode"], mode=mode, modes={mode: sum(trip["modes"].values()) or 1},
                     mode_from_paths=True)
     return trip
-

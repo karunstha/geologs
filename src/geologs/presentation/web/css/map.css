@@ -9,6 +9,9 @@
   font: 700 12px/1 var(--font);
   box-shadow: 0 2px 8px rgb(0 0 0/0.3);
 }
+.visit-pin.many {
+  border-radius: 14px;
+}
 .visit-pin.home {
   background: #5b7286;
   color: #fff;

@@ -222,6 +222,7 @@ export function showSettingsPage(id) {
     sessionStorage.setItem(SETTINGS_PAGE_KEY, id);
   } catch (_error) {}
   if (id === "settings-car" && state.settings) refreshFuel(true).catch((error) => toast(error.message));
+  if (id === "settings-paths") refreshPaths().catch((error) => toast(error.message));
   document.querySelector(".settings-tab.active")?.scrollIntoView({ block: "nearest", inline: "nearest" });
 }
 
@@ -548,6 +549,46 @@ function initTokens() {
       await refreshTokens();
     } catch (error) {
       toast(error.message);
+    }
+  };
+}
+
+// Learned routes: what the library holds, and the trips that taught it, each a link to its day.
+function renderPaths(data) {
+  const modes = Object.entries(data.by_mode || {})
+    .map(([mode, count]) => `${count} ${(modeInfo[mode]?.noun || mode).toLowerCase()}`)
+    .join(", ");
+  $("paths-summary").textContent = data.paths
+    ? `${plural(data.paths, "route")} · ${distanceText(data.km)}${modes ? " · " + modes : ""}`
+    : "No routes learned yet";
+  const rows = (data.recent || []).map((path) => {
+    const day = localDateKey(new Date(path.started_at));
+    const when = `${formatTime(path.started_at)} – ${new Date(path.ended_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", ...zoneOptions() })}`;
+    return `<li class="list-item"><div class="place-main">${modeIcon(path.mode)}<div><strong>${safe(modeInfo[path.mode]?.label || path.mode)} · ${safe(distanceText(path.distance_m / 1000))}</strong><small>${safe(when)} · ${safe(trackerLabel(path.source))}</small></div></div><a class="button ghost small" href="#date=${day}">Open day</a></li>`;
+  });
+  $("path-list").innerHTML =
+    rows.join("") ||
+    '<li class="empty-block"><strong>Nothing learned yet</strong><span>A route is learned from a trip recorded end to end, with fixes at most about a kilometre apart.</span></li>';
+}
+
+async function refreshPaths() {
+  renderPaths(await api("/api/paths"));
+}
+
+function initPaths() {
+  $("learn-paths").onclick = async () => {
+    const button = $("learn-paths");
+    button.disabled = true;
+    button.textContent = "Learning…";
+    try {
+      const result = await post("/api/paths/learn", {});
+      renderPaths(result);
+      toast(`Learned ${plural(result.learned, "route")} from ${plural(result.trips, "trip")}`);
+    } catch (error) {
+      toast(error.message);
+    } finally {
+      button.disabled = false;
+      button.textContent = "Learn again";
     }
   };
 }
@@ -1023,6 +1064,7 @@ export function initSettings() {
   initPriorityDrag();
   initFuel();
   initTokens();
+  initPaths();
   for (const [mode] of SPEED_FIELDS)
     $(`speed-${mode}-name`).innerHTML = `${modeIcon(mode)}${safe(modeInfo[mode].noun)}`;
   document.querySelectorAll(".settings-tab").forEach((tab) => (tab.onclick = () => showSettingsPage(tab.dataset.settingsPage)));
