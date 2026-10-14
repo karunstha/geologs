@@ -12,6 +12,7 @@ from collections import Counter
 
 from .geo import metres
 from .motion import MOVEMENT_MODES
+from .routes import ROUTE_GAP_MIN_M, ROUTE_JUMP_M
 from .paths import (DETOUR_SLACK_M, MATCH_M, MAX_DETOUR, SAME_ROUTE_M, PLACE_FOLLOW_M, PLACE_FOLLOW_MAX_M, PLACE_FOLLOW_SHARE,
                     PLACE_ORDER_SLACK_M, path_length, project_onto, simplify, stay_reach, to_lonlat, to_xy)
 
@@ -23,16 +24,22 @@ ROUTE_SEED_SHARE = .5
 # A fix where a route is still unobserved lies on it when it is this share of that
 # stretch's length off its straight line, at most (the road it stands for may bend).
 UNOBSERVED_SHARE = .5
+# A route's shape between two fixes farther apart than this is a straight guess, whatever
+# their timing (a fix a minute on a highway): a denser recording replaces it, and it is
+# matched as unobserved. A trip still counts it towards starting a route (see ROUTE_SEED_SHARE).
+COARSE_STEP_M = ROUTE_JUMP_M
+# Unobserved bits shorter than this between observed ones are drawn as part of them.
+SEAM_M = ROUTE_GAP_MIN_M
 # Walking between two places and driving between them take different ways.
 ON_FOOT = {"walking", "running"}
 
 
 def observed_pieces(legs):
-    """The [lon, lat] pieces of a trip's way that were recorded, in order: recorded legs, and the
-    fixes on their own between unrecorded legs, as one-point pieces. The stays at the ends are not fixes."""
+    """The [lon, lat] pieces of a trip's way that were recorded, in order: recorded legs' fixes, and
+    the fixes on their own between unrecorded legs, as one-point pieces. The stays at the ends are not fixes."""
     pieces = []
     for index, leg in enumerate(legs):
-        coordinates = leg["coordinates"]
+        coordinates = leg.get("fixes") or leg["coordinates"]
         if leg["kind"] == "recorded":
             if pieces and len(pieces[-1]) == 1 and pieces[-1][0] == coordinates[0]:
                 pieces.pop()
@@ -52,7 +59,7 @@ def track_from_trip(trip):
     """
     if trip.get("loop") or not trip.get("route"):
         return None
-    pieces = [simplify(piece) for piece in observed_pieces(trip["route"])]
+    pieces = observed_pieces(trip["route"])
     if not pieces:
         return None
     start, end = [trip["from_lon"], trip["from_lat"]], [trip["to_lon"], trip["to_lat"]]
@@ -150,6 +157,27 @@ def _way_parts(track):
     return [part for part in parts if part["observed"] or path_length(part["coordinates"]) > 0]
 
 
+def _split_coarse(parts):
+    """Observed parts with any step longer than COARSE_STEP_M taken out, as unobserved parts."""
+    result = []
+    for part in parts:
+        if not part["observed"]:
+            result.append(part)
+            continue
+        run = [part["coordinates"][0]]
+        for before, point in zip(part["coordinates"], part["coordinates"][1:]):
+            if metres(before[1], before[0], point[1], point[0]) > COARSE_STEP_M:
+                if len(run) > 1:
+                    result.append({"coordinates": run, "observed": True})
+                result.append({"coordinates": [before, point], "observed": False})
+                run = [point]
+            else:
+                run.append(point)
+        if len(run) > 1:
+            result.append({"coordinates": run, "observed": True})
+    return result
+
+
 def _splice(chord, piece, lat0):
     """Unobserved chord parts with what a recorded piece shows of the way between its ends.
 
@@ -200,7 +228,7 @@ def build(tracks):
     there. So where several trips recorded a stretch, the densest piece wins.
     """
     ordered = sorted(tracks, key=lambda track: (-track["observed_m"], track["started_at"]))
-    parts = _way_parts(ordered[0])
+    parts = _split_coarse(_way_parts(ordered[0]))
     lat0 = ordered[0]["from"][1]
     for track in ordered[1:]:
         for piece in track["pieces"]:
@@ -209,9 +237,11 @@ def build(tracks):
             spliced = []
             for part in parts:
                 replaced = None if part["observed"] else _splice(part["coordinates"], piece, lat0)
-                spliced += replaced or [part]
+                spliced += _split_coarse(replaced) if replaced else [part]
             parts = spliced
-    return [part for part in parts if path_length(part["coordinates"]) > 0 or part["observed"]]
+    # Fixes close together show the way's shape to within SIMPLIFY_M; it is kept no closer.
+    return [{**part, "coordinates": simplify(part["coordinates"])} if part["observed"] else part
+            for part in parts if path_length(part["coordinates"]) > 0 or part["observed"]]
 
 
 def route_from(tracks, members):
@@ -289,8 +319,20 @@ def route_stretch(route, fit, a, b):
             parts[-1]["xy"].append(q)
         else:
             parts.append({"xy": [p, q], "observed": flag})
+    # A seam too short to see between observed parts is drawn as part of them.
+    for index, part in enumerate(parts):
+        seam_m = sum(math.hypot(bx - ax, by - ay) for (ax, ay), (bx, by) in zip(part["xy"], part["xy"][1:]))
+        if (not part["observed"] and seam_m < SEAM_M
+                and any(0 <= other < len(parts) and parts[other]["observed"] for other in (index - 1, index + 1))):
+            part["observed"] = True
+    merged = []
+    for part in parts:
+        if merged and merged[-1]["observed"] == part["observed"]:
+            merged[-1]["xy"] += part["xy"][1:]
+        else:
+            merged.append(part)
     return [{"coordinates": [to_lonlat(x, y, lat0) for x, y in part["xy"]], "observed": part["observed"],
-             "distance_m": round(path_length([to_lonlat(x, y, lat0) for x, y in part["xy"]]), 1)} for part in parts]
+             "distance_m": round(path_length([to_lonlat(x, y, lat0) for x, y in part["xy"]]), 1)} for part in merged]
 
 
 def best_place_route(routes, a, b, fixes, mode=None):

@@ -158,12 +158,12 @@ def trips_between_stays(points, stay_rows, start=None, end=None, speeds=None):
                 if not same_source_state(previous, point):
                     held_since = point
             motion = classify_motion(moves, speeds)
-            pieces, jumps = [], set()
+            fixes, jumps = [], set()
             for run in connected_runs(trip_points, keep_lone=True):
                 split = split_at_jumps(run)
-                jumps.update(range(len(pieces) + 1, len(pieces) + len(split)))
-                pieces += [smooth_route_segment([[point["lon"], point["lat"]] for point in piece]) for piece in split]
-            legs = route_legs(pieces, origin, destination, jumps)
+                jumps.update(range(len(fixes) + 1, len(fixes) + len(split)))
+                fixes += [[[point["lon"], point["lat"]] for point in piece] for piece in split]
+            legs = route_legs([smooth_route_segment(piece) for piece in fixes], origin, destination, jumps, fixes)
             # Stays carry this flag from analysis; compute it for hand-built rows.
             left = (destination["went_elsewhere"] if "went_elsewhere" in destination
                     else went_elsewhere_between(trip_points[1:-1], origin, destination))

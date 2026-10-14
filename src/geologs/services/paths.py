@@ -5,7 +5,8 @@ from datetime import datetime, timedelta, timezone
 
 from ..domain.paths import best_route, learnable, MAX_CANDIDATES, path_bounds, path_length, search_box, simplify, with_fills
 from ..domain.paths import place_route, with_place_fill, with_place_legs
-from ..domain.place_routes import best_place_route, route_stretch
+from ..domain.place_routes import best_place_route, route_stretch, same_kind
+from ..domain.routes import ROUTE_JUMP_M
 from .place_routes import learn_tracks, regroup, routes_between
 from .stays import anchored_trips
 from .use_case import use_case
@@ -66,7 +67,7 @@ def _known(db, a, b, reach):
 
 
 @use_case
-def fill_trip(db, trip):
+def fill_trip(db, original):
     """Fill a trip's unrecorded way with known routes where there is one.
 
     A trip mostly nobody recorded takes the known route between its two places
@@ -75,9 +76,11 @@ def fill_trip(db, trip):
     starts at the stay the trip left and the last ends at the stay it reached,
     and a route may pass farther from a stay than from a fix.
     """
-    fixes = trip.get("fixes")
+    # Fixes are for matching and learning, not for drawing: a day keeps only the way.
+    trip = {key: value for key, value in original.items() if key != "fixes"}
+    trip["route"] = [{key: value for key, value in leg.items() if key != "fixes"} for leg in trip.get("route") or []]
+    fixes = original.get("fixes")
     if fixes is not None:  # only a trip mostly nobody recorded has them (see trips_between_stays)
-        trip = {key: value for key, value in trip.items() if key != "fixes"}
         a, b = [trip["from_lon"], trip["from_lat"]], [trip["to_lon"], trip["to_lat"]]
         found = best_place_route(routes_between(db, a, b), a, b, fixes, trip.get("mode"))
         if found:
@@ -98,8 +101,9 @@ def fill_trip(db, trip):
 
 def _route_legs(db, trip, route, fit, a, b):
     """The legs of a route between a trip's places (see route_stretch): what its trips recorded, as
-    fills from them; a stretch none of them recorded, filled from another known path where one
-    fits, else a gap."""
+    fills from them; a long stretch none of them recorded, filled from another known path that
+    travels the same way (on foot or not) where one fits, else a gap, as the short legs onto
+    the route from each stay are."""
     legs = []
     mode = route["mode"] or trip.get("mode")
     # The trip may have joined the route itself: it is not a past trip of its own.
@@ -110,8 +114,8 @@ def _route_legs(db, trip, route, fit, a, b):
             legs.append({"kind": "fill", "coordinates": coordinates, "past_trips": max(1, past_trips),
                          "mode": mode, "distance_m": part["distance_m"]})
             continue
-        fill = fill_gap(db, coordinates[0], coordinates[-1])
-        legs.append({"kind": "fill", **fill} if fill else
+        fill = fill_gap(db, coordinates[0], coordinates[-1]) if path_length(coordinates) > ROUTE_JUMP_M else None
+        legs.append({"kind": "fill", **fill} if fill and same_kind(fill["mode"], mode) else
                     {"kind": "gap", "coordinates": coordinates, "distance_m": 0})
     return legs
 

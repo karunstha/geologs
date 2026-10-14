@@ -2589,9 +2589,12 @@ class StoreTests(unittest.TestCase):
         # Real OwnTracks fixes from 2026-10-13: 3.6 km in five minutes, then 560 m home.
         sparse = [at(40, 34.72701, -92.341763), at(45, 34.747564, -92.371794), at(53, 34.743145, -92.374742)]
         self.assertEqual([len(run) for run in split_at_jumps(sparse)], [1, 2])
-        # A fix a minute is a recorded way however fast you went.
+        # A fix a minute is a recorded way at any real speed...
         dense = [at(minute, 41.0 + minute * .01, -87.9) for minute in range(5)]
         self.assertEqual([len(run) for run in split_at_jumps(dense)], [5])
+        # ...but not 3.5 km in a minute after five polls of one position (Home Assistant, 2026-10-06).
+        held = [at(33, 34.72763, -92.34182), at(37, 34.72763, -92.34182), at(38, 34.74697, -92.37221), at(39, 34.74384, -92.37464)]
+        self.assertEqual([len(run) for run in split_at_jumps(held)], [2, 2])
 
     def test_a_filled_jump_replaces_the_chord_in_a_trips_distance(self):
         from geologs.domain.paths import with_fills
@@ -2655,19 +2658,32 @@ class StoreTests(unittest.TestCase):
         # Fixes that go back on themselves did not follow either road.
         self.assertIsNone(place_route(campus, home, [fixes[1], fixes[0], fixes[2]], known))
 
+    @staticmethod
+    def off_way(point, way):
+        """Metres from a [lon, lat] point to a [lon, lat] polyline."""
+        from geologs.domain.paths import project_onto, to_xy
+        return project_onto([to_xy(lon, lat, point[1]) for lon, lat in way], to_xy(point[0], point[1], point[1]))[0]
+
+    @staticmethod
+    def dense_way(points):
+        """A way recorded as a phone does on the move: a fix every 100 m or so between these corners."""
+        return [[a[0] + (b[0] - a[0]) * step / 8, a[1] + (b[1] - a[1]) * step / 8]
+                for a, b in zip(points, points[1:]) for step in range(8)] + [points[-1]]
+
     def campus_tracks(self):
         """Two drives home -> campus along a road that bends north: each recorded part of the way."""
         home, campus = [-87.90, 41.0], [-87.80, 41.0]
         road = [[-87.899, 41.0], [-87.88, 41.0], [-87.87, 41.005], [-87.86, 41.01], [-87.84, 41.01],
                 [-87.83, 41.01], [-87.82, 41.005], [-87.81, 41.0], [-87.801, 41.0]]
+        dense = self.dense_way
         track = lambda started_at, pieces: {
             "source": "phone", "started_at": started_at, "ended_at": started_at, "mode": "driving",
             "from": home, "to": campus, "from_name": "Home", "to_name": "Campus", "pieces": pieces,
             "distance_m": 9000.0, "observed_m": sum(path_length(piece) for piece in pieces)}
         from geologs.domain.paths import path_length
         # The first recorded the way to 41.01 and on, then lost signal; the second only the far end.
-        first = track("2026-10-01T08:00:00+00:00", [road[:6], [road[7]]])
-        second = track("2026-10-02T08:00:00+00:00", [[road[1]], road[4:]])
+        first = track("2026-10-01T08:00:00+00:00", [dense(road[:6]), [road[7]]])
+        second = track("2026-10-02T08:00:00+00:00", [[road[1]], dense(road[4:])])
         return home, campus, road, first, second
 
     def test_trips_that_each_recorded_part_of_a_way_piece_it_together(self):
@@ -2675,19 +2691,28 @@ class StoreTests(unittest.TestCase):
         home, campus, road, first, second = self.campus_tracks()
         (route,) = group([first, second])
         self.assertEqual([member["started_at"] for member in route["members"]], [first["started_at"], second["started_at"]])
-        # The first trip's gap is the second's recording: the way bends at 41.005 on both ends.
-        way = [point for part in route["parts"] if part["observed"] for point in part["coordinates"]]
-        self.assertIn(road[2], way)
-        self.assertIn(road[6], way)
+        # The first trip's gap is the second's recording: the whole road, bends and all.
+        way = [point for part in route["parts"] for point in part["coordinates"]]
+        self.assertLess(max(self.off_way(point, way) for point in road), 10)
         self.assertGreater(route["observed_m"], .95 * route["distance_m"])
+
+    def test_a_long_step_between_two_fixes_gives_way_to_a_trip_that_recorded_the_road(self):
+        from geologs.domain.place_routes import group
+        home, campus, road, first, second = self.campus_tracks()
+        # A fix a minute: 2.5 km between two of them, straight across the bend at 41.01.
+        coarse = {**first, "pieces": [self.dense_way(road[:3]) + self.dense_way(road[6:])], "observed_m": 9000.0}
+        bend = {**second, "pieces": [self.dense_way(road[2:7])], "observed_m": 4000.0}
+        (route,) = group([coarse, bend])
+        way = [point for part in route["parts"] for point in part["coordinates"]]
+        self.assertLess(max(self.off_way(point, way) for point in road[2:7]), 10)
 
     def test_a_trip_on_another_road_is_another_way_and_each_direction_its_own(self):
         from geologs.domain.place_routes import best_place_route, group
         home, campus, road, first, second = self.campus_tracks()
         south = {**first, "started_at": "2026-10-03T08:00:00+00:00",
-                 "pieces": [[[-87.899, 41.0], [-87.88, 40.99], [-87.82, 40.99], [-87.801, 41.0]]]}
+                 "pieces": [self.dense_way([[-87.899, 41.0], [-87.88, 40.99], [-87.82, 40.99], [-87.801, 41.0]])]}
         back = {**first, "started_at": "2026-10-04T17:00:00+00:00", "from": campus, "to": home,
-                "pieces": [list(reversed(road))]}
+                "pieces": [self.dense_way(list(reversed(road)))]}
         routes = group([first, second, south, back])
         self.assertEqual(sorted(len(route["members"]) for route in routes), [1, 1, 2])
         # Three fixes along the north road on the way home: the way back wins over the way there reversed...
@@ -2720,7 +2745,7 @@ class StoreTests(unittest.TestCase):
         self.assertEqual([leg["kind"] for leg in filled["route"]], ["gap", "fill", "gap"])
         self.assertEqual(filled["route"][1]["past_trips"], 2)
         self.assertEqual((filled["mode"], filled.get("mode_from_paths")), ("driving", True))
-        self.assertTrue(any(math.dist(point, road[6]) < 1e-9 for point in filled["route"][1]["coordinates"]))
+        self.assertLess(max(self.off_way(point, filled["route"][1]["coordinates"]) for point in road[1:-1]), 10)
         # A trip excluded leaves its way: the other recorded too little to stand alone.
         exclude_path(self.db, "phone", first["started_at"])
         self.assertEqual(self.db.place_routes.recent(), [])

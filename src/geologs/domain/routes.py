@@ -7,11 +7,14 @@ from .motion import connected_elapsed, same_source_state
 
 # A trip's unrecorded leg shorter than this (its first fix inside the stay it left) is not drawn.
 ROUTE_GAP_MIN_M = 25
-# Consecutive fixes this far apart, and this long apart, are not a recorded way:
-# a straight chord cuts corners a road doesn't (a tracker that reports every few
-# minutes), so the way between them is a gap to fill. A fix a minute is a recorded way at any speed.
+# Consecutive fixes this far apart are not a recorded way when they are also this long
+# apart (a tracker that reports every few minutes), or came faster than anyone drives
+# (a tracker that held its position for several polls, then leapt): a straight chord
+# cuts corners a road doesn't, so the way between them is a gap to fill. A fix a
+# minute is a recorded way at any real speed.
 ROUTE_JUMP_M = 750
 ROUTE_JUMP_SECONDS = 120
+ROUTE_JUMP_MPS = 45
 
 
 def route_segments_from_points(points, keep_lone=False):
@@ -19,7 +22,9 @@ def route_segments_from_points(points, keep_lone=False):
 
     keep_lone also returns a fix connected to neither neighbour, as a one-point segment.
     """
-    return [[[point["lon"], point["lat"]] for point in run] for run in connected_runs(points, keep_lone)]
+    return [[[point["lon"], point["lat"]] for point in piece]
+            for run in connected_runs(points, keep_lone) for piece in split_at_jumps(run)
+            if len(piece) > 1 or keep_lone]
 
 
 def connected_runs(points, keep_lone=False):
@@ -48,34 +53,43 @@ def connected_runs(points, keep_lone=False):
     return segments
 
 
+def is_jump(before, point):
+    """Whether nobody recorded the way between two consecutive fixes (see ROUTE_JUMP_M)."""
+    distance = metres(before["lat"], before["lon"], point["lat"], point["lon"])
+    if distance <= ROUTE_JUMP_M:
+        return False
+    seconds = (datetime.fromisoformat(point["timestamp"]) - datetime.fromisoformat(before["timestamp"])).total_seconds()
+    return seconds > ROUTE_JUMP_SECONDS or seconds <= 0 or distance / seconds > ROUTE_JUMP_MPS
+
+
 def split_at_jumps(run):
-    """A connected run of fixes as the runs between its jumps (see ROUTE_JUMP_M)."""
+    """A connected run of fixes as the runs between its jumps (see is_jump)."""
     runs = [[run[0]]] if run else []
     for before, point in zip(run, run[1:]):
-        seconds = (datetime.fromisoformat(point["timestamp"]) - datetime.fromisoformat(before["timestamp"])).total_seconds()
-        if metres(before["lat"], before["lon"], point["lat"], point["lon"]) > ROUTE_JUMP_M and seconds > ROUTE_JUMP_SECONDS:
+        if is_jump(before, point):
             runs.append([])
         runs[-1].append(point)
     return runs
 
 
 def guessed_stretch_m(fixes):
-    """The longest straight stretch between consecutive fixes more than ROUTE_JUMP_SECONDS apart.
+    """The longest straight stretch between consecutive fixes that nobody watched: a jump (see
+    is_jump), or one more than ROUTE_JUMP_SECONDS from the first poll of the position it leaves.
 
-    Each is timed from the first poll of the position it leaves: a tracker that holds one
-    position for several polls, then leaps, only looks dense, while a fix a minute on a
-    highway records the way however far apart its fixes are.
+    Stricter than a jump, for learning: a tracker that holds one position for several polls,
+    then moves, only looks dense, while a fix a minute on a highway records the way.
     """
     longest, held = 0.0, None
     for before, point in zip(fixes, fixes[1:]):
         if held is None or (held["lat"], held["lon"]) != (before["lat"], before["lon"]):
             held = before
-        if (datetime.fromisoformat(point["timestamp"]) - datetime.fromisoformat(held["timestamp"])).total_seconds() > ROUTE_JUMP_SECONDS:
+        seconds = (datetime.fromisoformat(point["timestamp"]) - datetime.fromisoformat(held["timestamp"])).total_seconds()
+        if seconds > ROUTE_JUMP_SECONDS or is_jump(before, point):
             longest = max(longest, metres(before["lat"], before["lon"], point["lat"], point["lon"]))
     return longest
 
 
-def route_legs(pieces, origin, destination, jumps=()):
+def route_legs(pieces, origin, destination, jumps=(), fixes=None):
     """A trip's way from one stay to the next, in order: {"kind", "coordinates"} legs.
 
     Recorded pieces (in time order) are "recorded" legs; where they stop short
@@ -84,6 +98,8 @@ def route_legs(pieces, origin, destination, jumps=()):
     on its own is only a point the way passed through. `jumps` holds the
     indexes of pieces split from the one before at a jump (see split_at_jumps):
     the gap before one is marked "jump", as the trip's distance already runs along it.
+    `fixes`, when given, holds each piece's fixes before smoothing: a recorded leg keeps them
+    as "fixes", for what they say about the way (see place_routes.observed_pieces).
     """
     ends = [[[origin["lon"], origin["lat"]]], *pieces, [[destination["lon"], destination["lat"]]]]
     legs = []
@@ -93,7 +109,7 @@ def route_legs(pieces, origin, destination, jumps=()):
         elif metres(before[-1][1], before[-1][0], after[0][1], after[0][0]) > ROUTE_GAP_MIN_M:
             legs.append({"kind": "gap", "coordinates": [before[-1], after[0]]})
         if index < len(pieces) and len(after) > 1:
-            legs.append({"kind": "recorded", "coordinates": after})
+            legs.append({"kind": "recorded", "coordinates": after, **({"fixes": fixes[index]} if fixes else {})})
     return legs
 
 
