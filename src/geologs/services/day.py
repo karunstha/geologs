@@ -21,6 +21,24 @@ from .stays import anchored_trips, stays
 from .use_case import use_case
 
 
+def _between_trips(points, travel):
+    """Chronological points outside every trip's (source, start, end), as the runs between them:
+    none joins the points on either side of a trip."""
+    runs, previous = [], None
+    for point in points:
+        at = datetime.fromisoformat(point["timestamp"])
+        windows = [(start, end) for source, start, end in travel if source == point["source"]]
+        if any(start < at < end for start, end in windows):
+            continue
+        # How many of its source's trips ended by then: a new run after each.
+        slot = (point["source"], sum(end <= at for _start, end in windows))
+        if slot != previous:
+            runs.append([])
+            previous = slot
+        runs[-1].append(point)
+    return runs
+
+
 @use_case
 def day_summary(db, date, timezone_name="UTC", source=None):
     try:
@@ -40,7 +58,7 @@ def day_summary(db, date, timezone_name="UTC", source=None):
 
     def day_cache_key():
         # Filled routes come from paths learned on other days too.
-        cache_identity = json.dumps(["day-v21", date, timezone_name, source, provider, db.settings.get()["source_priority"],
+        cache_identity = json.dumps(["day-v22", date, timezone_name, source, provider, db.settings.get()["source_priority"],
                                      fuel_signature(db), db.paths.signature(),
                                      db.place_routes.signature()], separators=(",", ":"))
         return "day:" + hashlib.sha256(cache_identity.encode()).hexdigest()
@@ -62,6 +80,8 @@ def day_summary(db, date, timezone_name="UTC", source=None):
         list(reversed(stays(db, start, end, source=source, limit=None, lookup_places=True, rejected=unconfirmed))),
         all_trips, samples_by_source, db.settings.get()["source_priority"])
     trips = [fill_trip(db, trip) for trip in trips]
+    # Each trip, and each move within a place, draws its own way: recorded or filled.
+    travel = [(trip["source"], datetime.fromisoformat(trip["start"]), datetime.fromisoformat(trip["end"])) for trip in trips]
     # Stops the detector found but no place confirmed, for you to keep or ignore;
     # none you already added or removed by hand.
     edits = db.corrections.stay_edits(start, end, source)
@@ -161,6 +181,10 @@ def day_summary(db, date, timezone_name="UTC", source=None):
                     and stay["started_at"] <= point["timestamp"] <= stay["ended_at"]]
             stay["route_segments"] = [smooth_route_segment(segment) for segment in route_segments_from_points(path)]
     route_segments = [smooth_route_segment(segment) for segment in route_segments_from_points(chronological)]
+    # Drawn under the trips: only what was recorded outside any of them. A trip drawn along a
+    # known route must not show the straight chords between its own sparse fixes.
+    loose_segments = [smooth_route_segment(segment) for run in _between_trips(chronological, travel)
+                      for segment in route_segments_from_points(run)]
     activity_totals = {mode: {"count": 0, "distance_km": 0.0, "minutes": 0.0} for mode in MOVEMENT_MODES}
     # A move nothing recorded has no mode yet: it is not counted as any activity.
     for trip in (trip for trip in trips if trip["mode"] in activity_totals):
@@ -190,6 +214,7 @@ def day_summary(db, date, timezone_name="UTC", source=None):
     result = {"date": date, "timezone": timezone_name, "source": source, "start": start, "end": end,
             "points": len(points), "stays": day_stays,
             "unique_points": len(chronological), "timeline_points": len(chronological), "stats": stats, "trips": trips, "route_segments": route_segments,
+            "loose_segments": loose_segments,
             "activity_counts": activity_counts, "activity_totals": activity_totals,
             "movement_minutes": round(sum(totals["minutes"] for totals in activity_totals.values()), 1),
             "movement_km": round(sum(totals["distance_km"] for totals in activity_totals.values()), 2),

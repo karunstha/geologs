@@ -7,14 +7,13 @@ from .motion import connected_elapsed, same_source_state
 
 # A trip's unrecorded leg shorter than this (its first fix inside the stay it left) is not drawn.
 ROUTE_GAP_MIN_M = 25
-# Consecutive fixes this far apart are not a recorded way when they are also this long
-# apart (a tracker that reports every few minutes), or came faster than anyone drives
-# (a tracker that held its position for several polls, then leapt): a straight chord
-# cuts corners a road doesn't, so the way between them is a gap to fill. A fix a
-# minute is a recorded way at any real speed.
+# Consecutive fixes this far apart (a fix a minute at city speed, 45 km/h) are not a
+# recorded way when the tracker had not reported a new position for this long before
+# the second: a straight chord cuts corners a road doesn't. That covers a tracker that
+# reports every few minutes, and one that holds its last position for several polls,
+# then leaps; a tracker reporting a new position every minute records the way at any speed.
 ROUTE_JUMP_M = 750
 ROUTE_JUMP_SECONDS = 120
-ROUTE_JUMP_MPS = 45
 
 
 def route_segments_from_points(points, keep_lone=False):
@@ -53,40 +52,33 @@ def connected_runs(points, keep_lone=False):
     return segments
 
 
-def is_jump(before, point):
-    """Whether nobody recorded the way between two consecutive fixes (see ROUTE_JUMP_M)."""
-    distance = metres(before["lat"], before["lon"], point["lat"], point["lon"])
-    if distance <= ROUTE_JUMP_M:
-        return False
-    seconds = (datetime.fromisoformat(point["timestamp"]) - datetime.fromisoformat(before["timestamp"])).total_seconds()
-    return seconds > ROUTE_JUMP_SECONDS or seconds <= 0 or distance / seconds > ROUTE_JUMP_MPS
+def jumps(run):
+    """For each consecutive pair of a run of fixes, whether nobody recorded the way between them
+    (see ROUTE_JUMP_M): the time is counted from the first poll of the position it leaves."""
+    result, held = [], None
+    for before, point in zip(run, run[1:]):
+        if held is None or (held["lat"], held["lon"]) != (before["lat"], before["lon"]):
+            held = before
+        seconds = (datetime.fromisoformat(point["timestamp"]) - datetime.fromisoformat(held["timestamp"])).total_seconds()
+        result.append(seconds > ROUTE_JUMP_SECONDS
+                      and metres(before["lat"], before["lon"], point["lat"], point["lon"]) > ROUTE_JUMP_M)
+    return result
 
 
 def split_at_jumps(run):
-    """A connected run of fixes as the runs between its jumps (see is_jump)."""
+    """A connected run of fixes as the runs between its jumps (see jumps)."""
     runs = [[run[0]]] if run else []
-    for before, point in zip(run, run[1:]):
-        if is_jump(before, point):
+    for point, jump in zip(run[1:], jumps(run)):
+        if jump:
             runs.append([])
         runs[-1].append(point)
     return runs
 
 
 def guessed_stretch_m(fixes):
-    """The longest straight stretch between consecutive fixes that nobody watched: a jump (see
-    is_jump), or one more than ROUTE_JUMP_SECONDS from the first poll of the position it leaves.
-
-    Stricter than a jump, for learning: a tracker that holds one position for several polls,
-    then moves, only looks dense, while a fix a minute on a highway records the way.
-    """
-    longest, held = 0.0, None
-    for before, point in zip(fixes, fixes[1:]):
-        if held is None or (held["lat"], held["lon"]) != (before["lat"], before["lon"]):
-            held = before
-        seconds = (datetime.fromisoformat(point["timestamp"]) - datetime.fromisoformat(held["timestamp"])).total_seconds()
-        if seconds > ROUTE_JUMP_SECONDS or is_jump(before, point):
-            longest = max(longest, metres(before["lat"], before["lon"], point["lat"], point["lon"]))
-    return longest
+    """The longest jump between consecutive fixes (see jumps): how much of a way was guessed."""
+    return max((metres(before["lat"], before["lon"], point["lat"], point["lon"])
+                for before, point, jump in zip(fixes, fixes[1:], jumps(fixes)) if jump), default=0.0)
 
 
 def route_legs(pieces, origin, destination, jumps=(), fixes=None):

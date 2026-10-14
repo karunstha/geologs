@@ -536,7 +536,9 @@ class StoreTests(unittest.TestCase):
         trips = list(reversed(day_summary(self.db, "2026-09-25", "UTC")["trips"]))
         self.assertEqual(len(trips), 1)
         self.assertEqual(trips[0]["mode"], "driving")
-        self.assertTrue(trips[0]["coverage_complete"])
+        # 1.1 km after six polls of one position: nobody saw when the car moved off, or which way.
+        self.assertFalse(trips[0]["coverage_complete"])
+        self.assertTrue(any(leg.get("jump") for leg in trips[0]["route"]))
 
     def test_home_is_hidden_from_visited_list_but_kept_in_daily_overview(self):
         home = save_place(self.db, {"name": "Home", "lat": 41, "lon": -87.9, "radius_m": 150})
@@ -2695,6 +2697,15 @@ class StoreTests(unittest.TestCase):
         way = [point for part in route["parts"] for point in part["coordinates"]]
         self.assertLess(max(self.off_way(point, way) for point in road), 10)
         self.assertGreater(route["observed_m"], .95 * route["distance_m"])
+
+    def test_the_path_under_a_day_leaves_out_its_trips(self):
+        from geologs.services.day import _between_trips
+        at = lambda minute, source="phone": {"source": source, "timestamp": f"2026-10-13T10:{minute:02d}:00+00:00"}
+        trip = ("phone", datetime(2026, 10, 13, 10, 10, tzinfo=timezone.utc), datetime(2026, 10, 13, 10, 20, tzinfo=timezone.utc))
+        points = [at(5), at(10), at(15), at(20), at(25), at(15, "other")]
+        runs = _between_trips(points, [trip])
+        # The trip's own fixes go (it draws its way), and nothing joins the stays on either side of it.
+        self.assertEqual([[point["timestamp"][14:16] for point in run] for run in runs], [["05", "10"], ["20", "25"], ["15"]])
 
     def test_a_long_step_between_two_fixes_gives_way_to_a_trip_that_recorded_the_road(self):
         from geologs.domain.place_routes import group

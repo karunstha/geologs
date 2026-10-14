@@ -200,8 +200,9 @@ export function drawMap(fit = false) {
     currentMarker = null;
   }
   const day = state.day;
-  // The whole recorded path sits underneath; trips and area stays draw over it in their mode colour.
-  for (const segment of day?.route_segments || [])
+  // What was recorded outside any trip sits underneath; trips and area stays draw their own way
+  // over it in their mode colour (a trip drawn along a known route hides its sparse fixes' chords).
+  for (const segment of day?.loose_segments || [])
     L.polyline(mapPath(segment), { color: "#8ea8a2", weight: 3, opacity: 0.7, interactive: false }).addTo(
       pathLayer,
     );
