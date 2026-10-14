@@ -59,6 +59,22 @@ def split_at_jumps(run):
     return runs
 
 
+def guessed_stretch_m(fixes):
+    """The longest straight stretch between consecutive fixes more than ROUTE_JUMP_SECONDS apart.
+
+    Each is timed from the first poll of the position it leaves: a tracker that holds one
+    position for several polls, then leaps, only looks dense, while a fix a minute on a
+    highway records the way however far apart its fixes are.
+    """
+    longest, held = 0.0, None
+    for before, point in zip(fixes, fixes[1:]):
+        if held is None or (held["lat"], held["lon"]) != (before["lat"], before["lon"]):
+            held = before
+        if (datetime.fromisoformat(point["timestamp"]) - datetime.fromisoformat(held["timestamp"])).total_seconds() > ROUTE_JUMP_SECONDS:
+            longest = max(longest, metres(before["lat"], before["lon"], point["lat"], point["lon"]))
+    return longest
+
+
 def route_legs(pieces, origin, destination, jumps=()):
     """A trip's way from one stay to the next, in order: {"kind", "coordinates"} legs.
 

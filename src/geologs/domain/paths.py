@@ -7,11 +7,9 @@ from .routes import ROUTE_JUMP_M
 from collections import Counter
 
 
-# Only trips recorded end to end teach a path, and only when no two accurate
-# fixes lie farther apart than this: a longer straight chord cuts corners a
-# road doesn't (a tracker that holds one position for several polls, then
-# jumps kilometres, records a drive that only looks dense); a fix a minute at
-# 45 km/h is fine. Shorter trips teach little but clutter the library.
+# Only trips recorded end to end teach a path, and only when no stretch nobody
+# watched is longer than this (see guessed_stretch_m): a longer straight chord
+# cuts corners a road doesn't. Shorter trips teach little but clutter the library.
 LEARN_MAX_GAP_M = ROUTE_JUMP_M
 LEARN_MIN_FIXES = 5
 LEARN_MIN_DISTANCE_M = 300

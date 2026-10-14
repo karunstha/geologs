@@ -2548,6 +2548,18 @@ class StoreTests(unittest.TestCase):
         # A tracker that holds a position for several polls, then jumps: dense-looking, but it guessed the way.
         self.assertFalse(learnable({**dense, "max_fix_gap_m": 3200}))
 
+    def test_a_fix_a_minute_on_a_highway_is_watched_but_a_leap_after_a_held_position_is_not(self):
+        from geologs.domain.routes import guessed_stretch_m
+        at = lambda clock, lat, lon: {"timestamp": f"2026-10-08T{clock}+00:00", "lat": lat, "lon": lon}
+        # Real Home Assistant polls of a 2026-10-08 drive home: 1.7 km in 59 s on the highway.
+        drive = [at("23:58:01", 34.74551, -92.34135), at("23:59:02", 34.74567, -92.34595),
+                 at("23:59:59", 34.74688, -92.36467), at("00:00:59", 34.74741, -92.37126)]
+        self.assertEqual(guessed_stretch_m(drive), 0)
+        # The same position held for three polls, then 1.7 km a minute later: nobody saw the way.
+        held = [at("23:57:00", 34.74567, -92.34595), at("23:58:00", 34.74567, -92.34595),
+                at("23:59:00", 34.74567, -92.34595), at("23:59:59", 34.74688, -92.36467)]
+        self.assertGreater(guessed_stretch_m(held), 1700)
+
     def test_short_legs_to_the_stays_do_not_stop_a_trip_teaching_its_route(self):
         from geologs.domain.paths import learnable, learned_way
         # Real shape of a 2026-10-12 drive: the phone reported from 202 m out, and stopped 56 m short.

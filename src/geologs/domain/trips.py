@@ -4,7 +4,7 @@ from datetime import datetime
 
 from .geo import metres
 from .motion import classify_motion, connected_elapsed, move_uncertainty, reported_speed, same_source_state, select_best_timed_fixes
-from .routes import connected_runs, legs_length_m, mostly_unrecorded, route_legs, smooth_route_segment, split_at_jumps
+from .routes import connected_runs, guessed_stretch_m, legs_length_m, mostly_unrecorded, route_legs, smooth_route_segment, split_at_jumps
 from .timing import parse_time
 from .visits import MAX_SAMPLE_GAP_SECONDS
 
@@ -146,10 +146,9 @@ def trips_between_stays(points, stay_rows, start=None, end=None, speeds=None):
                 continue
             trip_points = [point for point in source_points
                            if departure <= datetime.fromisoformat(point["timestamp"]) <= arrival]
-            # The longest straight stretch between accurate fixes: how much of the way was guessed.
             accurate = [point for point in trip_points if point["accuracy_m"] is None or point["accuracy_m"] <= 150]
-            max_fix_gap = max((metres(a["lat"], a["lon"], b["lat"], b["lon"]) for a, b in zip(accurate, accurate[1:])),
-                              default=0)
+            # How much of the way was guessed (see guessed_stretch_m).
+            max_fix_gap = guessed_stretch_m(accurate)
             moves, held_since = [], trip_points[0] if trip_points else None
             for previous, point in zip(trip_points, trip_points[1:]):
                 seconds = connected_elapsed(previous, point, held_since)
