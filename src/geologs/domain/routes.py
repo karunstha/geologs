@@ -75,13 +75,24 @@ def split_at_jumps(run):
     return runs
 
 
+def split_at_steps(coordinates, max_m=ROUTE_JUMP_M):
+    """[lon, lat] fixes as the pieces between steps longer than max_m: a tracker watching all along,
+    but too sparsely there for a straight line to be the road."""
+    pieces = [[coordinates[0]]] if coordinates else []
+    for before, point in zip(coordinates, coordinates[1:]):
+        if metres(before[1], before[0], point[1], point[0]) > max_m:
+            pieces.append([])
+        pieces[-1].append(point)
+    return pieces
+
+
 def guessed_stretch_m(fixes):
     """The longest jump between consecutive fixes (see jumps): how much of a way was guessed."""
     return max((metres(before["lat"], before["lon"], point["lat"], point["lon"])
                 for before, point, jump in zip(fixes, fixes[1:], jumps(fixes)) if jump), default=0.0)
 
 
-def route_legs(pieces, origin, destination, jumps=(), fixes=None):
+def route_legs(pieces, origin, destination, jumps=(), fixes=None, sparse=()):
     """A trip's way from one stay to the next, in order: {"kind", "coordinates"} legs.
 
     Recorded pieces (in time order) are "recorded" legs; where they stop short
@@ -90,14 +101,19 @@ def route_legs(pieces, origin, destination, jumps=(), fixes=None):
     on its own is only a point the way passed through. `jumps` holds the
     indexes of pieces split from the one before at a jump (see split_at_jumps):
     the gap before one is marked "jump", as the trip's distance already runs along it.
-    `fixes`, when given, holds each piece's fixes before smoothing: a recorded leg keeps them
-    as "fixes", for what they say about the way (see place_routes.observed_pieces).
+    `sparse` holds the indexes of pieces split from the one before at a step too long to be the
+    road although the tracker was watching (see split_at_steps): the gap before one is marked
+    "sparse", and the trip's distance runs along it too. `fixes`, when given, holds each piece's
+    fixes before smoothing: a recorded leg keeps them as "fixes", for what they say about the
+    way (see place_routes.observed_pieces).
     """
     ends = [[[origin["lon"], origin["lat"]]], *pieces, [[destination["lon"], destination["lat"]]]]
     legs = []
     for index, (before, after) in enumerate(zip(ends, ends[1:])):
         if index in jumps:
             legs.append({"kind": "gap", "coordinates": [before[-1], after[0]], "jump": True})
+        elif index in sparse:
+            legs.append({"kind": "gap", "coordinates": [before[-1], after[0]], "sparse": True})
         elif metres(before[-1][1], before[-1][0], after[0][1], after[0][0]) > ROUTE_GAP_MIN_M:
             legs.append({"kind": "gap", "coordinates": [before[-1], after[0]]})
         if index < len(pieces) and len(after) > 1:

@@ -12,7 +12,7 @@ from collections import Counter
 
 from .geo import metres
 from .motion import MOVEMENT_MODES
-from .routes import ROUTE_GAP_MIN_M, ROUTE_JUMP_M
+from .routes import ROUTE_GAP_MIN_M
 from .paths import (DETOUR_SLACK_M, MATCH_M, MAX_DETOUR, SAME_ROUTE_M, PLACE_FOLLOW_M, PLACE_FOLLOW_MAX_M, PLACE_FOLLOW_SHARE,
                     PLACE_ORDER_SLACK_M, path_length, project_onto, simplify, stay_reach, to_lonlat, to_xy)
 
@@ -24,10 +24,6 @@ ROUTE_SEED_SHARE = .5
 # A fix where a route is still unobserved lies on it when it is this share of that
 # stretch's length off its straight line, at most (the road it stands for may bend).
 UNOBSERVED_SHARE = .5
-# A route's shape between two fixes farther apart than this is a straight guess, whatever
-# their timing (a fix a minute on a highway): a denser recording replaces it, and it is
-# matched as unobserved. A trip still counts it towards starting a route (see ROUTE_SEED_SHARE).
-COARSE_STEP_M = ROUTE_JUMP_M
 # Unobserved bits shorter than this between observed ones are drawn as part of them.
 SEAM_M = ROUTE_GAP_MIN_M
 # Walking between two places and driving between them take different ways.
@@ -60,6 +56,8 @@ def track_from_trip(trip):
     if trip.get("loop") or not trip.get("route"):
         return None
     pieces = observed_pieces(trip["route"])
+    # A sparse step was watched, if too sparsely to show the road: it counts towards starting a route.
+    sparse_m = sum(path_length(leg["coordinates"]) for leg in trip["route"] if leg.get("sparse"))
     if not pieces:
         return None
     start, end = [trip["from_lon"], trip["from_lat"]], [trip["to_lon"], trip["to_lat"]]
@@ -70,7 +68,7 @@ def track_from_trip(trip):
             "mode": "driving" if mode == "passenger" else mode if mode in MOVEMENT_MODES else None,
             "from": start, "to": end, "from_name": trip.get("from_name"), "to_name": trip.get("to_name"),
             "pieces": pieces, "distance_m": round(path_length(way), 1),
-            "observed_m": round(sum(path_length(piece) for piece in pieces), 1)}
+            "observed_m": round(sum(path_length(piece) for piece in pieces) + sparse_m, 1)}
 
 
 def same_kind(a, b):
@@ -157,27 +155,6 @@ def _way_parts(track):
     return [part for part in parts if part["observed"] or path_length(part["coordinates"]) > 0]
 
 
-def _split_coarse(parts):
-    """Observed parts with any step longer than COARSE_STEP_M taken out, as unobserved parts."""
-    result = []
-    for part in parts:
-        if not part["observed"]:
-            result.append(part)
-            continue
-        run = [part["coordinates"][0]]
-        for before, point in zip(part["coordinates"], part["coordinates"][1:]):
-            if metres(before[1], before[0], point[1], point[0]) > COARSE_STEP_M:
-                if len(run) > 1:
-                    result.append({"coordinates": run, "observed": True})
-                result.append({"coordinates": [before, point], "observed": False})
-                run = [point]
-            else:
-                run.append(point)
-        if len(run) > 1:
-            result.append({"coordinates": run, "observed": True})
-    return result
-
-
 def _splice(chord, piece, lat0):
     """Unobserved chord parts with what a recorded piece shows of the way between its ends.
 
@@ -228,7 +205,7 @@ def build(tracks):
     there. So where several trips recorded a stretch, the densest piece wins.
     """
     ordered = sorted(tracks, key=lambda track: (-track["observed_m"], track["started_at"]))
-    parts = _split_coarse(_way_parts(ordered[0]))
+    parts = _way_parts(ordered[0])
     lat0 = ordered[0]["from"][1]
     for track in ordered[1:]:
         for piece in track["pieces"]:
@@ -237,7 +214,7 @@ def build(tracks):
             spliced = []
             for part in parts:
                 replaced = None if part["observed"] else _splice(part["coordinates"], piece, lat0)
-                spliced += _split_coarse(replaced) if replaced else [part]
+                spliced += replaced or [part]
             parts = spliced
     # Fixes close together show the way's shape to within SIMPLIFY_M; it is kept no closer.
     return [{**part, "coordinates": simplify(part["coordinates"])} if part["observed"] else part

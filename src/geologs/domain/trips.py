@@ -4,7 +4,8 @@ from datetime import datetime
 
 from .geo import metres
 from .motion import classify_motion, connected_elapsed, move_uncertainty, reported_speed, same_source_state, select_best_timed_fixes
-from .routes import connected_runs, guessed_stretch_m, legs_length_m, mostly_unrecorded, route_legs, smooth_route_segment, split_at_jumps
+from .routes import (connected_runs, guessed_stretch_m, legs_length_m, mostly_unrecorded, route_legs, smooth_route_segment,
+                     split_at_jumps, split_at_steps)
 from .timing import parse_time
 from .visits import MAX_SAMPLE_GAP_SECONDS
 
@@ -158,12 +159,17 @@ def trips_between_stays(points, stay_rows, start=None, end=None, speeds=None):
                 if not same_source_state(previous, point):
                     held_since = point
             motion = classify_motion(moves, speeds)
-            fixes, jumps = [], set()
-            for run in connected_runs(trip_points, keep_lone=True):
-                split = split_at_jumps(run)
-                jumps.update(range(len(fixes) + 1, len(fixes) + len(split)))
-                fixes += [[[point["lon"], point["lat"]] for point in piece] for piece in split]
-            legs = route_legs([smooth_route_segment(piece) for piece in fixes], origin, destination, jumps, fixes)
+            fixes, jumps, sparse = [], set(), set()
+            runs = connected_runs(trip_points, keep_lone=True)
+            for run in runs:
+                for watched_index, watched in enumerate(split_at_jumps(run)):
+                    for step_index, piece in enumerate(split_at_steps([[point["lon"], point["lat"]] for point in watched])):
+                        if step_index:
+                            sparse.add(len(fixes))
+                        elif watched_index:
+                            jumps.add(len(fixes))
+                        fixes.append(piece)
+            legs = route_legs([smooth_route_segment(piece) for piece in fixes], origin, destination, jumps, fixes, sparse)
             # Stays carry this flag from analysis; compute it for hand-built rows.
             left = (destination["went_elsewhere"] if "went_elsewhere" in destination
                     else went_elsewhere_between(trip_points[1:-1], origin, destination))
@@ -206,6 +212,7 @@ def trips_between_stays(points, stay_rows, start=None, end=None, speeds=None):
             trip.update({"route": legs, "route_segments": route_segments,
                          "route_gaps": [leg["coordinates"] for leg in legs if leg["kind"] == "gap"],
                          "coordinates": route_segments[0] if len(route_segments) == 1 else [],
-                         "coverage_complete": motion is not None and len(route_segments) == 1})
+                         # Watched from the first fix to the last, if sparsely in places.
+                         "coverage_complete": motion is not None and len(runs) == 1 and len(runs[0]) > 1 and not jumps})
             trips.append(trip)
     return sorted(trips, key=lambda trip: trip["start"], reverse=True)

@@ -2698,6 +2698,21 @@ class StoreTests(unittest.TestCase):
         self.assertLess(max(self.off_way(point, way) for point in road), 10)
         self.assertGreater(route["observed_m"], .95 * route["distance_m"])
 
+    def test_a_fix_a_minute_far_apart_is_watched_but_not_drawn_as_the_road(self):
+        from geologs.services.paths import learn_path_history
+        # A fix a minute at 60 km/h: 1 km between fixes, watched all the way.
+        far = shifted(HOME, 6000, 0)
+        ingest(self.db, minute_fixes([still(HOME, 30), line(HOME, far, 6), still(far, 30)]))
+        (trip,) = anchored_trips(self.db, "2026-09-27T00:00:00+00:00", "2026-09-27T23:59:59+00:00")
+        gaps = [leg for leg in trip["route"] if leg["kind"] == "gap"]
+        # No straight kilometre is drawn as recorded road; each is a sparse gap, not a jump.
+        self.assertTrue(all(leg["kind"] != "recorded" or len(leg["coordinates"]) < 2 or max(
+            metres_between((a[1], a[0]), {"lat": b[1], "lon": b[0]}) for a, b in zip(leg["coordinates"], leg["coordinates"][1:])) < 750
+            for leg in trip["route"]))
+        self.assertTrue(any(leg.get("sparse") for leg in gaps) and not any(leg.get("jump") for leg in gaps))
+        self.assertTrue(trip["coverage_complete"])
+        self.assertEqual(learn_path_history(self.db)["learned"], 1)  # watched, so it teaches its way
+
     def test_the_path_under_a_day_leaves_out_its_trips(self):
         from geologs.services.day import _between_trips
         at = lambda minute, source="phone": {"source": source, "timestamp": f"2026-10-13T10:{minute:02d}:00+00:00"}
@@ -2710,8 +2725,9 @@ class StoreTests(unittest.TestCase):
     def test_a_long_step_between_two_fixes_gives_way_to_a_trip_that_recorded_the_road(self):
         from geologs.domain.place_routes import group
         home, campus, road, first, second = self.campus_tracks()
-        # A fix a minute: 2.5 km between two of them, straight across the bend at 41.01.
-        coarse = {**first, "pieces": [self.dense_way(road[:3]) + self.dense_way(road[6:])], "observed_m": 9000.0}
+        # Watched all the way, but 2.5 km between two fixes, straight across the bend at 41.01:
+        # a sparse step, so two pieces (see split_at_steps) with the step counted as watched.
+        coarse = {**first, "pieces": [self.dense_way(road[:3]), self.dense_way(road[6:])], "observed_m": 9000.0}
         bend = {**second, "pieces": [self.dense_way(road[2:7])], "observed_m": 4000.0}
         (route,) = group([coarse, bend])
         way = [point for part in route["parts"] for point in part["coordinates"]]

@@ -91,10 +91,11 @@ def simplify(coordinates, tolerance_m=SIMPLIFY_M):
 def learnable(trip):
     """A trip recorded densely enough to show the way it went.
 
-    One recorded piece, and every stretch around it that nothing recorded no
-    longer than a hole the piece may have: an app that reports only once you
-    are moving leaves a short leg between the stay and the first fix (and the
-    last fix and the next stay) on nearly every trip.
+    Watched from its first fix to its last (see coverage_complete: sparsely in
+    places is fine, see split_at_steps), and every stretch around it that
+    nothing recorded no longer than a hole the piece may have: an app that
+    reports only once you are moving leaves a short leg between the stay and the
+    first fix (and the last fix and the next stay) on nearly every trip.
     """
     legs = trip.get("route")
     if legs is None:  # a trip built before trips kept their legs
@@ -102,8 +103,10 @@ def learnable(trip):
         legs += [{"kind": "gap", "coordinates": [[0, 0], [1, 1]]} for _gap in trip.get("route_gaps") or []]
     distance_m = trip.get("distance_km", 0) * 1000
     points = trip.get("recorded_points") or 0
-    return (sum(leg["kind"] == "recorded" for leg in legs) == 1
-            and all(leg["kind"] == "recorded" or path_length(leg["coordinates"]) <= LEARN_MAX_GAP_M for leg in legs)
+    watched = trip.get("coverage_complete", sum(leg["kind"] == "recorded" for leg in legs) == 1)
+    return (watched
+            and all(leg["kind"] == "recorded" or leg.get("sparse") or path_length(leg["coordinates"]) <= LEARN_MAX_GAP_M
+                    for leg in legs)
             and trip.get("mode") in MOVEMENT_MODES
             and distance_m >= LEARN_MIN_DISTANCE_M and points >= LEARN_MIN_FIXES
             and trip.get("max_fix_gap_m", float("inf")) <= LEARN_MAX_GAP_M)
@@ -275,8 +278,9 @@ def with_fills(trip, filled):
     legs = [{"kind": "fill", "coordinates": filled[index]["coordinates"], "past_trips": filled[index]["past_trips"],
              "mode": filled[index]["mode"]} if index in filled else leg for index, leg in enumerate(trip.get("route") or [])]
     fills = [filled[index] for index in sorted(filled)]
+    # A trip's distance runs straight along a jump or a sparse step (see route_legs).
     jumps_m = sum(path_length(leg["coordinates"]) for index, leg in enumerate(trip.get("route") or [])
-                  if index in filled and leg.get("jump"))
+                  if index in filled and (leg.get("jump") or leg.get("sparse")))
     trip = {**trip, "route": legs, "route_fills": fills,
             "route_gaps": [leg["coordinates"] for leg in legs if leg["kind"] == "gap"]}
     if not fills:
