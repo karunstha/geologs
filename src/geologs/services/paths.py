@@ -7,6 +7,9 @@ from ..domain.paths import best_route, learnable, MAX_CANDIDATES, path_bounds, p
 from .stays import anchored_trips
 from .use_case import use_case
 from ..domain.timing import parse_time
+from ..domain.paths import learned_way
+from ..domain.paths import MATCH_M
+from ..domain.paths import stay_reach
 
 
 @use_case
@@ -22,7 +25,7 @@ def learn_paths(db, trips, start, end, source=None):
     for trip in trips:
         if (first <= datetime.fromisoformat(trip["start"]) <= last and learnable(trip)
                 and (trip["source"], trip["start"]) not in excluded):
-            coordinates = simplify(trip["route_segments"][0])
+            coordinates = simplify(learned_way(trip))
             wanted[(trip["source"], trip["start"])] = {
                 # Riding as a passenger still follows roads a drive would.
                 "ended_at": trip["end"], "mode": "driving" if trip["mode"] == "passenger" else trip["mode"],
@@ -45,20 +48,26 @@ def learn_paths(db, trips, start, end, source=None):
 
 
 @use_case
-def fill_gap(db, a, b):
+def fill_gap(db, a, b, reach_a=MATCH_M, reach_b=MATCH_M):
     """The likeliest known route from [lon, lat] a to b, or None (see best_route)."""
     known = [{**row, "coordinates": json.loads(row["coordinates"])}
-             for row in db.paths.covering(*search_box(a, b), MAX_CANDIDATES)]
-    return best_route(a, b, known)
+             for row in db.paths.covering(*search_box(a, b, max(reach_a, reach_b)), MAX_CANDIDATES)]
+    return best_route(a, b, known, reach_a, reach_b)
 
 
 @use_case
 def fill_trip(db, trip):
-    """Fill a trip's unrecorded legs with known routes where there is one (see with_fills)."""
-    filled = {}
-    for index, leg in enumerate(trip.get("route") or []):
+    """Fill a trip's unrecorded legs with known routes where there is one (see with_fills).
+
+    The first leg starts at the stay the trip left and the last ends at the
+    stay it reached; a route may pass farther from a stay than from a fix.
+    """
+    legs, filled = trip.get("route") or [], {}
+    for index, leg in enumerate(legs):
         if leg["kind"] == "gap":
-            fill = fill_gap(db, leg["coordinates"][0], leg["coordinates"][-1])
+            a, b = leg["coordinates"][0], leg["coordinates"][-1]
+            fill = fill_gap(db, a, b, stay_reach(a, b) if index == 0 else MATCH_M,
+                            stay_reach(a, b) if index == len(legs) - 1 else MATCH_M)
             if fill:
                 filled[index] = fill
     return with_fills(trip, filled)

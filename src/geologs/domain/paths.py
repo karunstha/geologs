@@ -18,6 +18,15 @@ LEARN_MIN_DISTANCE_M = 300
 SIMPLIFY_M = 8
 # A gap's ends (a fix, or a stay's centre) must lie this close to a known path.
 MATCH_M = 100
+# ...or this close, when that end is a stay rather than a fix: the way to a campus is
+# the same whichever of its buildings you end up in, and a straight leg joins the rest.
+# A short leg (a walk between two buildings) gets no more than a quarter of its length.
+STAY_MATCH_M = 400
+
+
+def stay_reach(a, b):
+    """How far a route may pass from a stay at the end of the leg from a to b."""
+    return max(MATCH_M, min(STAY_MATCH_M, metres(a[1], a[0], b[1], b[0]) / 4))
 # ...and the stretch between them may wind at most this much more than the
 # straight line, so a path that loops away and back is not taken for a short cut.
 MAX_DETOUR = 2.0
@@ -70,13 +79,33 @@ def simplify(coordinates, tolerance_m=SIMPLIFY_M):
 
 
 def learnable(trip):
-    """A trip recorded end to end, densely enough to show the way it went."""
-    segments = trip.get("route_segments") or []
+    """A trip recorded densely enough to show the way it went.
+
+    One recorded piece, and every stretch around it that nothing recorded no
+    longer than a hole the piece may have: an app that reports only once you
+    are moving leaves a short leg between the stay and the first fix (and the
+    last fix and the next stay) on nearly every trip.
+    """
+    legs = trip.get("route")
+    if legs is None:  # a trip built before trips kept their legs
+        legs = [{"kind": "recorded", "coordinates": segment} for segment in trip.get("route_segments") or []]
+        legs += [{"kind": "gap", "coordinates": [[0, 0], [1, 1]]} for _gap in trip.get("route_gaps") or []]
     distance_m = trip.get("distance_km", 0) * 1000
     points = trip.get("recorded_points") or 0
-    return (len(segments) == 1 and not trip.get("route_gaps") and trip.get("mode") in MOVEMENT_MODES
+    return (sum(leg["kind"] == "recorded" for leg in legs) == 1
+            and all(leg["kind"] == "recorded" or path_length(leg["coordinates"]) <= LEARN_MAX_GAP_M for leg in legs)
+            and trip.get("mode") in MOVEMENT_MODES
             and distance_m >= LEARN_MIN_DISTANCE_M and points >= LEARN_MIN_FIXES
             and trip.get("max_fix_gap_m", float("inf")) <= LEARN_MAX_GAP_M)
+
+
+def learned_way(trip):
+    """The [lon, lat] way a learnable trip teaches: its recorded piece with the short legs to its stays."""
+    way = []
+    for leg in trip.get("route") or [{"coordinates": trip["route_segments"][0]}]:
+        coordinates = leg["coordinates"]
+        way += coordinates[1:] if way and way[-1] == coordinates[0] else coordinates
+    return way
 
 
 def path_bounds(coordinates):
@@ -131,16 +160,17 @@ def follows(samples, points):
     return all(project_onto(points, sample)[0] <= SAME_ROUTE_M for sample in samples) if len(points) > 1 else False
 
 
-def search_box(a, b):
-    """(min_lat, max_lat, min_lon, max_lon) that a known path must reach over to pass near both [lon, lat] ends."""
-    pad_lat = MATCH_M / 110574
-    pad_lon = MATCH_M / (111320 * math.cos(math.radians(a[1])))
+def search_box(a, b, reach=MATCH_M):
+    """(min_lat, max_lat, min_lon, max_lon) that a known path must reach over to pass within `reach` of both [lon, lat] ends."""
+    pad_lat = reach / 110574
+    pad_lon = reach / (111320 * math.cos(math.radians(a[1])))
     return (min(a[1], b[1]) + pad_lat, max(a[1], b[1]) - pad_lat, min(a[0], b[0]) + pad_lon, max(a[0], b[0]) - pad_lon)
 
 
-def best_route(a, b, known):
+def best_route(a, b, known, reach_a=MATCH_M, reach_b=MATCH_M):
     """The likeliest of `known` paths from [lon, lat] a to b, or None.
 
+    A path must pass within reach_a of a and reach_b of b (see STAY_MATCH_M).
     `known` holds paths as {"mode", "started_at", "coordinates"}. Returns
     {"coordinates", "past_trips", "mode", "distance_m"}: past_trips counts
     the trips that went this way between these two points.
@@ -154,7 +184,7 @@ def best_route(a, b, known):
         if len(xy) < 2:
             continue
         on_a, on_b = project_onto(xy, start), project_onto(xy, end)
-        if on_a[0] > MATCH_M or on_b[0] > MATCH_M:
+        if on_a[0] > reach_a or on_b[0] > reach_b:
             continue
         stretch, reverse = stretch_between(xy, on_a, on_b)
         length = abs(on_b[1] - on_a[1])

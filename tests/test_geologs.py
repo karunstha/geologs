@@ -2548,6 +2548,29 @@ class StoreTests(unittest.TestCase):
         # A tracker that holds a position for several polls, then jumps: dense-looking, but it guessed the way.
         self.assertFalse(learnable({**dense, "max_fix_gap_m": 3200}))
 
+    def test_short_legs_to_the_stays_do_not_stop_a_trip_teaching_its_route(self):
+        from geologs.domain.paths import learnable, learned_way
+        # Real shape of a 2026-10-12 drive: the phone reported from 202 m out, and stopped 56 m short.
+        way = [[-87.90, 41.0], [-87.85, 41.0], [-87.80, 41.0]]
+        drive = {"route": [{"kind": "gap", "coordinates": [[-87.9024, 41.0], way[0]]},
+                           {"kind": "recorded", "coordinates": way},
+                           {"kind": "gap", "coordinates": [way[-1], [-87.7993, 41.0]]}],
+                 "mode": "driving", "distance_km": 8.4, "recorded_points": 28, "max_fix_gap_m": 226}
+        self.assertTrue(learnable(drive))
+        self.assertEqual(learned_way(drive), [[-87.9024, 41.0], *way, [-87.7993, 41.0]])  # it reaches both stays
+        long_end = {**drive, "route": [{"kind": "gap", "coordinates": [[-87.95, 41.0], way[0]]}, *drive["route"][1:]]}
+        self.assertFalse(learnable(long_end))  # a 4 km leg nobody recorded is a guess, not a route
+
+    def test_a_gap_to_another_building_follows_the_route_to_the_campus(self):
+        from geologs.domain.paths import STAY_MATCH_M, best_route
+        # A drive home -> library was learned; today's ends at a building 163 m off its end.
+        known = [{"mode": "driving", "started_at": "2026-10-12T22:24:00+00:00",
+                  "coordinates": [[-87.90, 41.0], [-87.85, 41.0], [-87.85, 41.03]]}]
+        last_fix, building = [-87.899, 41.0], [-87.848, 41.0315]
+        self.assertIsNone(best_route(last_fix, building, known))  # a fix must lie on the route...
+        fill = best_route(last_fix, building, known, reach_b=STAY_MATCH_M)  # ...a stay may lie beside it
+        self.assertEqual((fill["past_trips"], fill["coordinates"][-1]), (1, building))
+
     def test_an_excluded_route_is_never_learned_again_until_used_again(self):
         from geologs.services.paths import exclude_path, fill_gap, include_path, learn_path_history
         work = self.drive_to_work()
