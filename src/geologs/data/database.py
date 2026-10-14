@@ -211,6 +211,10 @@ class Database:
             coordinates TEXT NOT NULL, UNIQUE(source, started_at)
         );
         CREATE INDEX IF NOT EXISTS known_paths_bounds ON known_paths(min_lat,max_lat);
+        CREATE TABLE IF NOT EXISTS path_exclusions (
+            id INTEGER PRIMARY KEY, source TEXT NOT NULL, started_at TEXT NOT NULL, ended_at TEXT NOT NULL,
+            mode TEXT NOT NULL, distance_m REAL NOT NULL, created_at TEXT NOT NULL, UNIQUE(source, started_at)
+        );
         CREATE TABLE IF NOT EXISTS geocode_cache (
             cache_key TEXT PRIMARY KEY, provider TEXT NOT NULL, value TEXT NOT NULL,
             created_at TEXT NOT NULL

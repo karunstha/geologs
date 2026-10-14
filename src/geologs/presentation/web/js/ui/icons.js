@@ -20,6 +20,12 @@ export const modeInfo = {
     color: "#cf5f22",
     icon: '<svg viewBox="0 0 24 24"><circle cx="15.5" cy="4.5" r="1.8"/><path d="M5 20.5l3.5-.5 2.2-3.8M10.7 16.2l3.3 2.3v3M7 11.5l2.5-3.3 4.3.8 2.4 3.3 3 .7M10.8 16.2l2.9-7.2"/></svg>',
   },
+  passenger: {
+    label: "Passenger",
+    noun: "Passenger",
+    color: "#3d8aa6",
+    icon: '<svg viewBox="0 0 24 24"><circle cx="12" cy="3.6" r="1.6"/><path d="M5 13l1.5-4A2 2 0 0 1 8.4 7.7h7.2a2 2 0 0 1 1.9 1.3L19 13"/><path d="M3.5 13h17v4.5h-17z"/><path d="M6 17.5v2M18 17.5v2"/></svg>',
+  },
   transit: {
     label: "Transit",
     noun: "Transit",
@@ -102,6 +108,15 @@ export function pinBadge(label) {
   return label
     ? `<span class="pin-badge${String(label).length > 2 ? " many" : ""}">${label}</span>`
     : `<span class="pin-badge home" title="Home">${placeIcons.home}</span>`;
+}
+
+// Each trip of a day gets its own colour, in the order they happened, so one reads apart from the
+// next on the map and in the timeline; its mode is still told by its icon.
+export const TRIP_COLORS = ["#3567ad", "#d0661f", "#7b4fb8", "#1d8a82", "#c23f78", "#5b8f2a", "#b04a32", "#a8841a"];
+
+export function tripColors(day) {
+  const trips = [...(day?.trips || [])].sort((a, b) => a.start.localeCompare(b.start));
+  return new Map(trips.map((trip, index) => [`${trip.from_stay_id}-${trip.to_stay_id}`, TRIP_COLORS[index % TRIP_COLORS.length]]));
 }
 
 // Stops numbered in the order you reached them: each stay's number, and every number of

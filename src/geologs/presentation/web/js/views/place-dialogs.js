@@ -2,7 +2,7 @@
 import { refreshMeta } from "../app/refresh.js";
 import { api, post } from "../core/api.js";
 import { $, safe, toast } from "../core/dom.js";
-import { clock, coordinateText, distanceText, fromLengthUnit, lengthText, metresBetween, toLengthUnit } from "../core/format.js";
+import { clock, coordinateText, distanceText, fromLengthUnit, lengthText, metresBetween, radiusText, toLengthUnit } from "../core/format.js";
 import { state } from "../core/state.js";
 import { map, searchLayer } from "../map/map.js";
 import { onEach } from "../ui/actions.js";
@@ -87,7 +87,7 @@ export function editVisitedPlace(place, visits = []) {
     $("scope-visit-detail").textContent =
       visitTimes(visits) + (visits.length === 1 ? "" : ` (${visits.length} visits)`);
   }
-  $("scope-spot-detail").textContent = `Past and future visits within ${lengthText(target.radius_m)}`;
+  $("scope-spot-detail").textContent = `Past and future visits within ${radiusText(target.radius_m)}`;
   const scope = !visits.length || (current && !current.started_at) ? "spot" : "visit";
   document.querySelector(`input[name="label-scope"][value="${scope}"]`).checked = true;
   // With no particular visit there is only one choice, so say it instead of offering it.

@@ -146,6 +146,10 @@ def trips_between_stays(points, stay_rows, start=None, end=None, speeds=None):
                 continue
             trip_points = [point for point in source_points
                            if departure <= datetime.fromisoformat(point["timestamp"]) <= arrival]
+            # The longest straight stretch between accurate fixes: how much of the way was guessed.
+            accurate = [point for point in trip_points if point["accuracy_m"] is None or point["accuracy_m"] <= 150]
+            max_fix_gap = max((metres(a["lat"], a["lon"], b["lat"], b["lon"]) for a, b in zip(accurate, accurate[1:])),
+                              default=0)
             moves, held_since = [], trip_points[0] if trip_points else None
             for previous, point in zip(trip_points, trip_points[1:]):
                 seconds = connected_elapsed(previous, point, held_since)
@@ -179,7 +183,7 @@ def trips_between_stays(points, stay_rows, start=None, end=None, speeds=None):
                 "start": origin["ended_at"], "end": destination["started_at"], "source": source, **reading,
                 "recorded": motion is not None,
                 "duration_minutes": round((arrival - departure).total_seconds() / 60, 1),
-                "max_excursion_m": max(0, round(excursion)), "loop": loop,
+                "max_excursion_m": max(0, round(excursion)), "max_fix_gap_m": round(max_fix_gap), "loop": loop,
                 "went_elsewhere": None if left is None else bool(left),
                 "from_stay_id": origin["id"], "to_stay_id": destination["id"],
                 "from_name": origin.get("place_name"), "to_name": destination.get("place_name"),

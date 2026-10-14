@@ -6,9 +6,12 @@ from .motion import MOVEMENT_MODES
 from collections import Counter
 
 
-# Only trips recorded end to end, with fixes at least this close on average,
-# teach a path (a minute apart at 60 km/h); shorter trips teach little but clutter the library.
-LEARN_MAX_SPACING_M = 1000
+# Only trips recorded end to end teach a path, and only when no two accurate
+# fixes lie farther apart than this: a longer straight chord cuts corners a
+# road doesn't (a tracker that holds one position for several polls, then
+# jumps kilometres, records a drive that only looks dense); a fix a minute at
+# 45 km/h is fine. Shorter trips teach little but clutter the library.
+LEARN_MAX_GAP_M = 750
 LEARN_MIN_FIXES = 5
 LEARN_MIN_DISTANCE_M = 300
 # Stored paths keep their shape to within this.
@@ -73,7 +76,7 @@ def learnable(trip):
     points = trip.get("recorded_points") or 0
     return (len(segments) == 1 and not trip.get("route_gaps") and trip.get("mode") in MOVEMENT_MODES
             and distance_m >= LEARN_MIN_DISTANCE_M and points >= LEARN_MIN_FIXES
-            and distance_m / (points - 1) <= LEARN_MAX_SPACING_M)
+            and trip.get("max_fix_gap_m", float("inf")) <= LEARN_MAX_GAP_M)
 
 
 def path_bounds(coordinates):

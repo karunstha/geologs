@@ -25,7 +25,7 @@ def home_return_text(home_return, zone):
 
 
 BRIEF_MOVES = {"walking": "walked {}", "running": "ran {}", "cycling": "cycled {}",
-               "driving": "drove {}", "transit": "rode {} by transit"}
+               "driving": "drove {}", "passenger": "rode {} as a passenger", "transit": "rode {} by transit"}
 
 
 def _brief_duration(minutes):

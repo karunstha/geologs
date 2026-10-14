@@ -554,6 +554,16 @@ function initTokens() {
 }
 
 // Learned routes: what the library holds, and the trips that taught it, each a link to its day.
+// A route that recorded the way badly can be excluded; it is never learned again until you undo that.
+function pathRow(path, action) {
+  const day = localDateKey(new Date(path.started_at));
+  const when = `${formatTime(path.started_at)} – ${new Date(path.ended_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", ...zoneOptions() })}`;
+  const button = action === "exclude"
+    ? `<button type="button" class="button ghost small danger-text" data-exclude-path="${safe(path.source)}|${safe(path.started_at)}">Exclude</button>`
+    : `<button type="button" class="button secondary small" data-include-path="${safe(path.source)}|${safe(path.started_at)}">Use again</button>`;
+  return `<li class="list-item"><div class="place-main">${modeIcon(path.mode)}<div><strong>${safe(modeInfo[path.mode]?.label || path.mode)} · ${safe(distanceText(path.distance_m / 1000))}</strong><small>${safe(when)} · ${safe(trackerLabel(path.source))}</small></div></div><span class="row-actions"><a class="button ghost small" href="#date=${day}">Open day</a>${button}</span></li>`;
+}
+
 function renderPaths(data) {
   const modes = Object.entries(data.by_mode || {})
     .map(([mode, count]) => `${count} ${(modeInfo[mode]?.noun || mode).toLowerCase()}`)
@@ -561,14 +571,31 @@ function renderPaths(data) {
   $("paths-summary").textContent = data.paths
     ? `${plural(data.paths, "route")} · ${distanceText(data.km)}${modes ? " · " + modes : ""}`
     : "No routes learned yet";
-  const rows = (data.recent || []).map((path) => {
-    const day = localDateKey(new Date(path.started_at));
-    const when = `${formatTime(path.started_at)} – ${new Date(path.ended_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", ...zoneOptions() })}`;
-    return `<li class="list-item"><div class="place-main">${modeIcon(path.mode)}<div><strong>${safe(modeInfo[path.mode]?.label || path.mode)} · ${safe(distanceText(path.distance_m / 1000))}</strong><small>${safe(when)} · ${safe(trackerLabel(path.source))}</small></div></div><a class="button ghost small" href="#date=${day}">Open day</a></li>`;
-  });
+  const excluded = data.excluded || [];
   $("path-list").innerHTML =
-    rows.join("") ||
-    '<li class="empty-block"><strong>Nothing learned yet</strong><span>A route is learned from a trip recorded end to end, with fixes at most about a kilometre apart.</span></li>';
+    ((data.recent || []).map((path) => pathRow(path, "exclude")).join("") ||
+      '<li class="empty-block"><strong>Nothing learned yet</strong><span>A route is learned from a trip recorded end to end, with no two fixes more than about 750 m apart.</span></li>') +
+    (excluded.length
+      ? `<li class="list-heading">Excluded · ${plural(excluded.length, "route")} never learned again</li>` +
+        excluded.map((path) => pathRow(path, "include")).join("")
+      : "");
+  const act = (attribute, url, done) =>
+    $("path-list").querySelectorAll(`[${attribute}]`).forEach(
+      (button) =>
+        (button.onclick = async () => {
+          const [source, started_at] = button.getAttribute(attribute).split(/\|(?=[^|]*$)/);
+          button.disabled = true;
+          try {
+            renderPaths(await post(url, { source, started_at }));
+            toast(done);
+          } catch (error) {
+            toast(error.message);
+            button.disabled = false;
+          }
+        }),
+    );
+  act("data-exclude-path", "/api/paths/exclude", "Route excluded: it won't be learned or used again");
+  act("data-include-path", "/api/paths/include", "Route can be learned again");
 }
 
 async function refreshPaths() {

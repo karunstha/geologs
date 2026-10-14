@@ -4,9 +4,6 @@
   flex-wrap: wrap;
   gap: 8px;
 }
-.reminders-card {
-  max-width: 880px;
-}
 .reminder-rows {
   padding: 6px 20px 12px;
 }

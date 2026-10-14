@@ -1,7 +1,7 @@
 // Places: visit search, saved zones, places visited, and patterns.
 import { api, post } from "../core/api.js";
 import { $, safe, toast } from "../core/dom.js";
-import { ago, clock, dateLabel, durationText, formatTime, lengthText, localDateKey, plural } from "../core/format.js";
+import { ago, clock, dateLabel, durationText, formatTime, localDateKey, plural, radiusText } from "../core/format.js";
 import { state } from "../core/state.js";
 import { onEach, rowActions } from "../ui/actions.js";
 import { modeName, placeIcon, zoneText } from "../ui/icons.js";
@@ -28,7 +28,7 @@ function renderSavedPlaces() {
           seen
             ? `${plural(seen.visits, "visit")} · ${durationText(seen.observed_minutes)} inside`
             : "No visits yet",
-          `${lengthText(place.radius_m)} zone`,
+          `${radiusText(place.radius_m)} zone`,
           seen?.last_seen ? `last ${ago(seen.last_seen)}` : "",
         ].filter(Boolean);
         return `<div class="list-item"><div class="place-main">${placeIcon(place)}<div><strong>${safe(place.name)}</strong><small>${safe(details.join(" · "))}</small>${place.address ? `<span>${safe(place.address)}</span>` : ""}</div></div>${rowActions(

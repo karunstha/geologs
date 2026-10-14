@@ -28,10 +28,11 @@ TABLES = {
     "daily_summaries": "id summary_date timezone source watermark points distance_km trip_count place_count reminder_count summary brief created_at updated_at",
     "geocode_cache": "cache_key provider value created_at",
     "reverse_regions": "id provider center_lat center_lon radius_m value created_at expires_at",
+    "path_exclusions": "id source started_at ended_at mode distance_m created_at",
 }
 # Columns added after an archive was created take their schema default.
 COLUMN_DEFAULTS = {"kind": "'stationary'"}
-IDENTITY_TABLES = ("points", "point_observations", "places", "place_labels", "mode_overrides", "stay_edits", "ingest_tokens", "fuel_prices", "reminders", "events", "observed_stays", "observed_stays_v2", "daily_summaries", "reverse_regions")
+IDENTITY_TABLES = ("points", "point_observations", "places", "place_labels", "mode_overrides", "stay_edits", "ingest_tokens", "fuel_prices", "reminders", "events", "observed_stays", "observed_stays_v2", "daily_summaries", "reverse_regions", "path_exclusions")
 
 
 def migrate_sqlite(sqlite_path, postgres_url):

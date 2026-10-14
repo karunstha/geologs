@@ -53,6 +53,11 @@
   vertical-align: middle;
 }
 
+/* Trips: each its own colour, shaded light at the start to dark at the end. */
+.legend-trips {
+  background: linear-gradient(90deg, #9fb7d9, #3567ad 45%, #d0661f 55%, #7a3a10);
+}
+
 /* Matches a trip's stretch filled in from past trips. */
 .legend-fill {
   background: repeating-linear-gradient(90deg, var(--mode) 0 6px, transparent 6px 9px);

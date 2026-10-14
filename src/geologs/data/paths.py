@@ -26,8 +26,36 @@ class PathsRepository(Repository):
         self.execute("DELETE FROM known_paths WHERE id=?", (path_id,))
 
     def delete_source(self, source):
-        """Forget every path a tracker taught."""
+        """Forget every path a tracker taught, and the ones you excluded from it."""
         self.execute("DELETE FROM known_paths WHERE source=?", (source,))
+        self.execute("DELETE FROM path_exclusions WHERE source=?", (source,))
+
+    def get(self, source, started_at):
+        return self.one("""SELECT id,source,started_at,ended_at,mode,distance_m FROM known_paths
+            WHERE source=? AND started_at=?""", (source, started_at))
+
+    def exclude(self, path, now):
+        """Never learn this trip's path again (kept with what it was, to list and undo)."""
+        self.execute("""INSERT INTO path_exclusions(source,started_at,ended_at,mode,distance_m,created_at)
+            VALUES (?,?,?,?,?,?) ON CONFLICT(source,started_at) DO NOTHING""",
+            (path["source"], path["started_at"], path["ended_at"], path["mode"], path["distance_m"], now))
+
+    def include(self, source, started_at):
+        """Learn this trip's path again; False when it was not excluded."""
+        return bool(self.execute("DELETE FROM path_exclusions WHERE source=? AND started_at=?",
+                                 (source, started_at)).rowcount)
+
+    def excluded(self):
+        return self.rows("""SELECT source,started_at,ended_at,mode,distance_m,created_at FROM path_exclusions
+            ORDER BY started_at DESC""")
+
+    def excluded_trips(self, start, end, source=None):
+        """(source, started_at) of excluded trips that started in a window."""
+        query, args = "SELECT source,started_at FROM path_exclusions WHERE started_at>=? AND started_at<=?", [start, end]
+        if source:
+            query += " AND source=?"
+            args.append(source)
+        return {(row["source"], row["started_at"]) for row in self.rows(query, args)}
 
     def delete_through(self, source, timestamp):
         """Forget a tracker's paths of trips that were under way at `timestamp`."""

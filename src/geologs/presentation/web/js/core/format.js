@@ -79,6 +79,16 @@ export function lengthText(metres) {
   return imperial() ? `${Math.round(metres * FEET_PER_METRE).toLocaleString()} ft` : `${Math.round(metres).toLocaleString()} m`;
 }
 
+// A zone's or search's reach, rounded the way people say it: "within 0.4 mi", not "within 1,969 ft".
+export function radiusText(metres) {
+  if (metres == null) return "—";
+  if (imperial()) {
+    const feet = metres * FEET_PER_METRE;
+    return feet < 1000 ? `${Math.round(feet / 10) * 10} ft` : `${(metres / 1000 / KM_PER_MILE).toFixed(1)} mi`;
+  }
+  return metres < 1000 ? `${Math.round(metres / 10) * 10} m` : `${(metres / 1000).toFixed(1)} km`;
+}
+
 export const lengthUnit = () => (imperial() ? "ft" : "m");
 export const toLengthUnit = (metres) => (imperial() ? metres * FEET_PER_METRE : metres);
 export const fromLengthUnit = (value) => (imperial() ? value / FEET_PER_METRE : value);

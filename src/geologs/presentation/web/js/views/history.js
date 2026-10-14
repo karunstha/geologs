@@ -56,14 +56,11 @@ function renderStats(day) {
     .join("");
   $("activity-chips").innerHTML = activity;
   document.querySelector(".history-activity").hidden = !activity;
-  const modes = new Set([
-    ...day.trips.map((trip) => trip.mode),
-    ...day.stays
-      .flatMap((stay) => [stay.activity, ...(stay.internal_moves || []).map((move) => move.mode)])
-      .filter(Boolean),
-  ]);
+  // Trips each have their own colour (see tripColors); area stays keep their activity's.
+  const modes = new Set(day.stays.map((stay) => stay.activity).filter(Boolean));
   $("map-legend").innerHTML =
     '<span><i class="legend-line" style="--mode:#8ea8a2"></i>Recorded path</span>' +
+    (day.trips.length ? '<span><i class="legend-line legend-trips"></i>Trips, light to dark</span>' : "") +
     [...modes]
       .filter((mode) => modeInfo[mode])
       .map(

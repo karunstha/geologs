@@ -264,3 +264,14 @@ td .row-actions .icon-button {
   width: 28px;
   height: 28px;
 }
+
+/* A heading inside a list, such as the excluded routes under the learned ones. */
+.list-heading {
+  list-style: none;
+  padding: 14px 0 6px;
+  color: var(--text-3);
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}

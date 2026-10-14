@@ -4,7 +4,7 @@ import { $, safe, toast } from "../core/dom.js";
 import { clock, distanceText, durationText, fuelText, lengthText } from "../core/format.js";
 import { state } from "../core/state.js";
 import { selectItem, selectedItem, stayColor, tripKey } from "../map/map.js";
-import { modeIcon, modeInfo, modeName, pinBadge, visitNumbers, zoneText } from "../ui/icons.js";
+import { modeIcon, modeInfo, modeName, pinBadge, tripColors, visitNumbers, zoneText } from "../ui/icons.js";
 import { refreshExplore } from "./history.js";
 import { keepPossibleStop, openStopDialog, removeStay } from "./stay-edits.js";
 
@@ -16,7 +16,7 @@ export function stayActivityText(stay) {
     : "Moving around";
 }
 
-export const TRIP_MODES = ["walking", "running", "cycling", "driving", "transit"],
+export const TRIP_MODES = ["walking", "running", "cycling", "driving", "passenger", "transit"],
   AREA_MODES = ["walking", "running", "cycling"];
 
 export function modeStrip(subject, options, current, corrected, detected, caption, basis = "Detected from speed") {
@@ -154,7 +154,8 @@ export function movedWithin(stay) {
 }
 
 export function renderTimeline(day) {
-  const numbers = visitNumbers(day).byStay;
+  const numbers = visitNumbers(day).byStay,
+    colors = tripColors(day);
   const items = [
     ...day.stays.map((stay) => ({ type: "stay", at: stay.started_at, stay })),
     ...day.trips.map((trip) => ({ type: "trip", at: trip.start, trip })),
@@ -198,7 +199,7 @@ export function renderTimeline(day) {
           ? `Round trip · ${info.label} ${distanceText(trip.distance_km)}`
           : `${info.label} · ${distanceText(trip.distance_km)}`;
         const from = trip.loop ? `<span class="tl-within">${safe(roundTripNote(trip))}</span>` : "";
-        return `<li><button type="button" class="tl-trip" data-item="trip:${tripKey(trip)}" aria-pressed="false" style="--mode:${info.color}">${modeIcon(trip.mode)}<span class="tl-body"><strong>${safe(title)}</strong><small>${safe(notes.join(" · "))}</small>${from}</span></button></li>`;
+        return `<li><button type="button" class="tl-trip" data-item="trip:${tripKey(trip)}" aria-pressed="false" style="--mode:${colors.get(tripKey(trip)) || info.color}">${modeIcon(trip.mode)}<span class="tl-body"><strong>${safe(title)}</strong><small>${safe(notes.join(" · "))}</small>${from}</span></button></li>`;
       })
       .join("") ||
     `<li class="empty">No stays yet on this day. A stay needs ${state.settings?.stay_min_minutes ?? 15} minutes of accurate samples in one place or area.</li>`;

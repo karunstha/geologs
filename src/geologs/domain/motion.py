@@ -8,7 +8,8 @@ from .settings import ANALYSIS_DEFAULTS
 MAX_CONNECTED_GAP_SECONDS = 900
 MAX_PLAUSIBLE_SPEED_MPS = 55.6
 # Transit (bus, train) is never guessed from speed; it only comes from a correction.
-MOVEMENT_MODES = ("driving", "transit", "cycling", "running", "walking")
+# Being driven (passenger: no fuel is yours) is never guessed either; you mark the drive.
+MOVEMENT_MODES = ("driving", "passenger", "transit", "cycling", "running", "walking")
 # Short moves cannot be told from driving by speed alone; a drive needs this much distance.
 DRIVING_MIN_DISTANCE_M = 500
 

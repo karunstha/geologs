@@ -2,7 +2,7 @@
 import { refreshMeta } from "../app/refresh.js";
 import { api, post } from "../core/api.js";
 import { $, safe, toast } from "../core/dom.js";
-import { ago, formatTime, fromLengthUnit, lengthText } from "../core/format.js";
+import { ago, formatTime, fromLengthUnit, lengthText, radiusText } from "../core/format.js";
 import { state } from "../core/state.js";
 import { onEach, rowActions } from "../ui/actions.js";
 import { placeResultsMarkup, resolvePlace, searchPlaces } from "../ui/place-search.js";
@@ -47,7 +47,7 @@ function whereMarkup(reminder) {
   const icon = reminder.match_name
     ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 12.2V4.5a1 1 0 0 1 1-1h7.7l8.3 8.3-8.7 8.7Z"/><circle cx="8" cy="8" r="1.4"/></svg>'
     : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 10c0 4.6-7 10-7 10S5 14.6 5 10a7 7 0 0 1 14 0Z"/><circle cx="12" cy="10" r="2.4"/></svg>';
-  const zone = !reminder.match_name && reminder.radius_m ? ` · within ${lengthText(reminder.radius_m)}` : "";
+  const zone = !reminder.match_name && reminder.radius_m ? ` · within ${radiusText(reminder.radius_m)}` : "";
   return `<span class="reminder-where" title="${safe(reminder.place_address || reminder.destination_address || "")}">${icon}${safe(reminderWhere(reminder) + zone)}</span>`;
 }
 
@@ -87,7 +87,7 @@ export function renderReminders() {
     state.reminderHistory
       .map((item) => {
         const fired = item.status === "triggered";
-        const at = fired ? item.triggered_at : item.cancelled_at || item.created_at;
+        const at = fired ? item.triggered_at || item.last_triggered_at : item.cancelled_at || item.created_at;
         return `<div class="list-item reminder-row"><div class="reminder-main"><strong>${safe(item.text)}</strong><small>${whereMarkup(item)}<span title="${safe(formatTime(at))}">${fired ? "Fired" : "Cancelled"} ${safe(ago(at))}</span></small></div>${statusPill(fired ? "success" : "neutral", fired ? "Fired" : "Cancelled")}</div>`;
       })
       .join("") ||

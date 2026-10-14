@@ -2523,6 +2523,45 @@ class StoreTests(unittest.TestCase):
             with self.assertRaises(ValueError, msg=bad):
                 save_settings(self.db, bad)
 
+    def test_a_drive_you_were_driven_on_costs_you_no_fuel(self):
+        from geologs.services.fuel import set_manual_price
+        self.fuel_day()
+        save_settings(self.db, {"fuel_economy_l100km": 8, "fuel_price_source": "manual"})
+        set_manual_price(self.db, 1.10, "2026-09-01")
+        day = day_summary(self.db, "2026-09-27", "UTC")
+        first, second = sorted((trip for trip in day["trips"] if trip["mode"] == "driving"), key=lambda trip: trip["start"])
+        save_mode_override(self.db, {"source": first["source"], "target": "trip", "mode": "passenger",
+                                     "started_at": first["start"], "ended_at": first["end"]})
+        day = day_summary(self.db, "2026-09-27", "UTC")
+        ride = next(trip for trip in day["trips"] if trip["start"] == first["start"])
+        self.assertEqual((ride["mode"], ride["fuel"]), ("passenger", None))
+        self.assertAlmostEqual(day["fuel"]["litres"], second["distance_km"] * 8 / 100, delta=0.02)
+        # Still travel: counted as a passenger ride, and said so.
+        self.assertEqual(day["activity_totals"]["passenger"]["count"], 1)
+        self.assertIn("as a passenger", " ".join(daily_brief(daily_overview(self.db, "2026-09-27", "UTC"))["timeline"]))
+
+    def test_a_trip_with_long_holes_teaches_no_route(self):
+        from geologs.domain.paths import learnable
+        dense = {"route_segments": [[[0, 0], [1, 1]]], "route_gaps": [], "mode": "driving", "distance_km": 5,
+                 "recorded_points": 30, "max_fix_gap_m": 230}
+        self.assertTrue(learnable(dense))
+        # A tracker that holds a position for several polls, then jumps: dense-looking, but it guessed the way.
+        self.assertFalse(learnable({**dense, "max_fix_gap_m": 3200}))
+
+    def test_an_excluded_route_is_never_learned_again_until_used_again(self):
+        from geologs.services.paths import exclude_path, fill_gap, include_path, learn_path_history
+        work = self.drive_to_work()
+        learn_path_history(self.db)
+        (path,) = self.db.paths.recent()
+        listed = exclude_path(self.db, path["source"], path["started_at"])
+        self.assertEqual((listed["paths"], [item["started_at"] for item in listed["excluded"]]), (0, [path["started_at"]]))
+        self.assertEqual(learn_path_history(self.db)["paths"], 0)  # learning again leaves it out
+        self.assertIsNone(fill_gap(self.db, [HOME[1], HOME[0]], [work[1], work[0]]))
+        listed = include_path(self.db, path["source"], path["started_at"])
+        self.assertEqual((listed["paths"], listed["excluded"]), (1, []))
+        with self.assertRaises(ValueError):
+            include_path(self.db, path["source"], path["started_at"])
+
     def test_fuel_prices_from_the_eia_for_your_region(self):
         from geologs.services.fuel import refresh_prices, fuel_status
         from geologs.domain.fuel import state_from_address

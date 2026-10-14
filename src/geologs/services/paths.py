@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from ..domain.paths import best_route, learnable, MAX_CANDIDATES, path_bounds, path_length, search_box, simplify, with_fills
 from .stays import anchored_trips
 from .use_case import use_case
+from ..domain.timing import parse_time
 
 
 @use_case
@@ -16,12 +17,16 @@ def learn_paths(db, trips, start, end, source=None):
     nothing (and keeps cached days valid). Returns how many trips taught a path.
     """
     first, last = datetime.fromisoformat(start), datetime.fromisoformat(end)
+    excluded = db.paths.excluded_trips(start, end, source)
     wanted = {}
     for trip in trips:
-        if first <= datetime.fromisoformat(trip["start"]) <= last and learnable(trip):
+        if (first <= datetime.fromisoformat(trip["start"]) <= last and learnable(trip)
+                and (trip["source"], trip["start"]) not in excluded):
             coordinates = simplify(trip["route_segments"][0])
             wanted[(trip["source"], trip["start"])] = {
-                "ended_at": trip["end"], "mode": trip["mode"], "distance_m": round(path_length(coordinates), 1),
+                # Riding as a passenger still follows roads a drive would.
+                "ended_at": trip["end"], "mode": "driving" if trip["mode"] == "passenger" else trip["mode"],
+                "distance_m": round(path_length(coordinates), 1),
                 "coordinates": json.dumps(coordinates, separators=(",", ":"))}
     # Rows are compared as stored; a timestamp spelled differently is a different trip.
     existing = {(row["source"], row["started_at"]): row for row in db.paths.starting_between(start, end, source)
@@ -73,8 +78,29 @@ def report(db):
 
 @use_case
 def list_paths(db, limit=200):
-    """What the library holds (see report), with its latest paths: which trips taught a route, for checking."""
-    return {**report(db), "recent": db.paths.recent(limit)}
+    """What the library holds (see report), with its latest paths and the ones you excluded: which trips
+    taught a route, for checking."""
+    return {**report(db), "recent": db.paths.recent(limit), "excluded": db.paths.excluded()}
+
+
+@use_case
+def exclude_path(db, source, started_at):
+    """Stop using a learned path (a trip that recorded the way badly) and never learn it again."""
+    path = db.paths.get(source, started_at)
+    if path is None:
+        raise ValueError("that path is not in the library")
+    db.paths.exclude(path, parse_time(None))
+    db.paths.delete(path["id"])
+    return list_paths(db)
+
+
+@use_case
+def include_path(db, source, started_at):
+    """Undo an exclusion: the trip's path is learned again, if its trip still qualifies."""
+    if not db.paths.include(source, started_at):
+        raise ValueError("that path was not excluded")
+    learn_path_history(db, source=source, start=started_at, end=started_at)
+    return list_paths(db)
 
 
 @use_case

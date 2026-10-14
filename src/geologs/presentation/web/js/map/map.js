@@ -1,9 +1,9 @@
 // The Leaflet map: recorded paths, places, the current location, and the selected stay or trip.
 import { api } from "../core/api.js";
 import { $, copyText, safe, toast } from "../core/dom.js";
-import { clock, coordinateText, durationText, formatTime, kmh, lengthText, localDateKey } from "../core/format.js";
+import { clock, coordinateText, durationText, formatTime, kmh, lengthText, localDateKey, radiusText } from "../core/format.js";
 import { state } from "../core/state.js";
-import { modeInfo, modeName, placeIcons, visitNumbers } from "../ui/icons.js";
+import { modeInfo, modeName, placeIcons, tripColors, visitNumbers } from "../ui/icons.js";
 import { params } from "../views/history.js";
 import { dayVisits, editVisitedPlace } from "../views/place-dialogs.js";
 import { renderModePicker, stayWhen } from "../views/timeline.js";
@@ -153,8 +153,7 @@ function shade(hex, t) {
 
 // Draw one trip (or a move within a place) leg by leg in the order it went, shaded light to dark
 // along its length, so the way it went reads at a glance.
-function drawRoute(trip, onClick, dashArray) {
-  const color = modeInfo[trip.mode]?.color || "#6f7b76";
+function drawRoute(trip, onClick, dashArray, color = modeInfo[trip.mode]?.color || "#6f7b76") {
   const legs = trip.route || [
     ...(trip.route_segments || []).map((coordinates) => ({ kind: "recorded", coordinates })),
     ...(trip.route_fills || []).map((fill) => ({ kind: "fill", ...fill })),
@@ -206,7 +205,8 @@ export function drawMap(fit = false) {
     L.polyline(mapPath(segment), { color: "#8ea8a2", weight: 3, opacity: 0.7, interactive: false }).addTo(
       pathLayer,
     );
-  for (const trip of day?.trips || []) drawRoute(trip, () => selectItem("trip", tripKey(trip)));
+  const colors = tripColors(day);
+  for (const trip of day?.trips || []) drawRoute(trip, () => selectItem("trip", tripKey(trip)), undefined, colors.get(tripKey(trip)));
   for (const stay of day?.stays || []) {
     // A move within a place (between buildings) keeps its own dashes, shaded the same way.
     for (const move of stay.internal_moves || []) drawRoute(move, () => selectItem("stay", stay.id), "6 6");
@@ -234,7 +234,7 @@ export function drawMap(fit = false) {
       .bindPopup(
         pointPopup(
           place.name,
-          ["Saved place · " + lengthText(place.radius_m) + " zone"],
+          ["Saved place · " + radiusText(place.radius_m) + " zone"],
           place.lat,
           place.lon,
         ),
@@ -326,7 +326,10 @@ export function drawSelection(zoom) {
     return;
   }
   const subject = item.type === "trip" ? item.trip : item.stay;
-  const color = item.type === "trip" ? modeInfo[item.trip.mode]?.color || "#176d69" : stayColor(item.stay);
+  const color =
+    item.type === "trip"
+      ? tripColors(state.day).get(tripKey(item.trip)) || modeInfo[item.trip.mode]?.color || "#176d69"
+      : stayColor(item.stay);
   const tripNote = (trip) =>
     trip.loop
       ? `Round trip from ${trip.from_name || "stay"}${trip.turnaround?.name ? " via " + trip.turnaround.name : ""}`
