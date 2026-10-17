@@ -19,7 +19,16 @@ export function showView(view) {
   if (view === "summaries") refreshSummaries().catch((error) => toast(error.message));
 }
 
+// The top bar is clear at the top of the page and frosted once the page scrolls under it.
+function initTopbar() {
+  const bar = document.querySelector(".topbar");
+  const update = () => bar.classList.toggle("scrolled", window.scrollY > 8);
+  window.addEventListener("scroll", update, { passive: true });
+  update();
+}
+
 export function initShell() {
+  initTopbar();
   document.querySelectorAll(".nav").forEach(
     (button) =>
       (button.onclick = () => {

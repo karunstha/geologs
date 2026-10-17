@@ -3,8 +3,40 @@
   position: sticky;
   top: 0;
   z-index: 600;
-  background: var(--surface);
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid transparent;
+  transition: border-color 0.2s ease;
+}
+/* Clear at the top of the page, frosted once you scroll (js/views/shell.js sets .scrolled). The glass
+   is a layer of its own: a filter on the bar itself would pin the phone's fixed tab bar to the bar. */
+.topbar::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: color-mix(in srgb, var(--surface) 68%, transparent);
+  backdrop-filter: saturate(1.8) blur(20px);
+  -webkit-backdrop-filter: saturate(1.8) blur(20px);
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+.topbar.scrolled {
+  border-bottom-color: var(--border);
+}
+.topbar.scrolled::before {
+  opacity: 1;
+}
+/* Over History's photo, before scrolling, the bar reads white on the photo's shaded top. */
+body:has(#explore-view.active) .topbar:not(.scrolled) {
+  --text: #fff;
+  --text-2: rgb(255 255 255/0.88);
+  --surface: rgb(255 255 255/0.16);
+  --surface-3: rgb(255 255 255/0.2);
+  --border: rgb(255 255 255/0.32);
+  --border-strong: rgb(255 255 255/0.42);
+  --accent-soft: rgb(255 255 255/0.24);
+  --accent-text: #fff;
+  color: #fff;
+  text-shadow: 0 1px 8px rgb(0 0 0/0.35);
 }
 .topbar-inner {
   max-width: 1280px;
