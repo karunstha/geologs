@@ -13,9 +13,6 @@
 #day-date {
   width: 156px;
 }
-#source {
-  max-width: 240px;
-}
 .current-location {
   display: flex;
   align-items: center;
@@ -555,11 +552,6 @@
     flex: 1;
     width: auto;
   }
-  #source-filter,
-  #source {
-    width: 100%;
-    max-width: none;
-  }
   .current-location {
     align-items: flex-start;
     padding: 12px 14px;
@@ -660,7 +652,7 @@
 .speed-chart {
   display: grid;
   grid-template-columns: 34px minmax(0, 1fr);
-  grid-template-rows: 200px auto auto;
+  grid-template-rows: 300px auto auto;
   margin: 0;
 }
 .chart-y {
@@ -720,12 +712,6 @@
   transform: translateX(-50%);
   white-space: nowrap;
 }
-.chart-x span:first-child {
-  transform: none;
-}
-.chart-x span:last-child {
-  transform: translateX(-100%);
-}
 .speed-chart figcaption {
   grid-column: 2;
   margin-top: 6px;
@@ -764,7 +750,7 @@
 }
 @media (max-width: 760px) {
   .speed-chart {
-    grid-template-rows: 160px auto auto;
+    grid-template-rows: 220px auto auto;
   }
   .chart-x span:nth-child(even) {
     display: none;

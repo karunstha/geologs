@@ -34,7 +34,6 @@ export function params() {
     start: start.toISOString(),
     end: new Date(end.getTime() - 1).toISOString(),
   });
-  if ($("source").value) query.set("source", $("source").value);
   return query;
 }
 
@@ -146,7 +145,6 @@ export function renderExplore(day, coverage) {
         .join(" · ")
     : "";
   $("day-context").hidden = !hasHistory;
-  $("source-filter").hidden = coverage.sources.length < 2;
   $("next-day").disabled = day.date >= localDateKey();
   $("today").disabled = day.date === localDateKey();
   $("day-empty").hidden = showMap;
@@ -233,10 +231,8 @@ export async function refreshExplore(resetRawPage = true) {
   const request = ++exploreRequest;
   if (resetRawPage) state.rawPage = 0;
   const date = $("day-date").value;
-  const source = $("source").value;
   const timezone = state.settings?.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
   const dayQuery = new URLSearchParams({ date, timezone });
-  if (source) dayQuery.set("source", source);
   const query = params();
   const rawQuery = new URLSearchParams(query);
   rawQuery.set("limit", state.rawPageSize);
@@ -255,16 +251,6 @@ export async function refreshExplore(resetRawPage = true) {
     if (request === exploreRequest) $("explore-view").classList.remove("loading");
   }
   if (request !== exploreRequest) return;
-  const selected = $("source").value;
-  $("source").innerHTML =
-    '<option value="">All sources</option>' +
-    coverage.sources
-      .map((item) => {
-        const name = sourceName(item.source);
-        return `<option value="${safe(item.source)}">${safe(name.device ? `${name.kind} · ${name.device}` : name.kind)}</option>`;
-      })
-      .join("");
-  $("source").value = selected;
   state.day = day;
   state.timeline = timeline;
   state.points = points;
@@ -310,10 +296,6 @@ export function initHistory() {
   $("previous-day").onclick = () => moveDay(-1);
   $("next-day").onclick = () => moveDay(1);
   $("today").onclick = () => goToDate(localDateKey());
-  $("source").onchange = () => {
-    state.focusPlace = null;
-    refreshExplore().catch((error) => toast(error.message));
-  };
   $("locate").onclick = () => {
     const point = state.current || state.day?.last_location;
     if (point && map) map.setView([point.lat, point.lon], 15);

@@ -142,7 +142,6 @@ function renderVisitResults(result) {
 function openVisitDay(visit) {
   state.pendingStayId = visit.stay_id;
   state.focusPlace = null;
-  $("source").value = "";
   $("day-date").value = visit.date;
   state.followToday = visit.date === localDateKey();
   showView("explore");

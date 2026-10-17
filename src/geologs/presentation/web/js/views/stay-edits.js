@@ -172,8 +172,7 @@ export function openStopDialog(trip) {
 export function openDayStayDialog() {
   const day = state.day;
   if (!day) return;
-  const source =
-    $("source").value || day.timeline_sources?.[0] || Object.keys(day.samples_by_source || {})[0] || "";
+  const source = day.timeline_sources?.[0] || Object.keys(day.samples_by_source || {})[0] || "";
   openStayDialog({
     source,
     fixes: fixesBetween(source, Date.parse(day.start), Date.parse(day.end)),

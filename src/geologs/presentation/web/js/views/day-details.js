@@ -1,7 +1,7 @@
 // The detail tabs under the History map: the day's places, speed, samples, and recorded data.
 import { api, post } from "../core/api.js";
 import { $, safe, toast } from "../core/dom.js";
-import { clock, clockPrecise, durationText, formatTime, kmh, lengthText, longDate, plural, speedUnit, toSpeedUnit, zonedMidnight } from "../core/format.js";
+import { clock, clockPrecise, durationText, formatTime, kmh, lengthText, longDate, plural, speedUnit, toSpeedUnit } from "../core/format.js";
 import { state } from "../core/state.js";
 import { onEach, rowActions } from "../ui/actions.js";
 import { modeInfo, modeName, pinBadge, sourceName, visitNumbers, zoneText } from "../ui/icons.js";
@@ -82,49 +82,57 @@ function contextAt(day, time) {
 
 const STOP_MINUTES = 10;
 
+// Speed during the day's drives only, from the first one's start to the last one's end.
 export function renderSpeedChart(day) {
   const box = $("speed-chart");
+  const drives = day.trips
+    .filter((trip) => trip.mode === "driving")
+    .map((trip) => [Date.parse(trip.start), Date.parse(trip.end)])
+    .sort((a, b) => a[0] - b[0]);
+  const driveAt = (time) => drives.findIndex(([from, to]) => from <= time && time <= to);
   const fixes = [...state.timeline]
     .reverse()
     .filter((fix) => fix.speed_mps != null)
-    .map((fix) => ({ time: Date.parse(fix.timestamp), kmh: toSpeedUnit(fix.speed_mps * 3.6) }));
+    .map((fix) => ({ time: Date.parse(fix.timestamp), kmh: toSpeedUnit(fix.speed_mps * 3.6) }))
+    .map((fix) => ({ ...fix, drive: driveAt(fix.time) }))
+    .filter((fix) => fix.drive >= 0);
   if (fixes.length < 2) {
-    box.innerHTML = '<p class="empty">Speed shows up once a day has at least two timed fixes.</p>';
+    box.innerHTML = `<p class="empty">${drives.length ? "Speed shows up once a drive has at least two timed fixes." : "No driving on this day."}</p>`;
     return;
   }
-  const start = zonedMidnight(day.date).getTime();
-  const end = start + 24 * 3600e3;
+  const start = drives[0][0];
+  const end = Math.max(drives.at(-1)[1], start + 60e3);
   const moving = fixes.filter((fix) => fix.kmh >= 2);
   const top = Math.max(...fixes.map((fix) => fix.kmh));
   const average = moving.length ? moving.reduce((sum, fix) => sum + fix.kmh, 0) / moving.length : 0;
   const { ceiling, ticks } = niceScale(top);
   const W = 1000,
-    H = 220;
+    H = 300;
   const x = (time) => (((time - start) / (end - start)) * W).toFixed(1);
   const y = (kmh) => (H - (Math.min(kmh, ceiling) / ceiling) * H).toFixed(1);
-  const gaps = (day.coverage_gaps || []).map((gap) => [Date.parse(gap.start), Date.parse(gap.end)]);
+  const gaps = (day.coverage_gaps || [])
+    .map((gap) => [Date.parse(gap.start), Date.parse(gap.end)])
+    .filter(([from, to]) => to > start && from < end);
   const crossesGap = (a, b) => gaps.some(([from, to]) => a <= from && b >= to);
-  // One path per run of fixes sharing a travel mode. Key fixes skip the inside of long stops,
-  // so a long interval is a stop: drawn flat at zero, never as a slow slope across the stop.
+  // One path per run of fixes within a drive. Time between drives, or a long interval inside one
+  // (key fixes skip the inside of stops), is drawn flat at zero, never as a slope across it.
   const runs = [],
     stops = [];
   for (let index = 1; index < fixes.length; index++) {
     const a = fixes[index - 1],
       b = fixes[index];
     if (crossesGap(a.time, b.time)) continue;
-    if (b.time - a.time > STOP_MINUTES * 60e3) {
+    if (a.drive !== b.drive || b.time - a.time > STOP_MINUTES * 60e3) {
       stops.push([a, b]);
       continue;
     }
-    const mode = modeAt(day, (a.time + b.time) / 2);
-    const color = modeInfo[mode]?.color || "var(--text-3)";
     const last = runs.at(-1);
-    if (last && last.color === color && last.end === a) last.points.push(b);
-    else runs.push({ color, points: [a, b] });
+    if (last && last.end === a) last.points.push(b);
+    else runs.push({ points: [a, b] });
     runs.at(-1).end = b;
   }
+  const color = modeInfo.driving.color;
   const lines =
-    // A stop drops to zero where the trip ended and rises again where the next one starts.
     stops
       .map(
         ([a, b]) =>
@@ -134,13 +142,18 @@ export function renderSpeedChart(day) {
     runs
       .map(
         (run) =>
-          `<polyline points="${run.points.map((fix) => `${x(fix.time)},${y(fix.kmh)}`).join(" ")}" stroke="${run.color}"/>`,
+          `<polyline points="${run.points.map((fix) => `${x(fix.time)},${y(fix.kmh)}`).join(" ")}" stroke="${color}"/>`,
       )
       .join("");
-  const hours = [0, 3, 6, 9, 12, 15, 18, 21, 24];
-  const hourLabel = (hour) =>
-    new Date(start + hour * 3600e3).toLocaleTimeString([], {
+  // Time labels at a round step, so about six fit along the drives.
+  const stepMinutes = [5, 10, 15, 30, 60, 120, 180].find((size) => (end - start) / (size * 60e3) <= 6) || 360;
+  const step = stepMinutes * 60e3;
+  const labels = [];
+  for (let time = Math.ceil(start / step) * step; time <= end; time += step) labels.push(time);
+  const timeLabel = (time) =>
+    new Date(time).toLocaleTimeString([], {
       hour: "numeric",
+      minute: "2-digit",
       ...(state.settings?.timezone ? { timeZone: state.settings.timezone } : {}),
     });
   const gapBands = gaps
@@ -149,8 +162,8 @@ export function renderSpeedChart(day) {
         `<rect x="${x(Math.max(from, start))}" y="0" width="${(x(Math.min(to, end)) - x(Math.max(from, start))).toFixed(1)}" height="${H}" class="gap-band"/>`,
     )
     .join("");
-  box.innerHTML = `<div class="chart-summary"><div><span>Top speed</span><strong>${Math.round(top)} ${speedUnit()}</strong></div><div><span>Average while moving</span><strong>${moving.length ? Math.round(average) + " " + speedUnit() : "—"}</strong></div><div><span>Timed fixes</span><strong>${fixes.length.toLocaleString()}</strong></div></div>
-    <figure class="speed-chart" aria-label="Speed through the day, up to ${Math.round(top)} ${speedUnit()}">
+  box.innerHTML = `<div class="chart-summary"><div><span>Top speed</span><strong>${Math.round(top)} ${speedUnit()}</strong></div><div><span>Average while moving</span><strong>${moving.length ? Math.round(average) + " " + speedUnit() : "—"}</strong></div><div><span>Drives</span><strong>${drives.length.toLocaleString()}</strong></div></div>
+    <figure class="speed-chart" aria-label="Speed while driving, up to ${Math.round(top)} ${speedUnit()}">
       <div class="chart-y">${ticks
         .slice()
         .reverse()
@@ -159,8 +172,8 @@ export function renderSpeedChart(day) {
       <div class="chart-plot"><svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">${gapBands}${ticks
         .map((tick) => `<line x1="0" x2="${W}" y1="${y(tick)}" y2="${y(tick)}" class="grid"/>`)
         .join("")}<g class="speed-lines">${lines}</g></svg></div>
-      <div class="chart-x">${hours.map((hour) => `<span style="left:${(hour / 24) * 100}%">${safe(hourLabel(hour))}</span>`).join("")}</div>
-      <figcaption>${speedUnit()} · coloured by travel mode${gaps.length ? " · shaded where location is missing" : ""}</figcaption>
+      <div class="chart-x">${labels.map((time) => `<span style="left:${((time - start) / (end - start)) * 100}%">${safe(timeLabel(time))}</span>`).join("")}</div>
+      <figcaption>${speedUnit()} · while driving, ${safe(timeLabel(start))} to ${safe(timeLabel(end))}${gaps.length ? " · shaded where location is missing" : ""}</figcaption>
     </figure>`;
 }
 

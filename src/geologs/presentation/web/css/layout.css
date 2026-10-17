@@ -3,18 +3,8 @@
   position: sticky;
   top: 0;
   z-index: 600;
-  border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
-}
-/* The frosted glass sits on a layer of its own: a filter on the bar itself would pin the phone's
-   bottom tab bar (position: fixed, inside it) to the bar instead of the screen. */
-.topbar::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  z-index: -1;
-  background: color-mix(in srgb, var(--surface) 62%, transparent);
-  backdrop-filter: saturate(1.8) blur(20px);
-  -webkit-backdrop-filter: saturate(1.8) blur(20px);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
 }
 .topbar-inner {
   max-width: 1280px;
