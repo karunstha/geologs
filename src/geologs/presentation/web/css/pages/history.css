@@ -348,37 +348,27 @@
   color: var(--text-3);
   font-size: 12px;
 }
-.pin-badge {
-  flex: 0 0 26px;
-  width: 26px;
-  height: 26px;
+.stop-badge {
+  position: relative;
+  flex: none;
+  display: inline-block;
+  line-height: 0;
+}
+.stop-num {
+  position: absolute;
+  top: -6px;
+  left: -6px;
+  min-width: 19px;
+  height: 19px;
+  padding: 0 5px;
   display: grid;
   place-items: center;
-  border-radius: 50%;
+  border: 2px solid var(--surface);
+  border-radius: 10px;
   background: var(--accent);
   color: var(--on-accent);
-  font-size: 12px;
-  font-weight: 700;
-}
-.pin-badge.many {
-  flex: 0 0 auto;
-  width: auto;
-  min-width: 26px;
-  padding: 0 8px;
-  border-radius: 13px;
-}
-.pin-badge.home {
-  background: #5b7286;
-  color: #fff;
-}
-.pin-badge svg {
-  width: 14px;
-  height: 14px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 2;
-  stroke-linecap: round;
-  stroke-linejoin: round;
+  font: 700 11px/1 var(--font);
+  font-variant-numeric: tabular-nums;
 }
 .activity-tag {
   align-self: flex-start;

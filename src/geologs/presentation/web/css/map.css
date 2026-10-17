@@ -1,29 +1,17 @@
 /* Leaflet map: controls, popups, visit pins, and the dark-theme map. */
-.visit-pin {
-  display: grid;
-  place-items: center;
+/* A visit's pin: the kind of place, solid, with the visit's number on its corner (see .stop-badge). */
+.visit-pin .place-icon {
+  flex-basis: 36px;
   border: 2px solid #fff;
-  border-radius: 50%;
-  background: var(--accent);
-  color: var(--on-accent);
-  font: 700 12px/1 var(--font);
+  background: color-mix(in srgb, var(--kind) 82%, #000);
+  color: #fff;
   box-shadow: 0 2px 8px rgb(0 0 0/0.3);
 }
-.visit-pin.many {
-  border-radius: 14px;
-}
-.visit-pin.home {
-  background: #5b7286;
-  color: #fff;
-}
-.visit-pin svg {
-  width: 15px;
-  height: 15px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 2;
-  stroke-linecap: round;
-  stroke-linejoin: round;
+.visit-pin .stop-num {
+  top: -7px;
+  left: -7px;
+  border-color: #fff;
+  box-shadow: 0 1px 4px rgb(0 0 0/0.3);
 }
 .map-popup {
   display: flex;

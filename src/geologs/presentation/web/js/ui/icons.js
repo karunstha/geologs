@@ -103,11 +103,12 @@ export function placeIcon(place) {
   return `<span class="place-icon ${kind}" title="${safe(kind)}" aria-hidden="true">${placeIcons[kind]}</span>`;
 }
 
-// A stop's number (or a place's numbers, such as "1·3"); Home keeps its house.
-export function pinBadge(label) {
-  return label
-    ? `<span class="pin-badge${String(label).length > 2 ? " many" : ""}">${label}</span>`
-    : `<span class="pin-badge home" title="Home">${placeIcons.home}</span>`;
+// A stop on the day: its kind of place as an icon, with the number you reached it in (or every number
+// of a revisited place, "1·3") on its corner. Home has no number, only its house.
+export function stopBadge(place, label) {
+  if (!label) return `<span class="stop-badge">${placeIcon({ name: "Home" })}</span>`;
+  const many = String(label).length > 2 ? " many" : "";
+  return `<span class="stop-badge">${placeIcon(place)}<b class="stop-num${many}">${label}</b></span>`;
 }
 
 // Each trip of a day gets its own colour, in the order they happened, so one reads apart from the
