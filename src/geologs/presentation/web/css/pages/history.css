@@ -560,9 +560,6 @@
     width: 100%;
     max-width: none;
   }
-  #export {
-    display: none;
-  }
   .current-location {
     align-items: flex-start;
     padding: 12px 14px;

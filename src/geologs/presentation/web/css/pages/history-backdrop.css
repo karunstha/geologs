@@ -1,5 +1,5 @@
 /* History's backdrop: a photo of the day's town in its weather (else a sky gradient for it) across the
-   top of the page, fading into the page colour, with the day's title and weather on it. */
+   top of the page, fading into the page colour, with the day's title on it. */
 .backdrop {
   --sky: linear-gradient(170deg, #2f7fd0 0%, #6db6ea 60%, #f3c77d 100%);
   position: absolute;
@@ -62,7 +62,7 @@ body:has(#explore-view.active) .backdrop {
   content: "";
   position: absolute;
   inset: 0;
-  background: linear-gradient(180deg, rgb(0 0 0/0.55) 0%, rgb(0 0 0/0.32) 45%, rgb(0 0 0/0) 80%);
+  background: linear-gradient(180deg, rgb(0 0 0/0.6) 0%, rgb(0 0 0/0.38) 45%, rgb(0 0 0/0) 80%);
 }
 
 /* The day's head on the backdrop: white text, glass controls. */
@@ -109,98 +109,63 @@ body:has(#explore-view.active) .backdrop {
   stroke-linecap: round;
   stroke-linejoin: round;
 }
-.history-head .input,
-.history-head .icon-button.bordered,
-.history-head .button.secondary {
+/* The right of the head: when you were last seen, and where. */
+.head-side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  margin-left: auto;
+  align-self: flex-end;
+}
+.current-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+}
+.history-head #current-updated {
+  color: var(--on-photo-2);
+  font-size: 12.5px;
+  text-shadow: 0 1px 8px rgb(0 0 0/0.5);
+}
+.history-head .coordinate-copy {
   border-color: var(--glass-border);
   background: var(--glass);
   color: var(--on-photo);
-  box-shadow: none;
   backdrop-filter: blur(12px) saturate(1.3);
   -webkit-backdrop-filter: blur(12px) saturate(1.3);
 }
-.history-head .input option {
-  background: var(--surface);
-  color: var(--text);
-}
-.history-head .input:hover,
-.history-head .icon-button.bordered:hover,
-.history-head .button.secondary:hover {
+.history-head .coordinate-copy:hover {
   background: var(--glass-hover);
   color: var(--on-photo);
 }
-.history-head .button.secondary:disabled,
-.history-head .icon-button:disabled {
-  opacity: 0.5;
-}
 
-/* The weather, briefly: an icon, the temperature, the sky, and the day's range. */
-.day-weather {
+/* Below the head, one box: where you are now, and the day shown. */
+.day-bar {
   display: flex;
   align-items: center;
-  gap: 10px;
-  margin-top: 14px;
-  text-shadow: 0 1px 8px rgb(0 0 0/0.4);
+  justify-content: space-between;
+  gap: 10px 16px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+  padding: 10px 12px 10px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
 }
-.weather-icon {
-  flex: none;
-  width: 38px;
-  height: 38px;
-  filter: drop-shadow(0 2px 6px rgb(0 0 0/0.3));
+.day-bar .current-location {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  box-shadow: none;
 }
-.weather-icon svg {
-  width: 100%;
-  height: 100%;
-  fill: none;
-  stroke-width: 1.6;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-.weather-icon .wi-sun {
-  stroke: #ffd36b;
-  fill: rgb(255 211 107/0.28);
-}
-.weather-icon .wi-moon {
-  stroke: #f3ecc8;
-  fill: rgb(243 236 200/0.2);
-}
-.weather-icon .wi-cloud {
-  stroke: #fff;
-  fill: rgb(255 255 255/0.22);
-}
-.weather-icon .wi-drop {
-  stroke: #9dd4ff;
-}
-.weather-icon .wi-flake {
-  stroke: #fff;
-  fill: #fff;
-}
-.weather-icon .wi-bolt {
-  stroke: #ffd36b;
-  fill: rgb(255 211 107/0.5);
-}
-.weather-icon .wi-mist {
-  stroke: rgb(255 255 255/0.85);
-}
-.weather-temp {
-  font-size: 28px;
-  font-weight: 650;
-  letter-spacing: -0.03em;
-  font-variant-numeric: tabular-nums;
-}
-.weather-text {
-  display: flex;
-  flex-direction: column;
-  line-height: 1.3;
-}
-.weather-text strong {
-  font-size: 14px;
-  font-weight: 640;
-}
-.weather-text span {
-  color: var(--on-photo-2);
-  font-size: 12.5px;
-  font-variant-numeric: tabular-nums;
+.day-bar .history-controls {
+  margin-left: auto;
 }
 
 @media (max-width: 760px) {
@@ -208,8 +173,22 @@ body:has(#explore-view.active) .backdrop {
     height: 400px;
   }
   .history-head {
+    position: relative;
     min-height: 0;
     padding-top: 12px;
+  }
+  .head-side,
+  .current-meta {
+    align-items: flex-start;
+    align-self: flex-start;
+    margin-left: 0;
+  }
+  .day-bar {
+    padding: 12px;
+  }
+  .day-bar .current-location {
+    flex-basis: 100%;
+    align-items: center;
   }
 }
 @media (prefers-reduced-motion: reduce) {

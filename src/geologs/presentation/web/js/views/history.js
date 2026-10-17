@@ -149,7 +149,6 @@ export function renderExplore(day, coverage) {
   $("source-filter").hidden = coverage.sources.length < 2;
   $("next-day").disabled = day.date >= localDateKey();
   $("today").disabled = day.date === localDateKey();
-  $("export").hidden = !hasHistory;
   $("day-empty").hidden = showMap;
   $("summary").hidden = !hasHistory;
   $("history-layout").hidden = !showMap;
@@ -196,6 +195,7 @@ export function renderExplore(day, coverage) {
 export function renderCurrent() {
   const point = state.current;
   $("current-location").hidden = !point;
+  $("current-meta").hidden = !point;
   if (!point) return;
   $("current-location").classList.toggle("stale", !!point.stale);
   $("current-place").innerHTML =
@@ -300,21 +300,6 @@ export function linkedDate() {
   return match && match[1] <= localDateKey() ? match[1] : null;
 }
 
-async function exportDay() {
-  try {
-    const query = params().toString();
-    const data = await api("/api/export.geojson" + (query ? "?" + query : ""));
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/geo+json" });
-    const link = document.createElement("a");
-    link.href = URL.createObjectURL(blob);
-    link.download = `geologs-${$("day-date").value}.geojson`;
-    link.click();
-    setTimeout(() => URL.revokeObjectURL(link.href), 1000);
-  } catch (error) {
-    toast(error.message);
-  }
-}
-
 export function initHistory() {
   initAmbient();
   initDayDetails();
@@ -336,7 +321,6 @@ export function initHistory() {
   $("current-coordinates").onclick = () => {
     if (state.current) copyText(coordinateText(state.current.lat, state.current.lon), "Coordinates copied");
   };
-  $("export").onclick = exportDay;
   $("day-date").value = localDateKey();
   $("fit-day").onclick = () => {
     state.selected = null;

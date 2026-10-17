@@ -44,7 +44,7 @@
     <div class="topbar-inner">
       <div class="brand"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3.5c-3.6 0-6.5 2.8-6.5 6.3 0 4.7 6.5 9.2 6.5 9.2s6.5-4.5 6.5-9.2c0-3.5-2.9-6.3-6.5-6.3Z"/><circle cx="12" cy="9.9" r="2.1"/></svg></span><strong>GeoLogs</strong></div>
       <nav class="main-nav" aria-label="Main navigation">
-        <button class="nav active" data-view="explore" aria-current="page"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6.5 9 4l6 2.5L20 4v13.5L15 20l-6-2.5L4 20Z"/><path d="M9 4v13.5M15 6.5V20"/></svg><span>History</span></button>
+        <button class="nav active" data-view="explore" aria-current="page"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6.5 9 4l6 2.5L20 4v13.5L15 20l-6-2.5L4 20Z"/><path d="M9 4v13.5M15 6.5V20"/></svg><span>Home</span></button>
         <button class="nav" data-view="places"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 10c0 4.6-7 10-7 10S5 14.6 5 10a7 7 0 0 1 14 0Z"/><circle cx="12" cy="10" r="2.4"/></svg><span>Places</span></button>
         <button class="nav" data-view="reminders"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 16.5h12l-1.6-2.6V10a4.4 4.4 0 0 0-8.8 0v3.9Z"/><path d="M10 19.5h4"/></svg><span>Reminders</span></button>
         <button class="nav" data-view="summaries"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="15" rx="2"/><path d="M8 3v4M16 3v4M4 10h16M8 14h5M8 17h8"/></svg><span>Summaries</span></button>
@@ -64,7 +64,16 @@
         <div class="page-title">
           <p id="hero-place" class="hero-place" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 10c0 4.6-7 10-7 10S5 14.6 5 10a7 7 0 0 1 14 0Z"/><circle cx="12" cy="10" r="2.4"/></svg><span id="hero-place-name"></span></p>
           <h1 id="history-title">Today</h1><p id="day-context" class="page-subtitle">See where you went and how the day unfolded.</p>
-          <div id="weather" class="day-weather" hidden aria-live="polite"></div>
+        </div>
+        <div class="head-side">
+          <div id="current-meta" class="current-meta" hidden><button id="current-coordinates" class="coordinate-copy" type="button" title="Copy coordinates"></button><small id="current-updated"></small></div>
+        </div>
+      </div>
+
+      <section class="day-bar" aria-label="Now and the day shown">
+        <div id="current-location" class="current-location" hidden aria-live="polite">
+          <span class="live-location-dot" aria-hidden="true"></span>
+          <div class="current-location-main"><span class="current-label">Now</span><strong id="current-place">Unknown place</strong></div>
         </div>
         <div id="history-filters" class="history-controls" role="group" aria-label="Choose a day">
           <div class="day-navigation">
@@ -74,14 +83,7 @@
             <button id="today" class="button secondary" type="button">Today</button>
           </div>
           <label id="source-filter" class="inline-select"><span class="sr-only">Location source</span><select id="source" class="input"><option value="">All sources</option></select></label>
-          <button id="export" class="button secondary" type="button" hidden title="Download this day as GeoJSON"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M7.5 10.5 12 15l4.5-4.5M5 19h14"/></svg><span>Export</span></button>
         </div>
-      </div>
-
-      <section id="current-location" class="current-location" hidden aria-live="polite">
-        <span class="live-location-dot" aria-hidden="true"></span>
-        <div class="current-location-main"><span class="current-label">Now</span><strong id="current-place">Unknown place</strong><small id="current-updated"></small></div>
-        <div class="current-location-actions"><button id="current-coordinates" class="coordinate-copy" type="button" title="Copy coordinates"></button></div>
       </section>
 
       <section id="day-empty" class="card day-empty" hidden aria-live="polite">
@@ -218,7 +220,7 @@
               <label class="setting-row"><span class="setting-label"><strong>Minimum stay</strong><small>Time in one place or area before it counts as a visit. Shorter catches quick errands; longer ignores traffic and short waits.</small></span><span class="input-unit"><input id="stay-min" class="input" type="number" min="5" max="120" step="1" required><span>min</span></span></label>
               <label class="setting-row"><span class="setting-label"><strong>Quick stops</strong><small>A shorter stop between two stretches of travel, like filling up or a pickup, is kept when you are still this long. Red lights, creeping traffic, and pauses inside a run around one place don't count.</small></span><select id="quick-stop" class="input"><option value="0">Off</option><option value="2">2 min or more</option><option value="3">3 min or more</option><option value="4">4 min or more</option><option value="5">5 min or more</option><option value="7">7 min or more</option><option value="10">10 min or more</option></select></label>
               <p id="stays-error" class="field-error" role="alert" hidden></p>
-              <p class="callout setting-note"><strong>Missed a stop, or found one that wasn't real?</strong><span>In History, select a trip to add a stop on it, or a stay to remove it. Your changes are kept when stays are recalculated.</span></p>
+              <p class="callout setting-note"><strong>Missed a stop, or found one that wasn't real?</strong><span>On Home, select a trip to add a stop on it, or a stay to remove it. Your changes are kept when stays are recalculated.</span></p>
               <p class="help setting-note">Saving recalculates stays and trips across your whole history, which can take a moment.</p>
               <div class="card-foot"><button id="stays-defaults" class="button secondary" type="button">Restore defaults</button><button class="button primary">Save changes</button></div>
             </form>
@@ -351,7 +353,7 @@
   </dialog>
 
   <dialog id="label-dialog" class="dialog" aria-labelledby="label-dialog-title">
-    <div class="dialog-head"><div><h2 id="label-dialog-title">What is this place?</h2><p>Pick where you actually were. History, summaries, and search use this name; it is not added to saved places.</p></div><button id="close-label-dialog" class="icon-button" type="button" aria-label="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
+    <div class="dialog-head"><div><h2 id="label-dialog-title">What is this place?</h2><p>Pick where you actually were. Home, summaries, and search use this name; it is not added to saved places.</p></div><button id="close-label-dialog" class="icon-button" type="button" aria-label="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
     <section class="dialog-section"><div class="card-head compact"><h3 id="nearby-title">Places around this visit</h3><span id="nearby-note" class="muted"></span></div><div id="nearby-places" class="result-list nearby-list" aria-live="polite"></div></section>
     <section class="dialog-section"><form id="label-form" class="form-stack"><input type="hidden" id="label-category"><input type="hidden" id="label-provider-id"><input type="hidden" id="label-address">
       <label class="field"><span>Name</span><input id="label-name" class="input" required maxlength="120" autocomplete="off" autofocus></label>
