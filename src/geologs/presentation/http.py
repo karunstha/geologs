@@ -16,6 +16,7 @@ from urllib.parse import parse_qs, urlparse
 from .. import config
 from ..domain.access import token_allows_source
 from ..services import open_database
+from ..services.ambient import ambient
 from ..services.corrections import delete_stay_edit, save_mode_override, save_stay_edit
 from ..services.day import day_summary
 from ..services.devices import create_ingest_token, delete_ingest_device, delete_ingest_token, ingest_token_for, record_ingest, source_activity
@@ -332,6 +333,7 @@ class Handler(BaseHTTPRequestHandler):
             elif url.path == "/api/transitions": value = transitions(db, q.get("limit", 50))
             elif url.path == "/api/predict-next": value = predict_next(db)
             elif url.path == "/api/insights": value = insights(db, min(int(q.get("limit", 50)), 100))
+            elif url.path == "/api/ambient": value = ambient(db, q["lat"], q["lon"], q.get("date"), q.get("timezone"))
             elif url.path == "/api/day": value = day_summary(db, q["date"], q.get("timezone") or db.settings.get()["timezone"], q.get("source"))
             elif url.path == "/api/daily-summary": value = daily_overview(db, q["date"], q.get("timezone"), q.get("source"))
             elif url.path == "/api/daily-summaries": value = daily_overviews(db, q.get("start"), q.get("end"), q.get("limit", 90))

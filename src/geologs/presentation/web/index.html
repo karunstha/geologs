@@ -31,12 +31,14 @@
   <link rel="stylesheet" href="/css/components/dialogs.css">
   <link rel="stylesheet" href="/css/map.css">
   <link rel="stylesheet" href="/css/pages/history.css">
+  <link rel="stylesheet" href="/css/pages/history-hero.css">
   <link rel="stylesheet" href="/css/pages/places.css">
   <link rel="stylesheet" href="/css/pages/reminders.css">
   <link rel="stylesheet" href="/css/pages/summaries.css">
   <link rel="stylesheet" href="/css/pages/settings.css">
 </head>
 <body>
+  <div id="backdrop" class="backdrop" aria-hidden="true"></div>
   <a class="skip-link" href="#main">Skip to content</a>
   <header class="topbar">
     <div class="topbar-inner">
@@ -58,25 +60,36 @@
 
   <main id="main">
     <section id="explore-view" class="view active" aria-labelledby="history-title">
-      <div class="page-head history-head">
-        <div class="page-title"><h1 id="history-title">Today</h1><p id="day-context" class="page-subtitle">See where you went and how the day unfolded.</p></div>
-        <div id="history-filters" class="history-controls" role="group" aria-label="Choose a day">
-          <div class="day-navigation">
-            <button id="previous-day" class="icon-button bordered" type="button" aria-label="Previous day" title="Previous day (←)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14.5 6-6 6 6 6"/></svg></button>
-            <label class="sr-only" for="day-date">Day</label><input id="day-date" class="input" type="date" required>
-            <button id="next-day" class="icon-button bordered" type="button" aria-label="Next day" title="Next day (→)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9.5 6 6 6-6 6"/></svg></button>
-            <button id="today" class="button secondary" type="button">Today</button>
+      <header id="history-hero" class="history-hero" data-sky="clear">
+        <div class="hero-photo" aria-hidden="true"></div>
+        <div class="hero-content">
+          <div class="hero-top">
+            <p id="hero-place" class="hero-place" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 10c0 4.6-7 10-7 10S5 14.6 5 10a7 7 0 0 1 14 0Z"/><circle cx="12" cy="10" r="2.4"/></svg><span id="hero-place-name"></span></p>
+            <div id="history-filters" class="history-controls" role="group" aria-label="Choose a day">
+              <div class="day-navigation">
+                <button id="previous-day" class="icon-button bordered" type="button" aria-label="Previous day" title="Previous day (←)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14.5 6-6 6 6 6"/></svg></button>
+                <label class="sr-only" for="day-date">Day</label><input id="day-date" class="input" type="date" required>
+                <button id="next-day" class="icon-button bordered" type="button" aria-label="Next day" title="Next day (→)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9.5 6 6 6-6 6"/></svg></button>
+                <button id="today" class="button secondary" type="button">Today</button>
+              </div>
+              <label id="source-filter" class="inline-select"><span class="sr-only">Location source</span><select id="source" class="input"><option value="">All sources</option></select></label>
+              <button id="export" class="button secondary" type="button" hidden title="Download this day as GeoJSON"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M7.5 10.5 12 15l4.5-4.5M5 19h14"/></svg><span>Export</span></button>
+            </div>
           </div>
-          <label id="source-filter" class="inline-select"><span class="sr-only">Location source</span><select id="source" class="input"><option value="">All sources</option></select></label>
-          <button id="export" class="button secondary" type="button" hidden title="Download this day as GeoJSON"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M7.5 10.5 12 15l4.5-4.5M5 19h14"/></svg><span>Export</span></button>
+          <div class="hero-main">
+            <div class="page-title"><h1 id="history-title">Today</h1><p id="day-context" class="page-subtitle">See where you went and how the day unfolded.</p></div>
+            <div id="weather" class="hero-weather" hidden aria-live="polite"></div>
+          </div>
+          <div class="hero-foot">
+            <section id="current-location" class="current-location" hidden aria-live="polite">
+              <span class="live-location-dot" aria-hidden="true"></span>
+              <div class="current-location-main"><span class="current-label">Now</span><strong id="current-place">Unknown place</strong><small id="current-updated"></small></div>
+              <div class="current-location-actions"><button id="current-coordinates" class="coordinate-copy" type="button" title="Copy coordinates"></button></div>
+            </section>
+            <p id="photo-credit" class="photo-credit" hidden></p>
+          </div>
         </div>
-      </div>
-
-      <section id="current-location" class="current-location" hidden aria-live="polite">
-        <span class="live-location-dot" aria-hidden="true"></span>
-        <div class="current-location-main"><span class="current-label">Now</span><strong id="current-place">Unknown place</strong><small id="current-updated"></small></div>
-        <div class="current-location-actions"><button id="current-coordinates" class="coordinate-copy" type="button" title="Copy coordinates"></button></div>
-      </section>
+      </header>
 
       <section id="day-empty" class="card day-empty" hidden aria-live="polite">
         <span class="empty-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 6.5 9 4l6 2.5L20 4v13.5L15 20l-6-2.5L4 20Z"/><path d="M9 4v13.5M15 6.5V20"/></svg></span>

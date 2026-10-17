@@ -18,6 +18,7 @@ import {
 import { state } from "../core/state.js";
 import { drawMap, drawSelection, fitDay, map, revealMap, selectedItem } from "../map/map.js";
 import { modeIcon, modeInfo, placeIcon, sourceName } from "../ui/icons.js";
+import { initAmbient, refreshAmbient } from "./ambient.js";
 import { initDayDetails, renderDayDetails } from "./day-details.js";
 import { showSettingsPage } from "./settings.js";
 import { showView } from "./shell.js";
@@ -173,6 +174,7 @@ export function renderExplore(day, coverage) {
   }
   if (!selectedItem()) state.selected = null;
   renderStats(day);
+  refreshAmbient(day);
   renderTimeline(day);
   renderDayDetails(day);
   $("map-detail-section").hidden = true;
@@ -278,6 +280,7 @@ export async function refreshCurrent() {
   state.current = await api("/api/current");
   renderCurrent();
   drawMap();
+  refreshAmbient();
 }
 
 function goToDate(date) {
@@ -313,6 +316,7 @@ async function exportDay() {
 }
 
 export function initHistory() {
+  initAmbient();
   initDayDetails();
   $("day-date").max = localDateKey();
   $("day-date").onchange = () => {

@@ -40,6 +40,8 @@ services:
       GEOLOGS_WEBHOOK_SECRET: ${GEOLOGS_WEBHOOK_SECRET:-}
       # US fuel prices for Car & fuel (Automatic); without it you enter your own price.
       EIA_API_KEY: ${EIA_API_KEY:-}
+      # A photo of your city behind History (free key: https://unsplash.com/developers).
+      UNSPLASH_ACCESS_KEY: ${UNSPLASH_ACCESS_KEY:-}
       GEOLOGS_REVERSE_CACHE_DAYS: ${GEOLOGS_REVERSE_CACHE_DAYS:-180}
     ports:
       - "0.0.0.0:${GEOLOGS_PUBLISHED_PORT:-8765}:8765"

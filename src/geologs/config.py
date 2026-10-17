@@ -125,6 +125,11 @@ def eia_key():
     return _env("EIA_API_KEY").strip()
 
 
+def unsplash_key():
+    """UNSPLASH_ACCESS_KEY: a photo of where you are behind History; without it, a sky gradient."""
+    return _env("UNSPLASH_ACCESS_KEY").strip() or None
+
+
 def webhook():
     """(GEOLOGS_WEBHOOK_URL, GEOLOGS_WEBHOOK_TOKEN, GEOLOGS_WEBHOOK_SECRET); unset ones are None."""
     return (_env("GEOLOGS_WEBHOOK_URL") or None, _env("GEOLOGS_WEBHOOK_TOKEN") or None,

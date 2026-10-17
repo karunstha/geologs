@@ -2896,6 +2896,108 @@ def process_stays_rebuild(db):
     db.commit()
 
 
+class AmbientTests(unittest.TestCase):
+    """History's hero: the town, its weather, and a photo of it in that weather, each on its own."""
+
+    def setUp(self):
+        from geologs.services import ambient as module
+        self.module = module
+        module._weather.clear()
+        module._reported.clear()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db = open_database(Path(self.tmp.name) / "test.db")
+        self.place = {"city": "Little Rock", "region": "Arkansas", "country": "United States", "country_code": "US"}
+        self.rain = {"current": {"time": "2026-10-17T15:30", "code": 63, "is_day": True, "temperature_c": 14.0,
+                                 "feels_like_c": 12.0, "humidity": 90, "wind_kmh": 20.0, "precipitation_mm": 1.2},
+                     "day": {"date": "2026-10-17", "code": 63, "high_c": 16.0, "low_c": 10.0}}
+
+    def tearDown(self):
+        self.db.close()
+        self.tmp.cleanup()
+
+    def photo(self, photo_id):
+        return {"id": photo_id, "url": "https://images.unsplash.com/" + photo_id, "photographer": "Ann",
+                "download_location": f"https://api.unsplash.com/photos/{photo_id}/download?ixid=1"}
+
+    def test_weather_codes_name_the_sky_and_the_photo_to_find(self):
+        from geologs.domain.weather import condition
+        self.assertEqual(condition(63)["photo_word"], "rain")
+        self.assertEqual(condition(75)["label"], "Heavy snow")
+        self.assertEqual(condition(0, is_day=False)["icon"], "clear-night")
+        self.assertEqual(condition(95, is_day=False)["icon"], "storm")
+        self.assertEqual(condition(None)["condition"], "cloudy")
+
+    def test_city_in_its_weather_falls_back_to_broader_searches(self):
+        searches = []
+
+        def search(query):
+            searches.append(query)
+            return [self.photo("wet-rock")] if query == "Little Rock rain" else []
+        with patch.dict(os.environ, {"UNSPLASH_ACCESS_KEY": "key"}), \
+                patch.object(self.module.localities, "locality", return_value=self.place) as locality, \
+                patch.object(self.module.forecasts, "today", return_value=self.rain) as forecast, \
+                patch.object(self.module.unsplash, "search", side_effect=search), \
+                patch.object(self.module.unsplash, "report_download") as reported:
+            value = self.module.ambient(self.db, 34.74651, -92.28962, None, "America/Chicago")
+            again = self.module.ambient(self.db, 34.7467, -92.2898, None, "America/Chicago")
+            for _ in range(100):  # the download report is sent in the background
+                if reported.called:
+                    break
+                __import__("time").sleep(0.01)
+        self.assertEqual(searches, ["Little Rock Arkansas rain", "Little Rock rain"])  # the second view reuses both
+        self.assertEqual((value["place"]["city"], value["weather"]["label"], value["weather"]["icon"]),
+                         ("Little Rock", "Rain", "rain"))
+        self.assertEqual((value["photo"]["id"], value["photo"]["query"]), ("wet-rock", "Little Rock rain"))
+        self.assertNotIn("download_location", value["photo"])
+        self.assertEqual(again["photo"]["id"], "wet-rock")
+        # Positions go out rounded to about a kilometre; each is asked once.
+        locality.assert_called_once_with(34.75, -92.29)
+        forecast.assert_called_once_with(34.75, -92.29, "America/Chicago")
+        reported.assert_called_once_with("https://api.unsplash.com/photos/wet-rock/download?ixid=1")
+
+    def test_each_part_is_left_out_on_its_own(self):
+        with patch.dict(os.environ, {"UNSPLASH_ACCESS_KEY": ""}), \
+                patch.object(self.module.localities, "locality", side_effect=OSError("offline")), \
+                patch.object(self.module.forecasts, "today", return_value=self.rain), \
+                patch.object(self.module.unsplash, "search") as search:
+            value = self.module.ambient(self.db, 34.7, -92.3, None, "UTC")
+        search.assert_not_called()
+        self.assertEqual((value["place"], value["photo"], value["photos"]), (None, None, False))
+        self.assertEqual(value["weather"]["condition"], "rain")
+
+    def test_a_past_day_uses_its_own_weather(self):
+        past = {"current": None, "day": {"date": "2026-01-25", "code": 75, "high_c": -4.7, "low_c": -12.2}}
+        with patch.dict(os.environ, {"UNSPLASH_ACCESS_KEY": ""}), \
+                patch.object(self.module.localities, "locality", return_value=self.place), \
+                patch.object(self.module.forecasts, "past_day", return_value=past) as past_day:
+            value = self.module.ambient(self.db, 40.71, -74.0, "2026-01-25", "America/New_York")
+        self.assertEqual(past_day.call_args.args[:4], (40.71, -74.0, "America/New_York", "2026-01-25"))
+        self.assertEqual((value["today"], value["weather"]["label"]), (False, "Heavy snow"))
+        with self.assertRaises(ValueError):
+            self.module.ambient(self.db, 40.71, -74.0, "2999-01-01", "UTC")
+        with self.assertRaises(ValueError):
+            self.module.ambient(self.db, 95, 0)
+
+    def test_unsplash_photos_carry_referral_links(self):
+        from geologs.integrations import unsplash
+        result = {"results": [{"id": "a", "urls": {"raw": "https://images.unsplash.com/a?ixid=1", "small": "s"},
+                               "user": {"name": "Ann", "links": {"html": "https://unsplash.com/@ann"}},
+                               "links": {"html": "https://unsplash.com/photos/a",
+                                         "download_location": "https://api.unsplash.com/photos/a/download"}}]}
+        response = Mock()
+        response.read.return_value = json.dumps(result).encode()
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        with patch.dict(os.environ, {"UNSPLASH_ACCESS_KEY": "key"}), \
+                patch("geologs.integrations.unsplash.urllib.request.urlopen", return_value=response) as fetch:
+            photos = unsplash.search("Little Rock rain")
+            unsplash.report_download("https://evil.example/photos/a/download")
+        self.assertEqual(fetch.call_count, 1)  # only Unsplash's own download endpoint is reported to
+        self.assertEqual(fetch.call_args.args[0].get_header("Authorization"), "Client-ID key")
+        self.assertEqual(photos[0]["photographer_url"], "https://unsplash.com/@ann?utm_source=geologs&utm_medium=referral")
+        self.assertTrue(photos[0]["url"].startswith("https://images.unsplash.com/a?ixid=1&w=2400"))
+
+
 class LiveServerCase(unittest.TestCase):
     """A real server on a free port, with a scratch database and known tokens."""
 
