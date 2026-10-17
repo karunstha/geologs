@@ -11,6 +11,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from email.message import Message
 from pathlib import Path
+from zoneinfo import ZoneInfo
 from unittest.mock import Mock, patch
 
 from geologs.services import open_database
@@ -2927,13 +2928,34 @@ class AmbientTests(unittest.TestCase):
         self.assertEqual(condition(95, is_day=False)["icon"], "storm")
         self.assertEqual(condition(None)["condition"], "cloudy")
 
+    def test_time_of_day_follows_the_sun(self):
+        from geologs.domain.weather import time_of_day
+        rise, set_ = "2026-10-17T07:16", "2026-10-17T18:31"
+        self.assertEqual([time_of_day(clock, rise, set_) for clock in ("05:00", "08:00", "13:00", "17:30", "19:30")],
+                         ["night", "morning", "day", "evening", "night"])
+        self.assertEqual(time_of_day("2026-10-17T09:00"), "morning")
+
+    def test_photos_are_picked_at_random_without_repeating(self):
+        photos = [self.photo(f"p{index}") for index in range(12)]
+        with patch.dict(os.environ, {"UNSPLASH_ACCESS_KEY": "key"}), \
+                patch.object(self.module.localities, "locality", return_value=self.place), \
+                patch.object(self.module.forecasts, "today", return_value=self.rain), \
+                patch.object(self.module.unsplash, "search", return_value=photos) as search, \
+                patch.object(self.module.unsplash, "report_download"):
+            shown = [self.module.ambient(self.db, 34.7, -92.3, None, "UTC")["photo"]["id"] for _ in range(10)]
+        search.assert_called_once()  # one search, cached
+        self.assertEqual(len(set(shown)), 10)  # each of the top ten once before any repeats
+        self.assertLessEqual(set(shown), {f"p{index}" for index in range(10)})
+
     def test_city_in_its_weather_falls_back_to_broader_searches(self):
         searches = []
 
-        def search(query):
+        def search(query, count):
             searches.append(query)
-            return [self.photo("wet-rock")] if query == "Little Rock rain" else []
+            return [self.photo("wet-rock")] if query == "Little Rock rain day" else []
+        afternoon = datetime(2026, 10, 17, 15, 30, tzinfo=ZoneInfo("America/Chicago"))
         with patch.dict(os.environ, {"UNSPLASH_ACCESS_KEY": "key"}), \
+                patch.object(self.module, "_local_now", return_value=afternoon), \
                 patch.object(self.module.localities, "locality", return_value=self.place) as locality, \
                 patch.object(self.module.forecasts, "today", return_value=self.rain) as forecast, \
                 patch.object(self.module.unsplash, "search", side_effect=search), \
@@ -2944,10 +2966,11 @@ class AmbientTests(unittest.TestCase):
                 if reported.called:
                     break
                 __import__("time").sleep(0.01)
-        self.assertEqual(searches, ["Little Rock Arkansas rain", "Little Rock rain"])  # the second view reuses both
+        self.assertEqual(searches, ["Little Rock Arkansas rain day", "Little Rock rain day"])  # the second view reuses both
         self.assertEqual((value["place"]["city"], value["weather"]["label"], value["weather"]["icon"]),
                          ("Little Rock", "Rain", "rain"))
-        self.assertEqual((value["photo"]["id"], value["photo"]["query"]), ("wet-rock", "Little Rock rain"))
+        self.assertEqual((value["photo"]["id"], value["photo"]["query"], value["time_of_day"]),
+                         ("wet-rock", "Little Rock rain day", "day"))
         self.assertNotIn("download_location", value["photo"])
         self.assertEqual(again["photo"]["id"], "wet-rock")
         # Positions go out rounded to about a kilometre; each is asked once.

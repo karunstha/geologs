@@ -5,13 +5,14 @@ weather outage never hides the photo, nor a missing Unsplash key the weather.
 Positions are rounded to about a kilometre before anything is asked of an
 outside service.
 """
-import hashlib
+import random
 import threading
 import time
+from collections import deque
 from datetime import date as Date, datetime, timedelta, timezone as UTC
 from zoneinfo import ZoneInfo
 
-from ..domain.weather import condition
+from ..domain.weather import condition, time_of_day
 from ..integrations import locality as localities
 from ..integrations import unsplash
 from ..integrations import weather as forecasts
@@ -22,6 +23,9 @@ _weather = {}
 _weather_lock = threading.Lock()
 # Photos already reported to Unsplash by this server, so each is reported once.
 _reported = set()
+# The last photos shown, which the next pick avoids so the backdrop does not repeat itself.
+_recent = deque(maxlen=12)
+PHOTO_CHOICES = 10
 PHOTO_SEARCH_DAYS = 7
 # The forecast API keeps about three months; older days come from the archive.
 FORECAST_HISTORY_DAYS = 80
@@ -69,20 +73,22 @@ def _sky(forecast):
             "current": current, "day": day}
 
 
-def _photo_searches(place, sky):
-    """Most to least particular: "Little Rock Arkansas rain", "Little Rock rain", "Little Rock Arkansas", …"""
+def _photo_searches(place, sky, moment):
+    """Most to least particular: "Little Rock Arkansas rain night", "Little Rock rain night",
+    "Little Rock rain", "Little Rock night", "Little Rock", "Arkansas rain", …"""
     city, region = place.get("city") if place else None, place.get("region") if place else None
     if region and city and region.lower() == city.lower():
         region = None
     word = sky["photo_word"] if sky else None
+    join = lambda *parts: " ".join(parts) if all(parts) else None
     candidates = []
     if city:
-        candidates += [f"{city} {region} {word}" if region and word else None, f"{city} {word}" if word else None,
-                       f"{city} {region}" if region else None, city]
+        candidates += [join(city, region, word, moment), join(city, word, moment), join(city, word),
+                       join(city, moment), city]
     if region:
-        candidates += [f"{region} {word}" if word else None, region]
+        candidates += [join(region, word, moment), join(region, word), region]
     if word:
-        candidates.append(f"{word} landscape")
+        candidates += [join(word, moment, "landscape"), join(word, "landscape")]
     seen, searches = set(), []
     for query in candidates:
         if query and query.lower() not in seen:
@@ -97,7 +103,7 @@ def _photos(db, query):
     fresh_after = (datetime.now(UTC.utc) - timedelta(days=PHOTO_SEARCH_DAYS)).isoformat()
     if cached is not None and cached.get("fetched_at", "") > fresh_after:
         return cached["photos"]
-    photos = unsplash.search(query)
+    photos = unsplash.search(query, PHOTO_CHOICES)
     db.caches.save_lookup(key, "unsplash", {"fetched_at": datetime.now(UTC.utc).isoformat(timespec="seconds"),
                                             "photos": photos})
     return photos
@@ -116,21 +122,26 @@ def _report(photo):
     threading.Thread(target=send, daemon=True).start()
 
 
-def _photo(db, place, sky, day):
-    """A photo for the first search that finds any; the same one all day, a different one the next."""
-    for query in _photo_searches(place, sky):
+def _photo(db, place, sky, moment):
+    """A random one of the top ten photos for the first search that finds any, avoiding those just shown."""
+    for query in _photo_searches(place, sky, moment):
         photos = _photos(db, query)
         if photos:
-            choices = photos[:8]
-            pick = choices[int(hashlib.sha256(f"{day}|{query}".encode()).hexdigest(), 16) % len(choices)]
+            choices = photos[:PHOTO_CHOICES]
+            pick = random.choice([photo for photo in choices if photo["id"] not in _recent] or choices)
+            _recent.append(pick["id"])
             _report(pick)
             return {key: value for key, value in pick.items() if key != "download_location"} | {"query": query}
     return None
 
 
+def _local_now(zone):
+    return datetime.now(ZoneInfo(zone))
+
+
 @use_case
 def ambient(db, lat, lon, date=None, timezone=None):
-    """{date, today, place, weather, photo, photos} for a position on a local date (today by default).
+    """{date, today, time_of_day, place, weather, photo, photos} for a position on a local date (today by default).
 
     Today's weather has the sky now and the day's range; a past day's has its
     range and the code that summed it up. `photos` says whether Unsplash is set up.
@@ -140,9 +151,10 @@ def ambient(db, lat, lon, date=None, timezone=None):
         raise ValueError("invalid coordinates")
     zone = timezone or db.settings.get()["timezone"] or "UTC"
     try:
-        today = datetime.now(ZoneInfo(zone)).date().isoformat()
+        now = _local_now(zone)
     except Exception:
         raise ValueError("unknown timezone")
+    today = now.date().isoformat()
     day = Date.fromisoformat(date).isoformat() if date else today
     if day > today:
         raise ValueError("date is in the future")
@@ -156,10 +168,15 @@ def ambient(db, lat, lon, date=None, timezone=None):
         sky = _sky(_forecast(lat, lon, day, zone, today))
     except Exception as exc:
         _note("weather", exc)
+    # Today's photo is of the town at this time of day; a past day's, of the town all day.
+    moment = None
+    if day == today:
+        sun = sky["day"] if sky else {}
+        moment = time_of_day(now.strftime("%H:%M"), sun.get("sunrise"), sun.get("sunset"))
     if unsplash.configured():
         try:
-            photo = _photo(db, place, sky, day)
+            photo = _photo(db, place, sky, moment)
         except Exception as exc:
             _note("Unsplash", exc)
-    return {"date": day, "today": day == today, "place": place, "weather": sky, "photo": photo,
-            "photos": unsplash.configured()}
+    return {"date": day, "today": day == today, "time_of_day": moment, "place": place, "weather": sky,
+            "photo": photo, "photos": unsplash.configured()}

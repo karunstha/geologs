@@ -27,4 +27,25 @@ def condition(code, is_day=True):
     kind, label = _CODES.get(int(code) if code is not None else -1, ("cloudy", "Cloudy"))
     night = not is_day and kind in ("clear", "partly")
     return {"condition": kind, "label": label, "icon": kind + ("-night" if night else ""),
-            "photo_word": "night" if night else _PHOTO_WORDS[kind]}
+            "photo_word": _PHOTO_WORDS[kind]}
+
+
+def _minutes(clock):
+    hours, minutes = str(clock)[-5:].split(":")
+    return int(hours) * 60 + int(minutes)
+
+
+def time_of_day(now, sunrise=None, sunset=None):
+    """"morning", "day", "evening" or "night" at a local time ("HH:MM", or ISO with the time last).
+
+    Morning runs from sunrise to 11:00, evening from 90 minutes before sunset to
+    45 minutes after it; without sun times, 06:30 and 19:00 stand in.
+    """
+    now, rise, set_ = _minutes(now), _minutes(sunrise or "06:30"), _minutes(sunset or "19:00")
+    if now < rise or now >= set_ + 45:
+        return "night"
+    if now < max(rise + 60, 11 * 60):
+        return "morning"
+    if now < set_ - 90:
+        return "day"
+    return "evening"
