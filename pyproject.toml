@@ -1,19 +1,30 @@
 [project]
 name = "geologs"
 version = "0.1.0"
-description = "Source-independent personal location memory, reminders, and MCP tools"
+description = "A self-hosted, multi-user location archive: stays, trips, places, reminders and MCP tools, on PostgreSQL and PostGIS"
+readme = "README.md"
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE"]
+authors = [{ name = "Karun Shrestha" }]
 requires-python = ">=3.11"
 dependencies = ["tzdata>=2025.1", "psycopg[binary,pool]>=3.2,<4"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Web Environment",
+    "Intended Audience :: End Users/Desktop",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: GIS",
+]
 
-[project.optional-dependencies]
-# Kept so older install commands ('.[postgres]') still work; PostgreSQL is now always required.
-postgres = []
+[project.urls]
+Repository = "https://github.com/karunstha/geologs"
+Issues = "https://github.com/karunstha/geologs/issues"
 
 [project.scripts]
 geologs = "geologs.presentation.cli:main"
 
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]

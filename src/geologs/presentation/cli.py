@@ -13,22 +13,6 @@ from ..services.stays import rebuild_stays
 from .http import serve
 
 
-LEGACY_PREFIX = "GEOTRACKER_"
-
-
-def adopt_legacy_names():
-    """Honour settings still named for the old project name, Geotracker, so an un-renamed .env
-    keeps working (with a reminder to rename it)."""
-    adopted = []
-    for key in sorted(os.environ):
-        if key.startswith(LEGACY_PREFIX):
-            current = "GEOLOGS_" + key[len(LEGACY_PREFIX):]
-            if current not in os.environ:
-                os.environ[current] = os.environ[key]
-                adopted.append(key)
-    return adopted
-
-
 def load_env_file():
     """Use local .env values when the process environment has no override."""
     path = config.env_file()
@@ -59,12 +43,7 @@ def ask_password():
 
 
 def main():
-    legacy = adopt_legacy_names()
     load_env_file()
-    legacy += adopt_legacy_names()
-    if legacy:
-        print("geologs: rename " + ", ".join(legacy) + " to GEOLOGS_*; the old names still work for now",
-              file=sys.stderr)
     parser = argparse.ArgumentParser(prog="geologs")
     sub = parser.add_subparsers(dest="command", required=True)
     web = sub.add_parser("serve", help="run local browser, REST API and MCP HTTP")

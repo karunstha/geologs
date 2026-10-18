@@ -1,4 +1,6 @@
-# Upgrading a server to accounts
+# Upgrading
+
+## From the single-user version to accounts
 
 This release turns GeoLogs into a multi-user archive. Your existing data becomes the **owner**'s (the first account, an admin), and everything you use today keeps working: `GEOLOGS_TOKEN`, the `.env` ingest token, device tokens, MCP clients and the reminder webhook all act as the owner.
 
@@ -8,19 +10,13 @@ What changes on the server:
 -   Requests log in to PostgreSQL as a new role, `geologs_app`, which can only see each user's own rows. Compose **will not start** without its password, `GEOLOGS_APP_DB_PASSWORD`, in `.env`.
 -   There is no going back without the backup in step 1: the old version cannot read the upgraded database.
 
-Run every command on the server, in the GeoLogs checkout (`~/docker/geologs`), unless it says otherwise.
+Run every command on the server, in the GeoLogs checkout, unless it says otherwise.
 
-## 0. Before you start (on your Mac)
-
-The new version must be on GitHub for the server to pull it. Commit the `postgres-only` branch and push it, or merge it into `main` and push that:
-
-```bash
-git push origin postgres-only
-```
-
-This release drops `./geologs poll-ha`. If the server still has a cron entry for it, remove it (`crontab -e`); Home Assistant sends positions itself with the REST command in **Settings → Devices → Home Assistant**.
+## 0. Before you start
 
 Pick a quiet time. Trackers that send during the upgrade (a minute or two) get an error; OwnTracks and Overland keep their fixes and send them again later.
+
+This release drops the `geologs poll-ha` command. If you ran it from cron, remove that entry; Home Assistant sends positions itself with the REST command in **Settings → Devices → Home Assistant**.
 
 ## 1. Back up
 
@@ -30,8 +26,6 @@ Check the server is healthy first, so you are backing up something good:
 docker compose ps                       # db and app are both "Up"; db is "(healthy)"
 docker compose exec db psql -U geologs -d geologs -c "SELECT COUNT(*) FROM point_observations"
 ```
-
-If the second command says `role "geologs" does not exist`, the earlier rename from Geotracker has not run on this server: run `./scripts/rename-from-geotracker` first (see the README), then start this step again.
 
 Take a database dump and keep the settings:
 
@@ -48,11 +42,11 @@ ls -lh ~/geologs-backups/
 docker compose exec -T db pg_restore --list < ~/geologs-backups/geologs-$(date +%F).dump | grep -c "TABLE DATA"   # 20 or more
 ```
 
-Copy the dump off the server too (to your Mac, say), so a disk failure cannot take both:
+Copy the dump off the server too (to your own computer, say), so a disk failure cannot take both:
 
 ```bash
-# on your Mac
-scp karun-thinkcentre:geologs-backups/geologs-*.dump ~/Backups/
+# on your own computer
+scp your-server:geologs-backups/geologs-*.dump ~/Backups/
 ```
 
 Write down the commit you are running now, for rolling back:
@@ -88,8 +82,6 @@ Without them, GeoLogs works as before; invites and reset links are shown in the 
 ## 3. Upgrade
 
 ```bash
-git fetch origin
-git checkout postgres-only        # or: git checkout main && git pull, if you merged it
 git pull
 docker compose build app
 docker compose up -d
@@ -119,7 +111,7 @@ In the browser:
 4.  The account button (top right) opens **Account**. Add your email and set a password, so you can sign in without the token; consider turning on **Two-factor sign-in**.
 5.  **Admin** appears in the menu. Users lists one account (you), with your fixes counted within a few minutes.
 
-Also check what talks to GeoLogs from outside: an MCP client (such as Hermes) answers a question about today, and a reminder still reaches the webhook. Both use `GEOLOGS_TOKEN`, so they act as the owner, as before.
+Also check what talks to GeoLogs from outside: an MCP client answers a question about today, and a reminder still reaches the webhook. Both use `GEOLOGS_TOKEN`, so they act as the owner, as before.
 
 One thing may be slow, once: the first fix that arrives out of order (a phone sending what it kept while offline) finds every stay of that tracker again, which takes a minute or two for a few years of history. After that, late fixes take well under a second.
 

@@ -7,3 +7,6 @@ __pycache__/
 .venv/
 /data/
 *.egg-info/
+
+# Screenshots of real data stay out of the repository; the README's are made from demo data in docs/images/.
+/screenshots/

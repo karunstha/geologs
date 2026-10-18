@@ -661,19 +661,6 @@ class StoreTests(unittest.TestCase):
             load_env_file()
             self.assertEqual(os.environ["GEOLOGS_TOKEN"], "process-token")
 
-    def test_settings_named_for_geotracker_still_work_with_a_reminder(self):
-        # An un-renamed .env keeps working, and the command line says what to rename.
-        path = Path(self.tmp.name) / ".env"
-        path.write_text("GEOTRACKER_TOKEN=old-token\nGEOTRACKER_TIMEZONE=UTC\n")
-        errors = io.StringIO()
-        with patch.dict(os.environ, {"GEOTRACKER_ENV_FILE": str(path), "GEOLOGS_PORT": "9000"}, clear=True), \
-                patch("sys.argv", ["geologs"]), patch("sys.stderr", errors):
-            with self.assertRaises(SystemExit):  # no command given: argparse stops after the reminder
-                main()
-            self.assertEqual((os.environ["GEOLOGS_TOKEN"], os.environ["GEOLOGS_TIMEZONE"]), ("old-token", "UTC"))
-            self.assertEqual(os.environ["GEOLOGS_PORT"], "9000")
-        self.assertIn("rename GEOTRACKER_ENV_FILE, GEOTRACKER_TIMEZONE, GEOTRACKER_TOKEN to GEOLOGS_*", errors.getvalue())
-
     def test_mounted_token_file_tracks_changes(self):
         path = Path(self.tmp.name) / ".env"
         path.write_text("GEOLOGS_TOKEN=first\n")
@@ -1062,7 +1049,7 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(seen, [True])
         self.assertEqual(self.db.reminders.events()[0]["webhook_status"], "sent")
 
-    def test_webhook_uses_hermes_compatible_hmac_v2_signature(self):
+    def test_webhook_signs_the_body_with_a_replay_protected_hmac(self):
         event = {"id": 99, "text": "Pick up salt", "place": "Walmart"}
         env = {"GEOLOGS_WEBHOOK_URL": "http://host.docker.internal:8644/webhooks/geologs-reminders",
                "GEOLOGS_WEBHOOK_SECRET": "shared-secret", "GEOLOGS_WEBHOOK_TOKEN": ""}
@@ -3286,8 +3273,8 @@ class IngestTests(LiveServerCase):
             self.assertEqual(self.raw_request(b"GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\n", wait=3), b"")
 
     def test_owntracks_http_mode_with_basic_auth_and_queued_fixes(self):
-        basic = {"Authorization": "Basic " + __import__("base64").b64encode(b"karun:phone-token").decode(),
-                 "X-Limit-U": "karun", "X-Limit-D": "pixel"}
+        basic = {"Authorization": "Basic " + __import__("base64").b64encode(b"alex:phone-token").decode(),
+                 "X-Limit-U": "alex", "X-Limit-D": "pixel"}
         an_hour_ago = int((datetime.now(timezone.utc) - timedelta(hours=1)).timestamp())
         db = open_database(self.db)
         place = save_place(db, {"name": "Market", "lat": 41.0, "lon": -87.9})
@@ -3300,7 +3287,7 @@ class IngestTests(LiveServerCase):
         self.assertEqual((status, reply), (200, []))
         self.assertEqual(self.send("POST", "/api/ingest/owntracks", fix, basic)[:2], (200, []))  # a retry
         [point] = self.points()
-        self.assertEqual((point["source"], point["external_id"], point["accuracy_m"]), ("owntracks:karun/pixel", str(an_hour_ago), 12))
+        self.assertEqual((point["source"], point["external_id"], point["accuracy_m"]), ("owntracks:alex/pixel", str(an_hour_ago), 12))
         self.assertEqual(datetime.fromisoformat(point["timestamp"]).timestamp(), an_hour_ago)
         db = open_database(self.db)
         self.assertEqual(db.reminders.events(), [])  # too late to announce an arrival
@@ -3311,9 +3298,9 @@ class IngestTests(LiveServerCase):
         self.assertEqual(self.send("POST", "/api/ingest/owntracks", b"", basic)[:2], (200, []))
         self.assertEqual(self.send("POST", "/api/ingest/owntracks", {"_type": "encrypted", "data": "x"}, basic)[0], 400)
         # Without X-Limit headers, the topic names the device.
-        self.send("POST", "/api/ingest/owntracks", {**fix, "tst": an_hour_ago + 60, "topic": "owntracks/karun/ipad"}, {"Authorization": basic["Authorization"]})
-        self.assertIn("owntracks:karun/ipad", {point["source"] for point in self.points()})
-        wrong = {"Authorization": "Basic " + __import__("base64").b64encode(b"karun:nope").decode()}
+        self.send("POST", "/api/ingest/owntracks", {**fix, "tst": an_hour_ago + 60, "topic": "owntracks/alex/ipad"}, {"Authorization": basic["Authorization"]})
+        self.assertIn("owntracks:alex/ipad", {point["source"] for point in self.points()})
+        wrong = {"Authorization": "Basic " + __import__("base64").b64encode(b"alex:nope").decode()}
         status, _, response = self.send("POST", "/api/ingest/owntracks", fix, wrong)
         self.assertEqual((status, response.getheader("WWW-Authenticate")), (401, 'Basic realm="GeoLogs"'))
 
@@ -3345,7 +3332,7 @@ class IngestTests(LiveServerCase):
 
     def test_device_tokens_send_locations_and_nothing_else(self):
         auth = {"Authorization": "Bearer main-token"}
-        status, created, _ = self.send("POST", "/api/ingest-tokens", {"name": "Karun's iPhone"}, auth)
+        status, created, _ = self.send("POST", "/api/ingest-tokens", {"name": "Alex's iPhone"}, auth)
         self.assertEqual(status, 200)
         token = created["token"]
         self.assertTrue(token.startswith("glp_") and created["hint"] == token[:8])
@@ -3356,7 +3343,7 @@ class IngestTests(LiveServerCase):
         self.assertNotIn("token_hash", listing["tokens"][0])
         self.assertNotIn(token, json.dumps(listing))
         # Every way a tracker app sends a token works.
-        basic = base64.b64encode(f"karun:{token}".encode()).decode()
+        basic = base64.b64encode(f"alex:{token}".encode()).decode()
         for path, headers in (("/api/ingest/generic?device=a", {"Authorization": f"Bearer {token}"}),
                               ("/api/ingest/generic?device=b", {"Authorization": f"Basic {basic}"}),
                               (f"/api/ingest/generic?device=c&token={token}", {})):
@@ -3380,13 +3367,13 @@ class IngestTests(LiveServerCase):
         bearer = {"Authorization": f"Bearer {ha['token']}"}
         status, _, _ = self.send("POST", "/api/ingest/generic", {"source": "home_assistant:device_tracker.phone", "lat": 41, "lon": -87.9}, bearer)
         self.assertEqual(status, 200)
-        status, body, _ = self.send("POST", "/api/ingest/generic", {"source": "owntracks:karun/phone", "lat": 41, "lon": -87.9}, bearer)
-        self.assertEqual((status, body["error"]), (403, "This token can only send as home_assistant: trackers, not owntracks:karun/phone"))
+        status, body, _ = self.send("POST", "/api/ingest/generic", {"source": "owntracks:alex/phone", "lat": 41, "lon": -87.9}, bearer)
+        self.assertEqual((status, body["error"]), (403, "This token can only send as home_assistant: trackers, not owntracks:alex/phone"))
         status, _, _ = self.send("POST", "/api/points", {"source": "manual", "lat": 41, "lon": -87.9}, bearer)
         self.assertEqual(status, 403)
         self.assertEqual([point["source"] for point in self.points()], ["home_assistant:device_tracker.phone"])
         _, sources, _ = self.send("GET", "/api/sources", headers=auth)
-        refused = next(device for device in sources["devices"] if device["device"] == "owntracks:karun/phone")
+        refused = next(device for device in sources["devices"] if device["device"] == "owntracks:alex/phone")
         self.assertEqual(refused["last_status"], 403)
 
     def test_device_tokens_alone_close_an_open_server(self):
@@ -3467,24 +3454,24 @@ class IngestTests(LiveServerCase):
         main = {"Authorization": "Bearer main-token"}
         self.assertEqual(self.send("GET", "/api/sources", headers=main)[1]["devices"], [])
         self.send("POST", "/api/ingest/owntracks", {"_type": "location", "lat": 41, "lon": -87.9, "tst": 1790514000},
-                  {"Authorization": "Bearer phone-token", "X-Limit-U": "karun", "X-Limit-D": "pixel"})
+                  {"Authorization": "Bearer phone-token", "X-Limit-U": "alex", "X-Limit-D": "pixel"})
         # A phone with the wrong token is no one's: with many users, listing it would show one
         # person's device names to another.
         self.send("POST", "/api/ingest/owntracks", {"_type": "location", "lat": 41, "lon": -87.9, "tst": 1790514060},
-                  {"Authorization": "Bearer wrong", "X-Limit-U": "karun", "X-Limit-D": "ipad"})
+                  {"Authorization": "Bearer wrong", "X-Limit-U": "alex", "X-Limit-D": "ipad"})
         self.send("POST", "/api/ingest/overland?token=wrong", {"locations": []})
         self.send("POST", "/api/ingest/generic?token=phone-token", [{"lat": 41.001, "lon": -87.9, "device": "tasker"}, {"lat": "x"}])
         status, value, _ = self.send("GET", "/api/sources", headers=main)
         self.assertEqual((status, value["ingest_token"]), (200, True))
         devices = {(item["kind"], item["device"]): item for item in value["devices"]}
-        pixel = devices[("owntracks", "owntracks:karun/pixel")]
+        pixel = devices[("owntracks", "owntracks:alex/pixel")]
         self.assertEqual((pixel["last_status"], pixel["received"], pixel["last_message"]), (200, 1, None))
-        self.assertNotIn(("owntracks", "owntracks:karun/ipad"), devices)
+        self.assertNotIn(("owntracks", "owntracks:alex/ipad"), devices)
         self.assertNotIn(("overland", ""), devices)
         self.assertEqual(devices[("generic", "generic:tasker")]["last_message"], "1 malformed fix skipped")
         sources = {item["source"]: item for item in value["sources"]}
-        self.assertEqual(set(sources), {"owntracks:karun/pixel", "generic:tasker"})
-        self.assertEqual((sources["owntracks:karun/pixel"]["fixes"], sources["owntracks:karun/pixel"]["last_fix"]),
+        self.assertEqual(set(sources), {"owntracks:alex/pixel", "generic:tasker"})
+        self.assertEqual((sources["owntracks:alex/pixel"]["fixes"], sources["owntracks:alex/pixel"]["last_fix"]),
                          (1, "2026-09-27T13:00:00+00:00"))
         self.assertEqual(sources["generic:tasker"]["fixes_24h"], 1)
         # The sender token cannot read any of this.

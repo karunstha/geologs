@@ -26,8 +26,9 @@ def send(target, event):
     """POST one event; returns "sent" or why it failed.
 
     With GEOLOGS_WEBHOOK_SECRET the body is signed (HMAC-SHA256 over
-    "timestamp.body", as Hermes expects); GEOLOGS_WEBHOOK_TOKEN is sent as a
-    bearer token.
+    "timestamp.body", in X-Webhook-Signature-V2 beside X-Webhook-Timestamp, so a
+    receiver can reject forged and replayed requests); GEOLOGS_WEBHOOK_TOKEN is
+    sent as a bearer token.
     """
     headers = {"Content-Type": "application/json"}
     _url, token, secret = config.webhook()
