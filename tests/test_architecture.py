@@ -62,6 +62,17 @@ class ArchitectureTests(unittest.TestCase):
                      if isinstance(node, ast.Attribute) and node.attr in ("environ", "getenv")]
             self.assertEqual(reads, [], str(path.relative_to(PACKAGE)))
 
+    def test_sqlite_is_only_read_by_the_one_time_importer(self):
+        # The archive is PostgreSQL; SQLite survives only to copy an old archive in (migrate-sqlite).
+        for path in sorted(PACKAGE.rglob("*.py")):
+            if path.relative_to(PACKAGE).parts == ("data", "migration.py"):
+                continue
+            names = {alias.name for node in ast.walk(ast.parse(path.read_text()))
+                     if isinstance(node, ast.Import) for alias in node.names}
+            names |= {node.module for node in ast.walk(ast.parse(path.read_text()))
+                      if isinstance(node, ast.ImportFrom) and node.module}
+            self.assertNotIn("sqlite3", names, str(path.relative_to(PACKAGE)))
+
     def test_domain_uses_only_the_standard_library(self):
         for path in sorted((PACKAGE / "domain").rglob("*.py")):
             for node in ast.walk(ast.parse(path.read_text())):

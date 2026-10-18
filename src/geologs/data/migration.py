@@ -4,7 +4,8 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from .postgres import PostgresConnection
+from .database import upgrade_again
+from .postgres import OWNER_ID, PostgresConnection, create_schema
 
 
 TABLES = {
@@ -44,7 +45,10 @@ def migrate_sqlite(sqlite_path, postgres_url):
     source = sqlite3.connect(source_path.as_uri() + "?mode=ro&immutable=1", uri=True)
     source.row_factory = sqlite3.Row
     source_tables = {row[0] for row in source.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    target = PostgresConnection(postgres_url)
+    create_schema(postgres_url)
+    target = PostgresConnection.connect(postgres_url)
+    # An archive from before accounts is its owner's.
+    target.execute("SELECT set_config('geologs.user_id', ?, false)", (str(OWNER_ID),))
     counts = {}
     try:
         for table in TABLES:
@@ -138,6 +142,8 @@ def migrate_sqlite(sqlite_path, postgres_url):
             if actual != expected:
                 raise RuntimeError(f"count mismatch in {table}: {expected} vs {actual}")
         target.commit()
+        # Stays are found from the copied samples when the archive is next opened.
+        upgrade_again(postgres_url)
         return counts
     except Exception:
         target.rollback()

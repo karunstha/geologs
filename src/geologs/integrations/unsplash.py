@@ -8,6 +8,7 @@ import urllib.parse
 import urllib.request
 
 from .. import config
+from . import usage
 
 API = "https://api.unsplash.com"
 # Unsplash asks that links back carry the app's name.
@@ -19,6 +20,7 @@ def configured():
 
 
 def _get(path, params):
+    usage.count("api.unsplash.com")
     request = urllib.request.Request(API + path + "?" + urllib.parse.urlencode(params), headers={
         "Authorization": "Client-ID " + config.unsplash_key(), "Accept-Version": "v1"})
     with urllib.request.urlopen(request, timeout=10) as response:

@@ -4,6 +4,7 @@ import urllib.parse
 import urllib.request
 
 from .. import config
+from . import usage
 
 EIA_URL = "https://api.eia.gov/v2/petroleum/pri/gnd/data/"
 
@@ -18,6 +19,7 @@ def weekly_prices(area, product, weeks):
     Each row has the week's `period` (YYYY-MM-DD) and its `value` in US dollars
     per gallon; a week without a price has an empty value.
     """
+    usage.count("api.eia.gov")
     params = [("api_key", api_key()), ("frequency", "weekly"), ("data[0]", "value"),
               ("facets[duoarea][]", area), ("facets[product][]", product),
               ("sort[0][column]", "period"), ("sort[0][direction]", "desc"), ("length", str(weeks))]

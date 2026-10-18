@@ -220,7 +220,9 @@ main {
     bottom: 0;
     z-index: 600;
     display: grid;
-    grid-template-columns: repeat(5, 1fr);
+    /* One column per visible item: five, or six with Admin. */
+    grid-auto-columns: 1fr;
+    grid-auto-flow: column;
     gap: 0;
     padding: 6px 6px calc(6px + env(safe-area-inset-bottom));
     border-top: 1px solid var(--border);

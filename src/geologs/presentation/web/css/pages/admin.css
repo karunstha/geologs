@@ -1,0 +1,178 @@
+/* Admin: users with a Manage menu, invites, the audit log, and the server's health. */
+.admin-card {
+  overflow: visible; /* a row's Manage menu may reach past the card */
+}
+.admin-card .tabs {
+  padding: 0 12px;
+}
+.admin-panel ul,
+.admin-panel ol {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.admin-panel {
+  padding: 16px 20px 20px;
+}
+.admin-panel > .callout {
+  margin-bottom: 12px;
+}
+.admin-avatar {
+  flex: 0 0 34px;
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-weight: 700;
+}
+.admin-user strong .status-pill {
+  margin-left: 4px;
+  vertical-align: 1px;
+}
+.row-menu {
+  position: relative;
+  flex: none;
+}
+.row-menu summary {
+  list-style: none;
+}
+.row-menu summary::-webkit-details-marker {
+  display: none;
+}
+.row-menu-list {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 20;
+  display: grid;
+  min-width: 200px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  box-shadow: var(--shadow-md);
+}
+.row-menu-list button {
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 13.5px;
+  text-align: left;
+}
+.row-menu-list button:hover {
+  background: var(--surface-3);
+}
+.admin-invite-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 140px auto;
+  align-items: end;
+  gap: 10px;
+  max-width: 620px;
+  margin-bottom: 14px;
+}
+.admin-server {
+  display: grid;
+  gap: 22px;
+}
+.admin-section h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-size: 15px;
+}
+.admin-section .help {
+  margin-bottom: 8px;
+}
+.compact-rows .list-item {
+  padding: 8px 0;
+}
+.segmented-choice {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  max-width: 620px;
+}
+.segmented-choice label {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.segmented-choice label:has(input:checked) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.segmented-choice span {
+  display: grid;
+  gap: 2px;
+}
+.segmented-choice small {
+  color: var(--text-2);
+  font-size: 12.5px;
+}
+.admin-columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 24px;
+}
+.admin-figure {
+  margin-bottom: 8px;
+  font-size: 24px;
+  font-weight: 650;
+}
+.admin-bars {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 13px;
+}
+.admin-bars li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border);
+}
+.admin-bars li span:last-child {
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+.recovery-codes {
+  margin: 4px 0;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font: 500 14px/1.7 var(--mono);
+  columns: 2;
+}
+@media (max-width: 760px) {
+  .admin-panel {
+    padding: 14px 16px 16px;
+  }
+  .admin-invite-form,
+  .segmented-choice,
+  .admin-columns {
+    grid-template-columns: 1fr;
+  }
+}
+/* Lists scroll when long elsewhere; here a row's menu must be free to open past the list. */
+.admin-panel .list {
+  max-height: none;
+  overflow: visible;
+}
+.row-menu-list button.danger-text {
+  color: var(--danger);
+}

@@ -245,7 +245,8 @@ export async function refreshExplore(resetRawPage = true) {
       api("/api/day?" + dayQuery),
       api("/api/timeline?" + query),
       api("/api/observations?" + rawQuery),
-      api("/api/coverage"),
+      // Only the trackers and their last fix are shown here; the gap list is the costly part.
+      api("/api/coverage?gaps=false"),
     ]);
   } finally {
     if (request === exploreRequest) $("explore-view").classList.remove("loading");

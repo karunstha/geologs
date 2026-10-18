@@ -1,13 +1,13 @@
 # GeoLogs
 
-A self-hosted personal location archive with a browser, arrival reminders, and MCP tools. It reads positions from sources you already have. Docker Compose runs PostgreSQL with PostGIS; SQLite remains available for a small local archive.
+A self-hosted personal location archive with a browser, arrival reminders, and MCP tools. It reads positions from sources you already have. It stores everything in PostgreSQL with PostGIS, which Docker Compose runs for you.
 
 ## Quick plan
 
 1.  **Collect:** accept timestamped coordinates from Home Assistant, a cron job, CSV, HTTP, or an MCP tool. Keep source IDs so retries do not duplicate data.
 2.  **Understand:** retain raw observations, maintain a compact arrival/movement/departure timeline, derive 15 minute stays (sitting still, or moving around one place such as a lake loop) and the trips between them, estimate speed, classify walking, running, cycling, or driving, and surface coverage gaps.
 3.  **Act:** trigger a one-shot reminder when a fresh position enters a saved place. Keep completed and cancelled reminders in history and optionally POST triggered reminders to a webhook.
-4.  **Explore:** open a local-day summary with stay-to-stay trips, visited places, the current named location, recorded fixes, and a path map. Choose another date or source, inspect trips and stays, and export that day's GeoJSON.
+4.  **Explore:** open a local-day summary with stay-to-stay trips, visited places, the current named location, recorded fixes, and a path map. Choose another date and inspect its trips and stays.
 5.  **Extend:** add adapters for other location sources and providers without changing the archive or MCP tools.
 
 ## What this adds to the reference projects
@@ -29,7 +29,7 @@ Copy `.env.example` to `.env` and replace both secrets with random values. Then:
 docker compose up --build -d
 ```
 
-Open `http://127.0.0.1:8765` and enter `GEOLOGS_TOKEN` in the browser sign-in panel. Set `GEOLOGS_PUBLISHED_PORT` in `.env` if port 8765 is occupied, then use that port for the browser, MCP clients, and the Home Assistant poller. Set `GEOLOGS_TIMEZONE` to an IANA timezone such as `America/Chicago`; it can later be changed from Settings. Run `docker compose up -d --force-recreate app` after changing Compose environment values. The browser keeps an HttpOnly, same-site session cookie for 30 days, so a new tab does not need the token again. Compose mounts only `.env` read-only for the app to check the current token on each request; changing the token invalidates the old browser session. PostgreSQL/PostGIS files live in `./data/postgres`, which is ignored by Git and must be included in your backups. The official PostGIS image is pinned to `linux/amd64`; ARM hosts run that service through Docker emulation.
+Open `http://127.0.0.1:8765` and enter `GEOLOGS_TOKEN` in the browser sign-in panel. Set `GEOLOGS_PUBLISHED_PORT` in `.env` if port 8765 is occupied, then use that port for the browser, MCP clients, and the Home Assistant poller. Set `GEOLOGS_TIMEZONE` to an IANA timezone such as `America/Chicago`; it can later be changed from Settings. The server keeps up to `GEOLOGS_DB_POOL_SIZE` database connections (10 by default) for its requests; a request waits up to 10 seconds for one and is then answered with 503. Run `docker compose up -d --force-recreate app` after changing Compose environment values. The browser keeps an HttpOnly, same-site session cookie for 30 days, so a new tab does not need the token again. Compose mounts only `.env` read-only for the app to check the current token on each request. PostgreSQL/PostGIS files live in `./data/postgres`, which is ignored by Git and must be included in your backups. The official PostGIS image is pinned to `linux/amd64`; ARM hosts run that service through Docker emulation.
 
 If you already ran an earlier Compose version with a named `postgres_data` volume, copy it **before starting this version**:
 
@@ -49,14 +49,13 @@ GeoLogs was called Geotracker. To upgrade a Compose install from before the rena
 
 It renames the `GEOTRACKER_*` keys in `.env` to `GEOLOGS_*` and keeps their values. It renames the PostgreSQL role and database from `geotracker` to `geologs` in place, which keeps the data and the password, then rebuilds and restarts the stack (the database container is now `geologs-db`). It changes nothing if both names already exist in PostgreSQL or the old role's password is MD5-hashed, and it is safe to rerun. Afterwards:
 
--   Change cron entries from `./geotracker poll-ha` to `./geologs poll-ha`.
 -   Sign in to the browser once more; the session cookie has a new name.
 -   Database clients on port 15432 connect as user `geologs` to database `geologs`.
 -   Hermes keeps working as configured. Its MCP server name, the token variable in `~/.hermes/.env`, and the webhook subscription (whose name is part of the `GEOLOGS_WEBHOOK_URL` value) belong to Hermes; rename them there only if you want to.
 
-Outside Docker, the CLI still accepts `GEOTRACKER_*` settings and prints a reminder to rename them, and it keeps using `~/.local/share/geotracker/geotracker.db` until a `geologs.db` exists.
+Outside Docker, the CLI still accepts `GEOTRACKER_*` settings and prints a reminder to rename them.
 
-To copy an existing SQLite archive, stop the app container while retaining the database container, then run the migration against an **empty** PostGIS database:
+Older versions could keep the archive in a SQLite file; GeoLogs now reads only PostgreSQL. To copy such an archive, stop the app container while retaining the database container, then run the migration against an **empty** PostGIS database:
 
 ```bash
 docker compose stop app
@@ -68,19 +67,60 @@ The copy preserves IDs and checks row counts in one transaction. Keep the SQLite
 
 ## Run locally without Docker
 
-Requires Python 3.11+. SQLite uses only the Python standard library. For PostgreSQL, install `pip install -e '.[postgres]'` and set `GEOLOGS_DATABASE_URL` to a PostgreSQL connection URL. When that variable is set, PostGIS is used; otherwise the SQLite path below is used.
+Requires Python 3.11+ and a PostgreSQL database with PostGIS (the Compose `db` service is one: it listens on port 15432). Install the package, point `GEOLOGS_DATABASE_URL` at the database, and start the server:
 
 ```bash
-export GEOLOGS_DB="$PWD/geologs.db"
+python3 -m venv .venv && .venv/bin/pip install -e .
+export GEOLOGS_DATABASE_URL="postgresql://geologs:$POSTGRES_PASSWORD@127.0.0.1:15432/geologs"
 export GEOLOGS_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
-./geologs serve
+.venv/bin/geologs serve
 ```
 
 Open `http://127.0.0.1:8765` and enter the same `GEOLOGS_TOKEN` in the sign-in panel. The CLI also reads a `.env` file from its working directory for variables that are not already set in the process environment. Restart the server after changing `.env`; an already-running process keeps its original token. The server listens only on loopback by default. If you bind a different host, a token is required; put a TLS reverse proxy in front of it for access beyond your machine.
 
-An optional `pip install -e .` provides the same `geologs` command globally or in a virtual environment.
+The `./geologs` script in the checkout runs the same command without installing, once the dependencies are installed.
 
-Your SQLite file stays wherever `GEOLOGS_DB` points; the default is `~/.local/share/geologs/geologs.db`. PostgreSQL data stays in its configured database.
+## Accounts
+
+GeoLogs keeps a separate archive for each user in one database. Your existing archive becomes the **owner**'s, the first user (an admin). `GEOLOGS_TOKEN`, the `.env` ingest token and Home Assistant polling go on working as the owner, so nothing changes until you add someone.
+
+```bash
+docker compose exec app geologs owner-sign-in you@example.com      # give the owner an email and password
+docker compose exec app geologs add-user friend@example.com        # another user (--admin for an admin)
+docker compose exec app geologs add-token --user friend@example.com "MCP on laptop"   # a personal API token
+docker compose exec app geologs invite friend@example.com           # an invite link (emailed when mail is set up)
+```
+
+Each asks for the password (or reads `GEOLOGS_NEW_PASSWORD`, for scripts). Commands about one archive (`import-csv`, `import-takeout`, `rebuild-stays`, `learn-paths`, `add-token`) take `--user EMAIL` and work on the owner's otherwise. A device token made in **Settings → Devices** sends locations as the user who made it. A request with a wrong token belongs to no one, so it no longer appears in anyone's device list. The reminder webhook (`GEOLOGS_WEBHOOK_URL`) is the owner's: other users' reminders are not sent to it.
+
+Passwords are kept as scrypt hashes, and sessions and tokens only as SHA-256 hashes of what the browser or client holds. Sign-in takes the same time and gives the same answer for a wrong email and a wrong password, and after ten tries in fifteen minutes an address waits. Sessions last 30 days from last use; disabling a user ends theirs.
+
+Every table that holds someone's data has a `user_id`, and PostgreSQL row-level security lets a connection see and change only the rows of the user it works for; a connection working for no one sees nothing. Shared lookups (place names, reverse geocoding, fuel prices) and the accounts themselves are the only exceptions, and a test fails if a new table is neither. A superuser (as the Compose database role is) skips row-level security, so the app switches its connections to the role `geologs_app`, which cannot, and refuses to run if that role is missing. Compose goes further: requests log in as `geologs_app` itself, with its own password (`GEOLOGS_APP_DB_PASSWORD`, which Compose requires), so no request connection is ever a superuser. The owner login in `GEOLOGS_DATABASE_URL` is used only to create and upgrade the tables when the server starts. Outside Compose, set `GEOLOGS_APP_DB_PASSWORD` the same way.
+
+### Email
+
+Set `GEOLOGS_PUBLIC_URL` (where people open GeoLogs, such as `https://geologs.example.com`) and your mail server (`GEOLOGS_SMTP_HOST`, `GEOLOGS_SMTP_PORT`, `GEOLOGS_SMTP_SECURITY` of `starttls`, `ssl` or `none`, `GEOLOGS_SMTP_USERNAME`, `GEOLOGS_SMTP_PASSWORD`, and `GEOLOGS_SMTP_FROM`) to email:
+
+-   **Invites** from an admin (`POST /api/invites`, or `geologs invite`), valid for 7 days. Accepting one (`POST /api/invites/accept`) creates the account, its address proven, and signs it in. Without mail, the invite link is still given to the admin to share.
+-   **Password resets** (`POST /api/password/forgot`, then `POST /api/password/reset`), valid for an hour. The answer is the same whether or not the address has an account; an address may ask five times an hour. A reset signs the account out everywhere.
+-   **Address checks** (`POST /api/email/verify/send` while signed in, then `POST /api/email/verify`), valid for 2 days.
+
+Each link is single-use and kept only as a hash. Messages wait in an outbox and a mail thread sends them, so a slow mail server never holds up a request; a failure is tried again after 1, 2, 4… minutes, eight times in all. A sent message's text (with its link) is not kept. Links open in the browser: a reset link asks for the new password, an invite link for a name and password (and signs the new account in), and a confirmation link just confirms.
+
+### In the browser
+
+The sign-in screen takes an email and password, offers **Forgot password?** when this server can email, and still lets the owner sign in with `GEOLOGS_TOKEN`. The account button at the top right opens **Account**: your name, your email (and whether it is confirmed), your password, the browsers you're signed in on (sign any of them out, or all but this one), and personal API tokens for your own tools. The owner, who has signed in with the token until now, can add an email and set a password there. Under **Two-factor sign-in** on the account page, add GeoLogs to an authenticator app (the setup key, or the link on a phone) and confirm with its code: signing in then asks for a code after the password. Each code works once, and eight recovery codes (shown once) each sign in once if the phone is lost. Turning it off needs the password. Signing in with `GEOLOGS_TOKEN` skips it: that token is the server's own key.
+
+### Admin portal
+
+Admins get an **Admin** page:
+
+-   **Users**: everyone's account, role, whether they confirmed their email or use two-factor sign-in, when they last signed in, and how much they recorded (fixes, trackers, the latest fix's time), never where. **Manage** makes someone an admin or a user (there is always at least one admin), makes a password-reset link (emailed when the server can, and shown to pass on), disables an account (signing it out everywhere), or deletes it with everything it recorded, after you type its email. The owner's account cannot be disabled or deleted, and nor can your own.
+-   **Invites**: invite someone as a user or an admin, copy the link, and withdraw invites not yet used.
+-   **Activity**: every change an admin made, by whom, to whom, and when.
+-   **Server**: who may sign up (invite only, the default, or open to anyone who can reach the server), whether email is set up and how recent messages went, tracker requests with a wrong token (which belong to no one, so they show here), the background jobs, the database's size, and how often outside services were asked today.
+
+Counts are taken by the background worker while it works as each user, so the portal never reads anyone's rows. They follow new fixes within five minutes.
 
 ## Connect a tracker app
 
@@ -105,29 +145,7 @@ The generic format takes flat fields from a query string, a form, a JSON object,
 
 ## Connect Home Assistant
 
-The easiest way is to let Home Assistant send each position the moment it changes. **Settings → Devices → Home Assistant** shows a `rest_command` to paste into `configuration.yaml` (with this server's address filled in) and a `secrets.yaml` line for your phone token, then an automation to paste into Home Assistant's YAML editor. Set **GeoLogs address, as Home Assistant reaches it** first: everything Home Assistant calls uses it, and a `localhost` address (which on Home Assistant's machine means Home Assistant itself) is flagged. Instead of pasting, **Import blueprint into Home Assistant** opens the GeoLogs blueprint through My Home Assistant (`/ha/geologs-location.yaml`, served without sign-in because Home Assistant downloads it; it holds no secrets); Home Assistant reports “Unknown error” when it cannot download it from that address. Positions arrive under the same names as the poller below (`home_assistant:device_tracker.…`), with Home Assistant's `last_updated` as the fix time and ID, so history continues and repeats are recognised.
-
-### Or poll it with cron
-
-
-Create a long-lived Home Assistant token from your profile's Security tab and identify a GPS `device_tracker` entity with `latitude` and `longitude` attributes. The poller uses the [Home Assistant state API](https://developers.home-assistant.io/docs/api/rest/) and records each successful poll as a sample, even when Home Assistant has not changed its state. Fill these fields in this project's `.env` file:
-
-```dotenv
-HA_URL=http://homeassistant.local:8123
-HA_TOKEN=your-home-assistant-token
-HA_ENTITY=device_tracker.my_phone
-GEOLOGS_URL=http://127.0.0.1:8765
-```
-
-Use the port from `GEOLOGS_PUBLISHED_PORT` in `GEOLOGS_URL`. `GEOLOGS_TOKEN` is already in the same file. Check that the selected entity has current coordinates, then test one poll from the project directory:
-
-```bash
-./geologs poll-ha
-```
-
-For ongoing collection, run it every minute from cron or a systemd timer. A cron entry must change to this project directory so the CLI reads its `.env`; use absolute paths for both. Keep `.env` private because it contains both tokens. In a Docker setup, the host poller posts to the published app port; it does not need direct database access. A local non-Docker poller can also use `GEOLOGS_DATABASE_URL` or `GEOLOGS_DB` directly.
-
-Home Assistant may update a tracker at a slower interval than cron. Each successful poll increments the raw sample count. The compact timeline keeps the first and latest sample at a stationary period and retains the intervening samples while moving. The `recorded` field in the poll result counts newly stored samples; `inserted` counts new source events, and `duplicates` counts repeated source events. Repeated polls do not trigger another arrival reminder. Each sample has its own speed estimate from the preceding recorded sample; unchanged coordinates are idle instead of inheriting an earlier moving speed. Speed derived from two positions is only an estimate; sparse GPS samples and location drift can misclassify activity. Only fixes within 30 minutes of the server clock can trigger reminders; historical CSV imports never trigger them.
+Home Assistant sends each position the moment it changes. **Settings → Devices → Home Assistant** shows a `rest_command` to paste into `configuration.yaml` (with this server's address filled in) and a `secrets.yaml` line for your phone token, then an automation to paste into Home Assistant's YAML editor. Set **GeoLogs address, as Home Assistant reaches it** first: everything Home Assistant calls uses it, and a `localhost` address (which on Home Assistant's machine means Home Assistant itself) is flagged. Instead of pasting, **Import blueprint into Home Assistant** opens the GeoLogs blueprint through My Home Assistant (`/ha/geologs-location.yaml`, served without sign-in because Home Assistant downloads it; it holds no secrets); Home Assistant reports “Unknown error” when it cannot download it from that address. Positions arrive under the same names as the poller below (`home_assistant:device_tracker.…`), with Home Assistant's `last_updated` as the fix time and ID, so history continues and repeats are recognised.
 
 ## Ingest another source
 
@@ -164,6 +182,8 @@ The archive derives two kinds of stay incrementally from raw observations, inclu
 -   An **area stay** is time spent moving around one place: running laps of a lake, walking a park, or pottering through a large store. A window of travel counts when it fits inside a bounding box of up to 3 km (tightest first), contains no move at 25 km/h or faster, and circulates: its path must be at least 1.8 times its extent. One lap of a loop scores about 2.2, an out-and-back 2.0, and ordinary travel that passes through about 1.0. Everything between parking and driving away becomes one visit when it circulates as a whole, so an out-and-back trail run is not cut in half. An area stay records its activity (walking, running, or cycling), distance, and radius; a small area at walking pace or slower is a visit with no activity. A loop that starts and ends at the same stationary stay, such as a dog walk or a run from home, is a round trip rather than a visit.
 
 Each stay records whether the travel since the stay before it went somewhere else: at least three accurate fixes, spanning four minutes or more, more than 150 m outside the corridor joining the two stays after allowing for each fix's accuracy. Consecutive stays at one place are one visit when that travel went nowhere else, so walking between two buildings of a campus, moving the car to another lot, or an indoor GPS jump appears as movement within the visit rather than a trip to the place you were already at. Leaving for lunch and coming back remains a round trip, labelled with where it went: its longest stop of two minutes or more (“stopped 9 min near Kroger”), or else how far out it went. Moves under 1 km inside one place are shown as walking unless the device reported a faster speed, because a phone that holds its position and then jumps makes a short walk look like a ride. A single ambiguous “ride” between two drives is shown as driving, since it is the car you arrived in. When several sources recorded the same day, the timeline takes the source ranked highest under **Settings → Devices → Tracker priority** (drag to reorder; unranked sources follow, busiest first) and lets each next one fill only the times those above it have no data, so it never places you in two spots. The current location is the newest fix, unless a higher-ranked tracker reported within 15 minutes of it. When the device recording a visit changes partway through (switching from the Home Assistant app to OwnTracks, say), stays from the two sources at the same place, under 30 minutes apart with no trip between, are one visit. Apps such as OwnTracks and Overland report only while you move, so silence is read as staying put: a quiet stretch of up to 16 hours that ends at the same spot is one visit, and one that ends elsewhere keeps you at the stay until about when you would have left to reach the next fix (its distance at 30 km/h, or the reported speed). Other unobserved stretches over 30 minutes appear in the timeline as “No location data”, such as a silence that ends hundreds of kilometres away. Existing observations are rebuilt automatically when the stay algorithm changes, so upgrading finds earlier lake runs without collecting more data. Repeated stops are grouped into frequent places. The **Places** page opens with a search for past visits (each result opens its day in History), then one card with three tabs: **Visited** (every place with a confirmed stay, by time spent, with a bar comparing each to your most-visited place), **Saved** (your zones, with **Add place**), and **Routines** (your usual routes between places and, once there are at least three departures from where you are, where you usually go next). In a busy place the nearest named place can be the wrong neighbour. **Edit place** on a map pin or in the day's Places tab corrects a place; **Fix this visit's name** on a selected stay corrects just that visit. Both list the named places around it, nearest first, and save the name you pick (or type) as a name correction, not a saved place. A correction saved without an address, such as one made through MCP with just a name, gets the street address of its spot, so visit search can still answer “what is Alex’s address?”; a named place nearby lends its address only when it lies inside the correction. Choose what it applies to. **Only this visit** (the default; “only the visits on” a day when fixing a pin) covers stays from that device that overlap the visit's time at that spot, so other visits there keep their own names, even after stays are recalculated. **Every visit to this spot** covers past and future visits within 50 m of a stop, or the area's extent plus a margin. A visit-only correction wins over an every-visit one for its visit, and both win over saved places and provider lookups, so history, daily summaries, and visit search use them; the current location uses a visit-only correction while you are still there, and name-only reminders use every-visit corrections. Fixing the same visit or spot again replaces its correction, and **Use automatic name** removes it. Saved places can be deleted from the Places page; one that a reminder still uses is hidden rather than removed, so the reminder keeps working. A saved place is a zone, not a name for everything inside it: save a university once and its buildings stay separate places (“Engineering Hall · In University”), with a walk between them shown as a trip. Inside a zone a visit is named after the named place right where you were, within 60 m or the stay's own extent, so a house is not named after a shop down the street; when nothing named is that close, the zone's name is used. Home is the exception and names everything inside it. Saved places, including Home, get visit counts and sampled time for everything inside them, so one afternoon on campus is one visit however many buildings it took in. Daily summaries list time per zone with the places in it, and visit search finds the places inside a zone by its name. These are lower bounds when GPS coverage is sparse.
+
+Stays are found as fixes arrive, carrying on from where the last fix left off. A fix that arrives late (a phone sending what it kept while offline) changes what came after it, so detection goes back to the newest checkpoint before it and reads forward from there: the same stays as reading every fix again, but only from that point. A checkpoint is the detector's state, kept about once an hour of fixes for the last week and once a day before that (`stay_checkpoints`). Only a fix older than every checkpoint, or a rebuild you ask for, finds a tracker's stays from the start; an archive from before checkpoints gets them on its first such rebuild.
 
 The History page opens on the configured local day. `point_observations` is the append-only raw audit trail. `timeline_fixes` is the compact informational layer: movement samples remain, while a stationary run keeps its arrival and latest/departure edges. `observed_stays_v2` and place clusters are derived from raw observations. “Timeline fixes” shows key fixes out of raw samples, and the Samples tab can switch between both layers. Raw samples are fetched in 50-row pages. Samples, stays, common places, transitions, trips, and visited places can focus the map. The Day timeline lists stays and the trips between them in order; select one to highlight it on the map, where trips and area stays are coloured by mode. Map popups show each point's coordinates with a copy button. The lists below the map scroll within their own panel, and choosing a point there scrolls the page only when the map is off screen. A trip begins at the departure edge of one confirmed stay and ends at the arrival edge of the next confirmed stay from the same source. Traffic lights and short pauses therefore remain inside one trip. A trip that returns to where it started is kept as a round trip when it went at least 150 m beyond the starting place and covered at least 300 m; smaller excursions are GPS drift. Coverage gaps are kept as separate route lines instead of being joined across missing data. Modes are estimates from distance-weighted sampled speeds, with each move reduced by its fixes' reported accuracy, so one GPS jump cannot turn a walk into a drive; speeds computed from positions need at least 500 m before they can mean driving, while device-reported speeds are trusted over any distance: by default a median below 6.5 km/h is walking, below 15 km/h running, and below 25 km/h cycling. Faster medians, or at least a third of the distance at 35 km/h or more, are driving. All four speeds can be changed in **Settings → Stays & activities**. Running and cycling overlap between about 12 and 16 km/h, so a slow ride can read as a run. When the guess is wrong (slow traffic read as cycling, a bus read as driving), select the trip or area stay in the Day timeline and choose **Walk, Run, Ride, Drive, or Transit**; moves inside a visit can be changed the same way, and **Automatic** restores the guess. Transit is never guessed from speed. A correction is stored by source and time window, so it still applies to the trip that overlaps most of that window after trips are recalculated; it wins over the speed and context rules, and totals, daily summaries, and MCP tools (`set_travel_mode`) use it. When Home Assistant repeats a position for several polls, a move is timed from the first poll of that position, which keeps a run from looking like a drive. A past day's address includes `#date=YYYY-MM-DD`, so it can be bookmarked, and the arrow keys move between days. Below the map, the day's details have four tabs: **Places** (each place that day, to show on the map or rename), **Speed** (the whole day on a time axis, coloured by travel mode, with stops drawn flat and missing coverage shaded), **Samples** (key fixes or raw samples, each with what it was part of), where a bad fix can be deleted, singly or by ticking several, after a confirmation that names the device, the time span, the days whose summaries are rebuilt, and any reminder it set off, and **Data** (which devices recorded the day, how many fixes each sent, and any gaps). A day with nothing recorded shows that plainly, with a way to the latest day that has data.
 
@@ -290,7 +310,7 @@ Run `docker compose up -d --force-recreate app` after changing these values. Geo
 
 `GET /api/current`, `/api/points`, `/api/observations`, `/api/timeline`, `/api/settings`, `/api/stats`, `/api/trips`, `/api/coverage`, `/api/near`, `/api/stays`, `/api/frequent-places`, `/api/visited-places`, `/api/visits`, `/api/transitions`, `/api/predict-next`, `/api/insights`, `/api/day`, `/api/daily-summary`, `/api/daily-summaries`, `/api/daily-brief`, `/api/sources`, `/api/places`, `/api/place-visits`, `/api/reminders`, `/api/reminder-history`, `/api/events`, `/api/geocode`, `/api/reverse`, `/api/export.geojson`; `GET` or `POST /api/ingest/{owntracks,overland,osmand,generic}`; `POST /api/points`, `/api/observations/delete` (`{ids}` previews, `{ids, confirm: true}` deletes), `/api/settings`, `/api/places`, `/api/reminders`, `/api/reminders/cancel`, `/mcp`. `/api/observations` accepts `limit` and `offset` for raw-data pagination.
 
-All data `/api/*` routes and `/mcp` require authentication when a token is configured. API clients can use the bearer token; the browser exchanges the token at `POST /api/session` for an HttpOnly session cookie. Requests from a different browser origin are rejected. The API has no account or multiuser support; run one archive per person.
+All data `/api/*` routes and `/mcp` require authentication when a token is configured: a personal API token or `GEOLOGS_TOKEN` (the owner) as a bearer, or a browser session. The browser signs in at `POST /api/session` with an email and password (or the owner's `GEOLOGS_TOKEN`) and gets an HttpOnly session cookie; `DELETE /api/session` signs it out, and `GET /api/me` says who is signed in. Requests from a different browser origin are rejected. See **Accounts** for users.
 
 ## Next features
 
@@ -305,8 +325,9 @@ src/geologs/
   domain/        the rules, with no database, network, or framework code: finding stays one fix at a
                  time, area stays, travel modes, trips and their routes, visits, place naming, your
                  corrections, path matching, fuel cost, briefs, and settings validation
-  data/          every SQL statement: Database (one SQLite or PostgreSQL/PostGIS connection, its schema,
-                 migrations and transactions) and a repository per table group, each keeping to its own tables
+  data/          every SQL statement: Database (one PostgreSQL/PostGIS connection working for one user, its
+                 schema, row-level security, migrations and transactions) and a repository per table group,
+                 each keeping to its own tables; accounts, sessions and tokens are in users.py
   integrations/  services outside GeoLogs: place providers (Photon, Geoapify, Mapbox), EIA fuel prices,
                  webhooks, and Google Takeout files
   services/      the use cases: each joins the rules to storage and outside services in one transaction
@@ -324,7 +345,7 @@ day's analysis) are kept at once unless the caller has uncommitted work. Reading
 the server's background worker learns paths, fills in place details, saves daily summaries, and fetches
 fuel prices. Open the archive with `geologs.services.open_database()`, which also lets an upgrade
 recalculate stays. `tests/test_architecture.py` keeps these rules: the imports, no SQL outside `data`,
-and no environment reads outside `config`.
+no environment reads outside `config`, and SQLite only in the one-time importer.
 
 ## Browser app structure
 
@@ -353,9 +374,23 @@ Each view exports an `init…()` function that `main.js` calls once to attach it
 
 ## Tests
 
+The tests run against a real PostgreSQL with PostGIS: each test gets its own database, cloned from one migrated template, on the server at `GEOLOGS_TEST_DATABASE_URL`. `scripts/test-db` starts a throwaway server for them in Docker (in memory, on port 55432) and prints that URL:
+
 ```bash
-PYTHONPATH=src python3 -m unittest discover -s tests -v
+export GEOLOGS_TEST_DATABASE_URL=$(scripts/test-db)
+.venv/bin/python -m unittest discover -s tests -v
 for file in $(find src/geologs/presentation/web/js -name '*.js'); do node --check "$file"; done
+docker rm -f geologs-test-db   # when you are done
 ```
+
+To see how the app copes with a long history, fill an empty database with a believable routine and time what the browser asks for (three years is about 340,000 fixes and 500 MB, and takes about 20 minutes to fill):
+
+```bash
+docker exec geologs-test-db psql -h 127.0.0.1 -U geologs -d geologs -c "CREATE DATABASE geologs_load"
+GEOLOGS_DATABASE_URL=postgresql://geologs:test@127.0.0.1:55432/geologs_load scripts/load-test --days 1095
+GEOLOGS_DATABASE_URL=postgresql://geologs:test@127.0.0.1:55432/geologs_load scripts/load-test --skip-fill   # time it again later
+```
+
+The role in that URL must be able to create databases. `postgis/postgis` is published for amd64 only, so on Apple silicon and other arm64 machines the script uses the community multi-arch build `imresamu/postgis` of the same image, which runs the suite about twice as fast as emulation.
 
 The Python tests also check that every file `index.html` loads is served, and that every module import names something its target exports.

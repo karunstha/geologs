@@ -1,4 +1,6 @@
-"""Detected stays (observed_stays_v2) and each source's open stay candidate (stay_observation_state)."""
+"""Detected stays (observed_stays_v2), each source's open stay candidate (stay_observation_state),
+and copies of that candidate saved along the way (stay_checkpoints), to resume from when a late fix
+arrives instead of finding every stay again."""
 from __future__ import annotations
 
 import json
@@ -28,6 +30,13 @@ class StaysRepository(Repository):
         return self.rows("""SELECT * FROM (SELECT s.*,LAG(s.id) OVER (PARTITION BY s.source ORDER BY s.started_at,s.id)
             AS previous_stay_id FROM observed_stays_v2 s""" + where + ") ordered ORDER BY started_at DESC" + suffix, args)
 
+    def newest_read(self):
+        """The newest fix stay detection has read, across the user's trackers (None before any)."""
+        return self.execute("SELECT MAX(last_timestamp) AS at FROM stay_observation_state").fetchone()["at"]
+
+    def count(self):
+        return self.execute("SELECT COUNT(*) AS n FROM observed_stays_v2").fetchone()["n"]
+
     def save_detected(self, source, start_id, end_id, started_at, ended_at, lat, lon, count, ongoing, kind):
         """Create or update the stay a candidate's first sample starts."""
         self.execute("""INSERT INTO observed_stays_v2
@@ -43,7 +52,8 @@ class StaysRepository(Repository):
         self.execute("DELETE FROM observed_stays_v2 WHERE start_observation_id=?", (start_id,))
 
     def delete_source(self, source):
-        """Forget a source's stays and its open candidate, to find them again."""
+        """Forget a source's stays, its open candidate and its checkpoints, to find them again."""
+        self.execute("DELETE FROM stay_checkpoints WHERE source=?", (source,))
         self.execute("DELETE FROM observed_stays_v2 WHERE source=?", (source,))
         self.execute("DELETE FROM stay_observation_state WHERE source=?", (source,))
 
@@ -109,9 +119,44 @@ class StaysRepository(Repository):
 
     def save_state(self, source, last_id, last_timestamp, candidate):
         self.execute("""INSERT INTO stay_observation_state(source,last_observation_id,last_timestamp,candidate)
-            VALUES (?,?,?,?) ON CONFLICT(source) DO UPDATE SET
+            VALUES (?,?,?,?) ON CONFLICT(user_id,source) DO UPDATE SET
             last_observation_id=excluded.last_observation_id,last_timestamp=excluded.last_timestamp,candidate=excluded.candidate""",
             (source, last_id, last_timestamp, json.dumps(candidate)))
+
+    # Checkpoints: the candidate as it stood after a source's fixes up to a moment.
+
+    def checkpoint_before(self, source, timestamp):
+        """The newest checkpoint strictly before `timestamp`, as state() returns it, or None."""
+        row = self.one("""SELECT last_observation_id,last_timestamp,candidate FROM stay_checkpoints
+            WHERE source=? AND last_timestamp<? ORDER BY last_timestamp DESC LIMIT 1""", (source, timestamp))
+        if row is None:
+            return None
+        return {"last_observation_id": row["last_observation_id"], "last_timestamp": row["last_timestamp"],
+                "candidate": json.loads(row["candidate"]) if row["candidate"] else None}
+
+    def last_checkpoint(self, source):
+        """When a source's newest checkpoint was taken, or None."""
+        return self.execute("SELECT MAX(last_timestamp) AS at FROM stay_checkpoints WHERE source=?",
+                            (source,)).fetchone()["at"]
+
+    def save_checkpoint(self, source, last_id, last_timestamp, candidate):
+        self.execute("""INSERT INTO stay_checkpoints(source,last_timestamp,last_observation_id,candidate)
+            VALUES (?,?,?,?) ON CONFLICT(user_id,source,last_timestamp) DO UPDATE SET
+            last_observation_id=excluded.last_observation_id,candidate=excluded.candidate""",
+            (source, last_timestamp, last_id, json.dumps(candidate)))
+
+    def thin_checkpoints(self, source, keep_all_after):
+        """Keep every checkpoint after `keep_all_after` and the first of each UTC day before it."""
+        self.execute("""DELETE FROM stay_checkpoints WHERE source=? AND last_timestamp<? AND last_timestamp NOT IN (
+            SELECT MIN(last_timestamp) FROM stay_checkpoints WHERE source=? AND last_timestamp<?
+            GROUP BY (last_timestamp::timestamptz AT TIME ZONE 'UTC')::date)""",
+            (source, keep_all_after, source, keep_all_after))
+
+    def rewind(self, source, after):
+        """Forget what was found after `after`: the stays that start later and the checkpoints taken later."""
+        self.execute("""DELETE FROM observed_stays_v2 s USING point_observations o
+            WHERE s.start_observation_id=o.id AND s.source=? AND o.timestamp>?""", (source, after))
+        self.execute("DELETE FROM stay_checkpoints WHERE source=? AND last_timestamp>?", (source, after))
 
     def nearby_names(self, source, start_id):
         """The place names looked up around a source's open stop (the one that starts at start_id), or None."""

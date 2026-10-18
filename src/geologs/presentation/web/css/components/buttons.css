@@ -157,3 +157,18 @@
 .button.danger.strong:hover {
   background: color-mix(in srgb, var(--danger) 88%, var(--text));
 }
+/* A button that reads as a link: "Forgot password?", "Sign in with the access token". */
+.link-button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent-text);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 560;
+  cursor: pointer;
+}
+.link-button:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}

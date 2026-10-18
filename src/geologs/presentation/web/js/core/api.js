@@ -2,11 +2,10 @@
 import { $ } from "./dom.js";
 import { state } from "./state.js";
 
+// Ask for sign-in; views/auth.js shows the sign-in screen (unless a reset or invite form is open).
 export function openAuth(message = "") {
   if (state.authDismissed) return;
-  $("auth-error").textContent = message;
-  $("auth-panel").hidden = false;
-  $("auth-token").focus();
+  document.dispatchEvent(new CustomEvent("geologs:sign-in", { detail: { message } }));
 }
 
 export function setConnection(tone, text, detail = "") {
@@ -33,11 +32,7 @@ export async function api(path, options = {}) {
   if (response.status === 401) {
     sessionStorage.removeItem("geologs-token");
     setConnection("warning", "Sign in required");
-    openAuth(
-      previousToken
-        ? "The previously saved token was rejected. Enter the token used by the running server."
-        : "",
-    );
+    openAuth(previousToken ? "The previously saved token was rejected. Sign in again." : "");
     throw Error(previousToken ? "Previously saved access token was rejected." : "Sign in required.");
   }
   let value = {};

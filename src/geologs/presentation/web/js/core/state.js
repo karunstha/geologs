@@ -1,6 +1,9 @@
 // Shared client state for every view.
 export const state = {
   authDismissed: false,
+  // The signed-in user ({id, email, name, role}), from /api/me; their account page, when opened.
+  user: null,
+  account: null,
   points: [],
   timeline: [],
   places: [],

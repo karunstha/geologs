@@ -36,4 +36,4 @@ class SettingsRepository(Repository):
 
     def set_value(self, key, value):
         self.execute("""INSERT INTO app_settings(key,value) VALUES (?,?)
-            ON CONFLICT(key) DO UPDATE SET value=excluded.value""", (key, json.dumps(value)))
+            ON CONFLICT(user_id,key) DO UPDATE SET value=excluded.value""", (key, json.dumps(value)))

@@ -27,8 +27,11 @@ services:
       db:
         condition: service_healthy
     environment:
+      # The owner login creates and upgrades the tables; requests log in as geologs_app, which
+      # cannot see past row-level security.
       GEOLOGS_DATABASE_URL: postgresql://geologs@db:5432/geologs
       PGPASSWORD: ${POSTGRES_PASSWORD}
+      GEOLOGS_APP_DB_PASSWORD: ${GEOLOGS_APP_DB_PASSWORD:?Set GEOLOGS_APP_DB_PASSWORD in .env}
       GEOLOGS_TOKEN: ${GEOLOGS_TOKEN:?Set GEOLOGS_TOKEN in .env}
       GEOLOGS_TOKEN_FILE: /config/.env
       GEOLOGS_TIMEZONE: ${GEOLOGS_TIMEZONE:-UTC}
@@ -43,6 +46,16 @@ services:
       # A photo of your city behind History (free key: https://unsplash.com/developers).
       UNSPLASH_ACCESS_KEY: ${UNSPLASH_ACCESS_KEY:-}
       GEOLOGS_REVERSE_CACHE_DAYS: ${GEOLOGS_REVERSE_CACHE_DAYS:-180}
+      GEOLOGS_DB_POOL_SIZE: ${GEOLOGS_DB_POOL_SIZE:-10}
+      # Where people open GeoLogs (links in emails point here), and the mail server that sends
+      # invites and password resets. Without them, invite links are shown to the admin to share.
+      GEOLOGS_PUBLIC_URL: ${GEOLOGS_PUBLIC_URL:-}
+      GEOLOGS_SMTP_HOST: ${GEOLOGS_SMTP_HOST:-}
+      GEOLOGS_SMTP_PORT: ${GEOLOGS_SMTP_PORT:-}
+      GEOLOGS_SMTP_SECURITY: ${GEOLOGS_SMTP_SECURITY:-starttls}
+      GEOLOGS_SMTP_USERNAME: ${GEOLOGS_SMTP_USERNAME:-}
+      GEOLOGS_SMTP_PASSWORD: ${GEOLOGS_SMTP_PASSWORD:-}
+      GEOLOGS_SMTP_FROM: ${GEOLOGS_SMTP_FROM:-}
     ports:
       - "0.0.0.0:${GEOLOGS_PUBLISHED_PORT:-8765}:8765"
     extra_hosts:

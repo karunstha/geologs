@@ -5,6 +5,8 @@ import { localDateKey } from "./core/format.js";
 import { state } from "./core/state.js";
 import { initMap } from "./map/map.js";
 import { initTheme } from "./ui/theme.js";
+import { initAccount } from "./views/account.js";
+import { initAdmin } from "./views/admin.js";
 import { initAuth } from "./views/auth.js";
 import { initHistory, refreshCurrent, refreshExplore } from "./views/history.js";
 import { refreshInsights } from "./views/patterns.js";
@@ -18,7 +20,10 @@ import { initSummaries } from "./views/summaries.js";
 
 initTheme();
 initShell();
-initAuth();
+initAccount();
+initAdmin();
+// Before loading anything: a link from an email (a reset, an invite) opens its own page.
+await initAuth();
 initHistory();
 initPlaces();
 initPlaceDialogs();

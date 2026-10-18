@@ -28,13 +28,28 @@ export async function refreshMeta() {
   drawMap();
 }
 
+// Who is signed in, where the page names them.
+function showUser() {
+  const user = state.user;
+  const label = user ? `${user.name || user.email || "Owner"}${user.role === "admin" ? " (admin)" : ""}` : "Account";
+  $("auth-button").title = user ? `Account: ${label}` : "Sign in";
+  $("auth-button").setAttribute("aria-label", $("auth-button").title);
+  document.querySelector('.nav[data-view="admin"]').hidden = !(user && user.role === "admin");
+  $("access-browser").textContent = user
+    ? `Signed in as ${user.email || user.name || "the owner"}.`
+    : "Not signed in.";
+}
+
 export async function refreshAll() {
   try {
-    const [status, current, settings] = await Promise.all([
+    const [me, status, current, settings] = await Promise.all([
+      api("/api/me"),
       api("/api/status"),
       api("/api/current"),
       api("/api/settings"),
     ]);
+    state.user = me.user;
+    showUser();
     state.status = status;
     state.current = current;
     state.settings = settings;
@@ -49,7 +64,8 @@ export async function refreshAll() {
     await refreshMeta();
     await Promise.all([refreshExplore(), refreshInsights()]);
   } catch (e) {
-    toast(e.message);
+    // The sign-in screen already says what is needed.
+    if ($("auth-panel").hidden) toast(e.message);
   }
 }
 

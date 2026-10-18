@@ -6,6 +6,7 @@ import hmac
 import json
 import secrets
 import threading
+import time
 from datetime import datetime, timezone
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -15,7 +16,20 @@ from urllib.parse import parse_qs, urlparse
 
 from .. import config
 from ..domain.access import token_allows_source
-from ..services import open_database
+from ..domain.accounts import SESSION_PREFIX
+from ..services import open_pool
+from ..services.accounts import (SESSION_DAYS, CodeNeeded, TooManyAttempts, accept_invite, account, api_token_user,
+                                 begin_two_factor, change_email, change_password, confirm_two_factor, create_api_token,
+                                 end_session, end_sessions, forget_expired_sessions, invite_details, owner, public_user,
+                                 rename, request_password_reset, reset_password, revoke_api_token, send_verification,
+                                 session_user, sign_in, sign_up, start_session, stop_two_factor, verify_email)
+from ..services.admin import (audit as admin_audit, clear_failures as admin_clear_failures, delete_user as admin_delete_user,
+                             health as admin_health, invite as admin_invite, note_failed_attempt, refresh_user_stats,
+                             require_admin, reset_link as admin_reset_link, revoke_invite as admin_revoke_invite,
+                             set_disabled as admin_set_disabled, set_role as admin_set_role,
+                             set_signup_mode as admin_set_signup, signup_mode, users as admin_users)
+from ..services import jobs
+from ..services.mail import can_send, deliver_due, waiting as mail_waiting
 from ..services.ambient import ambient
 from ..services.corrections import delete_stay_edit, save_mode_override, save_stay_edit
 from ..services.day import day_summary
@@ -35,6 +49,10 @@ from ..services.stays import anchored_trips, stays
 from .errors import INPUT_ERRORS, input_message, internal_failure
 from .ingest_formats import claimed_source, FORMATS as INGEST_FORMATS
 from .mcp import dispatch, SUPPORTED_VERSIONS
+
+# Posted from links in emails, before anyone is signed in (see Handler.public_post).
+PUBLIC_POSTS = ("/api/password/forgot", "/api/password/reset", "/api/invites/accept", "/api/email/verify",
+                "/api/signup")
 
 WEB_TYPES = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8",
              ".yaml": "text/yaml; charset=utf-8"}
@@ -100,20 +118,41 @@ class Handler(BaseHTTPRequestHandler):
             return False
         return True
 
-    def authorized(self):
-        token = config.api_token()
-        if not token:
-            return True
-        bearer = self.headers.get("Authorization", "")
-        if secrets.compare_digest(bearer, "Bearer " + token):
-            return True
+    def cookie(self, name):
         cookies = SimpleCookie()
         try:
             cookies.load(self.headers.get("Cookie", ""))
         except Exception:
-            return False
-        session = cookies.get("geologs_session")
-        return bool(session and secrets.compare_digest(session.value, self.session_value(token)))
+            return None
+        morsel = cookies.get(name)
+        return morsel.value if morsel else None
+
+    session_token = None  # the session cookie a request signed in with, if it did
+
+    def request_user(self, db):
+        """Who sent the request, or None: a personal API token or GEOLOGS_TOKEN (the owner) as a
+        bearer, or a signed-in browser's session cookie. With no GEOLOGS_TOKEN configured (a
+        loopback-only server), every request is the owner's."""
+        main = config.api_token()
+        if not main:
+            return owner(db)
+        bearer = self.headers.get("Authorization", "")
+        if bearer.startswith("Bearer "):
+            supplied = bearer[7:]
+            if secrets.compare_digest(supplied, main):
+                return owner(db)
+            user = api_token_user(db, supplied)
+            if user:
+                return user
+        session = self.cookie("geologs_session")
+        if session and session.startswith(SESSION_PREFIX):
+            user = session_user(db, session)
+            self.session_token = session if user else None
+            return user
+        # A browser signed in before accounts existed holds a cookie made from GEOLOGS_TOKEN: the owner's.
+        if session and secrets.compare_digest(session, self.session_value(main)):
+            return owner(db)
+        return None
 
     @staticmethod
     def session_value(token):
@@ -133,14 +172,13 @@ class Handler(BaseHTTPRequestHandler):
     def ingest_authorized(self, query):
         """Tracking apps authenticate however they can: a bearer header, the password
         of HTTP Basic auth (OwnTracks), or ?token= in the URL (Overland, Traccar Client,
-        GPSLogger). The main token, the .env ingest token, or a device token from
-        Settings is accepted; a device token is kept on self.device_token so its
-        tracker lock can be checked once the points are read. With no token
-        configured anywhere, anyone may send (a loopback-only server)."""
-        self.device_token = None
+        GPSLogger). A device token from Settings sends as the user who made it, and is
+        kept on self.device_token so its tracker lock can be checked once the points are
+        read; GEOLOGS_TOKEN and the .env ingest token send as the owner, and a signed-in
+        browser or personal API token as its user. With no token configured anywhere,
+        anyone may send, as the owner (a loopback-only server). Sets self.user."""
+        self.device_token, self.user = None, None
         main, ingest = config.api_token(), config.ingest_token()
-        if main and self.authorized():
-            return True
         supplied = []
         header = self.headers.get("Authorization", "")
         if header.startswith("Bearer "):
@@ -152,19 +190,27 @@ class Handler(BaseHTTPRequestHandler):
                 pass
         if query.get("token"):
             supplied.append(query["token"])
-        if any(secrets.compare_digest(value, token) for value in supplied for token in (main, ingest) if token):
-            return True
         try:
-            db = open_database()
+            db = self.server.pool.open()
         except Exception:
-            return not main and not ingest
+            return False
         try:
+            if main:
+                self.user = self.request_user(db)
+                if self.user:
+                    return True
+            if any(secrets.compare_digest(value, token) for value in supplied for token in (main, ingest) if token):
+                self.user = owner(db)
+                return True
             for value in supplied:
                 row = ingest_token_for(db, value)
                 if row:
-                    self.device_token = row
+                    self.device_token, self.user = row, {"id": row["user_id"]}
                     return True
-            return not main and not ingest and not db.devices.has_tokens()
+            if not main and not ingest and not db.devices.has_tokens():
+                self.user = owner(db)
+                return True
+            return False
         finally:
             db.close()
 
@@ -202,17 +248,33 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
 
     def open_store(self):
-        """The store, or a 503 the browser can show (instead of a dropped connection) when the database is down."""
+        """The store, working for the request's user (see guarded and ingest_authorized), or a 503
+        the browser can show (instead of a dropped connection) when the database is down."""
         try:
-            return open_database()
+            return self.server.pool.open(self.user["id"] if self.user else None)
         except Exception as exc:
             print("GeoLogs database unavailable: " + str(exc), flush=True)
             self.error_json(503, "Database unavailable: " + str(exc).splitlines()[0][:300])
             return None
 
     def note_ingest(self, kind, status, message=None, device=None, accepted=0):
+        """Note a tracker app's request for its user's Settings → Devices. A request with a wrong
+        token is no one's: it is noted for admins instead (Admin → Server)."""
+        if not self.user:
+            try:
+                db = self.open_store()
+                if db is not None:
+                    try:
+                        note_failed_attempt(db, kind, device, status, message, self.client_address[0])
+                    finally:
+                        db.close()
+            except Exception:
+                pass
+            return
         try:
-            db = open_database()
+            db = self.open_store()
+            if db is None:
+                return
         except Exception:
             return
         try:
@@ -279,11 +341,114 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(200, reply if reply is not None else
                        {"inserted": inserted, "duplicates": duplicates, "skipped": skipped})
 
+    def start_session(self):
+        """POST /api/session: sign a browser in with an email and password, or with GEOLOGS_TOKEN (the owner)."""
+        if not self.safe_origin():
+            self.error_json(403, "cross-origin request denied"); return
+        length = self.request_length()
+        if not 0 <= length <= 4096:
+            self.close_connection = True
+            self.error_json(413 if length > 4096 else 400, "invalid request size"); return
+        try:
+            payload = json.loads(self.rfile.read(length))
+            if not isinstance(payload, dict) or not all(isinstance(payload.get(key, ""), str)
+                                                        for key in ("token", "email", "password", "code")):
+                raise ValueError("sign-in fields must be strings")
+        except (ValueError, TypeError):
+            self.error_json(400, "invalid sign-in request"); return
+        configured = config.api_token()
+        if "email" not in payload and not configured:
+            # Nothing to sign in to: a loopback server with no token lets everyone in as the owner.
+            self.send_json(200, {"ok": True}, {"Set-Cookie": self.session_cookie("", 0)}); return
+        self.user = None
+        db = self.open_store()
+        if db is None:
+            return
+        try:
+            if "email" in payload:
+                try:
+                    user = sign_in(db, payload.get("email"), payload.get("password"), self.client_address[0],
+                                   payload.get("code"))
+                except TooManyAttempts as exc:
+                    self.error_json(429, str(exc)); return
+                except CodeNeeded as exc:
+                    self.send_json(401, {"error": str(exc), "needs_code": True}); return
+                except ValueError as exc:
+                    self.error_json(401, str(exc)); return
+            elif secrets.compare_digest(payload.get("token", ""), configured):
+                user = owner(db)
+            else:
+                self.error_json(401, "Access token rejected. Restart the server if its configured token changed."); return
+            token = start_session(db, user["id"], self.headers.get("User-Agent"))
+        except Exception:
+            self.error_json(500, internal_failure("POST /api/session")); return
+        finally:
+            db.close()
+        self.send_json(200, {"ok": True, "user": public_user(user)},
+                       {"Set-Cookie": self.session_cookie(token, SESSION_DAYS * 86400)})
+
+    def public_post(self, path):
+        """The account links people open before they can sign in: asking for a password reset,
+        setting the new password, accepting an invite (which signs the new user in), and
+        confirming an address."""
+        if not self.safe_origin():
+            self.error_json(403, "cross-origin request denied"); return
+        length = self.request_length()
+        if not 0 <= length <= 4096:
+            self.close_connection = True
+            self.error_json(413 if length > 4096 else 400, "invalid request size"); return
+        try:
+            payload = json.loads(self.rfile.read(length) or b"{}")
+            if not isinstance(payload, dict):
+                raise ValueError
+        except (ValueError, UnicodeDecodeError):
+            self.error_json(400, "invalid JSON"); return
+        self.user = None
+        db = self.open_store()
+        if db is None:
+            return
+        cookie = None
+        try:
+            if path == "/api/password/forgot":
+                result = request_password_reset(db, payload.get("email"), self.client_address[0])
+            elif path == "/api/password/reset":
+                result = {"user": reset_password(db, payload.get("token"), payload.get("password"))}
+            elif path in ("/api/invites/accept", "/api/signup"):
+                user = (accept_invite(db, payload.get("token"), payload.get("password"), payload.get("name"))
+                        if path == "/api/invites/accept" else
+                        public_user(sign_up(db, payload.get("email"), payload.get("password"), payload.get("name"),
+                                            self.client_address[0])))
+                cookie = self.session_cookie(start_session(db, user["id"], self.headers.get("User-Agent")), SESSION_DAYS * 86400)
+                result = {"user": user}
+            else:  # /api/email/verify
+                result = {"user": verify_email(db, payload.get("token"))}
+        except TooManyAttempts as exc:
+            self.error_json(429, str(exc)); return
+        except PermissionError as exc:
+            self.error_json(403, str(exc)); return
+        except INPUT_ERRORS as exc:
+            self.error_json(400, input_message(exc)); return
+        except Exception:
+            self.error_json(500, internal_failure("POST " + path)); return
+        finally:
+            db.close()
+        self.send_json(200, result, {"Set-Cookie": cookie} if cookie else None)
+
     def guarded(self):
-        if not self.authorized():
+        """Whether the request may go on, as its user (self.user, for open_store); else a 401,
+        403 or 503 is sent."""
+        self.user, self.session_token = None, None
+        db = self.open_store()
+        if db is None:
+            return False
+        try:
+            self.user = self.request_user(db)
+        finally:
+            db.close()
+        if not self.user:
             if self.command == "POST":
                 self.close_connection = True
-            self.error_json(401, "Bearer token required")
+            self.error_json(401, "Sign in, or send a bearer token")
             return False
         if not self.safe_origin():
             if self.command == "POST":
@@ -304,6 +469,32 @@ class Handler(BaseHTTPRequestHandler):
         if url.path.startswith("/api/ingest/"):
             self.receive_locations(url.path[len("/api/ingest/"):], {key: value[0] for key, value in parse_qs(url.query).items()})
             return
+        if url.path == "/api/sign-in-options":
+            # Public: what the sign-in screen can offer here.
+            self.user = None
+            db = self.open_store()
+            if db is None:
+                return
+            try:
+                mode = signup_mode(db)
+            finally:
+                db.close()
+            self.send_json(200, {"email": can_send(), "token": bool(config.api_token()), "signup": mode == "open"})
+            return
+        if url.path == "/api/invite":
+            self.user = None
+            db = self.open_store()
+            if db is None:
+                return
+            try:
+                details = invite_details(db, (parse_qs(url.query).get("token") or [""])[0])
+            finally:
+                db.close()
+            if details is None:
+                self.error_json(404, "this invite has expired or was already used")
+            else:
+                self.send_json(200, details)
+            return
         if not self.guarded():
             return
         q = {key: value[0] for key, value in parse_qs(url.query).items()}
@@ -311,7 +502,19 @@ class Handler(BaseHTTPRequestHandler):
         if db is None:
             return
         try:
-            if url.path == "/api/status":
+            if url.path == "/api/me": value = {"user": public_user(self.user), "can_email": can_send()}
+            elif url.path == "/api/account": value = account(db, self.user["id"], self.session_token)
+            elif url.path == "/api/invites":
+                require_admin(self.user)
+                value = db.users.invites(datetime.now(timezone.utc).isoformat(timespec="seconds"))
+            elif url.path.startswith("/api/admin/"):
+                require_admin(self.user)
+                if url.path == "/api/admin/users": value = admin_users(db)
+                elif url.path == "/api/admin/audit": value = admin_audit(db, q.get("limit", 200))
+                elif url.path == "/api/admin/health": value = admin_health(db)
+                else:
+                    self.error_json(404, "not found"); return
+            elif url.path == "/api/status":
                 active = places_provider(db)
                 value = {"ok": True, "geocoding": active is not None, "geocoder": active, "auth": bool(config.api_token()),
                          "places_providers": [{"id": name, **info} for name, info in place_providers().items()]}
@@ -322,7 +525,7 @@ class Handler(BaseHTTPRequestHandler):
             elif url.path == "/api/settings": value = db.settings.get()
             elif url.path == "/api/stats": value = stats(db, q.get("start"), q.get("end"), q.get("source"))
             elif url.path == "/api/trips": value = anchored_trips(db, q.get("start"), q.get("end"), q.get("source"))
-            elif url.path == "/api/coverage": value = db.points.coverage()
+            elif url.path == "/api/coverage": value = db.points.coverage(gaps=q.get("gaps") != "false")
             elif url.path == "/api/near": value = near(db, q["lat"], q["lon"], q.get("radius_m", 250), q.get("start"), q.get("end"), q.get("limit", 100), q.get("source"))
             elif url.path == "/api/place-visits": value = place_visits(db, q["place_id"], q.get("start"), q.get("end"))
             elif url.path == "/api/stays": value = stays(db, q.get("start"), q.get("end"), q.get("source"), q.get("limit", 500))
@@ -365,6 +568,8 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self.error_json(404, "not found"); return
             self.send_json(200, value)
+        except PermissionError as exc:
+            self.error_json(403, str(exc))
         except INPUT_ERRORS as exc:
             self.error_json(400, input_message(exc))
         except Exception:
@@ -379,24 +584,10 @@ class Handler(BaseHTTPRequestHandler):
             self.receive_locations(path[len("/api/ingest/"):], {key: value[0] for key, value in parse_qs(url.query).items()})
             return
         if path == "/api/session":
-            if not self.safe_origin():
-                self.error_json(403, "cross-origin request denied"); return
-            length = self.request_length()
-            if not 0 <= length <= 4096:
-                self.close_connection = True
-                self.error_json(413 if length > 4096 else 400, "invalid request size"); return
-            try:
-                payload = json.loads(self.rfile.read(length))
-                supplied = payload["token"]
-                if not isinstance(supplied, str):
-                    raise ValueError("token must be a string")
-            except (ValueError, KeyError, TypeError):
-                self.error_json(400, "invalid token request"); return
-            configured = config.api_token()
-            if configured and not secrets.compare_digest(supplied, configured):
-                self.error_json(401, "Access token rejected. Restart the server if its configured token changed."); return
-            cookie = self.session_cookie(self.session_value(configured), 30 * 86400) if configured else self.session_cookie("", 0)
-            self.send_json(200, {"ok": True}, {"Set-Cookie": cookie})
+            self.start_session()
+            return
+        if path in PUBLIC_POSTS:
+            self.public_post(path)
             return
         # Location senders may post native points with the ingest-only token too.
         sender = path == "/api/points" and self.ingest_authorized({key: value[0] for key, value in parse_qs(url.query).items()})
@@ -459,6 +650,36 @@ class Handler(BaseHTTPRequestHandler):
                                           self.device_token["id"] if sender and self.device_token else None)
             elif path == "/api/ingest-tokens":
                 result = create_ingest_token(db, payload)
+            elif path == "/api/invites":
+                require_admin(self.user)
+                result = admin_invite(db, self.user, payload.get("email"), payload.get("role") or "user", self.client_address[0])
+            elif path.startswith("/api/admin/"):
+                require_admin(self.user)
+                actor, client = self.user, self.client_address[0]
+                if path == "/api/admin/users/role": result = admin_set_role(db, actor, payload["id"], payload.get("role"), client)
+                elif path == "/api/admin/users/disable":
+                    result = admin_set_disabled(db, actor, payload["id"], payload.get("disabled") is not False, client)
+                elif path == "/api/admin/users/reset": result = admin_reset_link(db, actor, payload["id"], client)
+                elif path == "/api/admin/users/delete": result = admin_delete_user(db, actor, payload["id"], payload.get("email"), client)
+                elif path == "/api/admin/invites/revoke": result = admin_revoke_invite(db, actor, payload.get("email"), client)
+                elif path == "/api/admin/signup": result = admin_set_signup(db, actor, payload.get("mode"), client)
+                elif path == "/api/admin/failures/clear": result = admin_clear_failures(db, actor, client)
+                else:
+                    self.error_json(404, "not found"); return
+            elif path == "/api/account/2fa/begin": result = begin_two_factor(db, self.user["id"])
+            elif path == "/api/account/2fa/confirm": result = confirm_two_factor(db, self.user["id"], payload.get("code"))
+            elif path == "/api/account/2fa/stop": result = stop_two_factor(db, self.user["id"], payload.get("current"))
+            elif path == "/api/account": result = rename(db, self.user["id"], payload.get("name"))
+            elif path == "/api/account/password":
+                result = change_password(db, self.user["id"], payload.get("current"), payload.get("password"), self.session_token)
+            elif path == "/api/account/email":
+                result = change_email(db, self.user["id"], payload.get("email"), payload.get("current"))
+            elif path == "/api/account/sessions/end":
+                result = end_sessions(db, self.user["id"], payload.get("id"), self.session_token)
+            elif path == "/api/account/tokens": result = create_api_token(db, self.user["id"], payload.get("name"))
+            elif path == "/api/account/tokens/delete": result = revoke_api_token(db, self.user["id"], payload["id"])
+            elif path == "/api/email/verify/send":
+                result = {"sent": send_verification(db, self.user["id"])}
             elif path == "/api/fuel":
                 result = update_fuel(db, payload)
             elif path == "/api/ingest-tokens/delete":
@@ -485,6 +706,8 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self.error_json(404, "not found"); return
             self.send_json(200, result)
+        except PermissionError as exc:
+            self.error_json(403, str(exc))
         except INPUT_ERRORS as exc:
             self.error_json(400, input_message(exc))
         except Exception:
@@ -501,23 +724,42 @@ class Handler(BaseHTTPRequestHandler):
             self.error_json(404, "not found"); return
         if not self.safe_origin():
             self.error_json(403, "cross-origin request denied"); return
+        session = self.cookie("geologs_session")
+        if session:
+            self.user = None
+            db = self.open_store()
+            if db is None:
+                return
+            try:
+                end_session(db, session)
+            finally:
+                db.close()
         self.send_json(200, {"ok": True}, {"Set-Cookie": self.session_cookie("", 0)})
 
 
-def _daily_summary_worker(stop):
-    """Background upkeep, so that reading never writes: the path library, place details,
-    stored daily summaries, and fuel prices. Each job fails on its own."""
-    jobs = (("paths", learn_recent_paths), ("place details", enrich_saved_places),
-            ("daily summary", save_scheduled_summaries), ("fuel prices", refresh_prices))  # prices at most every 12 hours
+def _daily_summary_worker(pool, stop):
+    """Background upkeep, so that reading never writes: for each user, the path library, place
+    details, stored daily summaries, and fuel prices; then expired sessions. Each job fails on its own."""
+    work = (("paths", learn_recent_paths), ("place details", enrich_saved_places),
+            ("daily summary", save_scheduled_summaries), ("fuel prices", refresh_prices),  # prices at most every 12 hours
+            ("user counts", refresh_user_stats))
     while not stop.is_set():
         db = None
         try:
-            db = open_database()
-            for name, job in jobs:
-                try:
-                    job(db)
-                except Exception as exc:
-                    print(f"GeoLogs {name}: {exc}", flush=True)
+            db = pool.open()
+            for user_id in db.users.active_ids():
+                db.as_user(user_id)
+                for name, job in work:
+                    started = time.perf_counter()
+                    try:
+                        job(db)
+                        jobs.record(name, started)
+                    except Exception as exc:
+                        print(f"GeoLogs {name} (user {user_id}): {exc}", flush=True)
+                        db.rollback()
+                        jobs.record(name, started, exc)
+            db.as_user(None)
+            forget_expired_sessions(db)
         except Exception as exc:
             print("GeoLogs background work: " + str(exc), flush=True)
         finally:
@@ -526,13 +768,48 @@ def _daily_summary_worker(stop):
         stop.wait(60)
 
 
+def _mail_worker(pool, stop):
+    """Send queued email: woken when a message is queued, and at least every 30 seconds for retries."""
+    while not stop.is_set():
+        mail_waiting.wait(30)
+        mail_waiting.clear()
+        if stop.is_set():
+            break
+        stop.wait(0.5)  # let the request that queued the message finish saving it
+        db, started = None, time.perf_counter()
+        try:
+            db = pool.open()
+            deliver_due(db)
+            jobs.record("email", started)
+        except Exception as exc:
+            print("GeoLogs mail: " + str(exc), flush=True)
+            jobs.record("email", started, exc)
+        finally:
+            if db is not None:
+                db.close()
+
+
+class Server(ThreadingHTTPServer):
+    """The HTTP server, with the database pool its requests borrow connections from."""
+    # Python's default backlog of 5 refuses connections when a few dozen clients arrive at once.
+    request_queue_size = 128
+    daemon_threads = True
+
+    def __init__(self, address, pool):
+        super().__init__(address, Handler)
+        self.pool = pool
+
+
 def serve(host="127.0.0.1", port=8765):
     if host not in ("127.0.0.1", "localhost", "::1") and not config.api_token():
         raise ValueError("GEOLOGS_TOKEN is required when binding beyond loopback")
-    server = ThreadingHTTPServer((host, int(port)), Handler)
+    pool = open_pool()
+    server = Server((host, int(port)), pool)
     summary_stop = threading.Event()
-    summary_thread = threading.Thread(target=_daily_summary_worker, args=(summary_stop,), daemon=True)
+    summary_thread = threading.Thread(target=_daily_summary_worker, args=(pool, summary_stop), daemon=True)
     summary_thread.start()
+    mail_thread = threading.Thread(target=_mail_worker, args=(pool, summary_stop), daemon=True)
+    mail_thread.start()
     print(f"GeoLogs browser: http://{host}:{port}", flush=True)
     try:
         server.serve_forever()
@@ -540,5 +817,8 @@ def serve(host="127.0.0.1", port=8765):
         pass
     finally:
         summary_stop.set()
+        mail_waiting.set()
         summary_thread.join(timeout=2)
+        mail_thread.join(timeout=2)
         server.server_close()
+        pool.close()

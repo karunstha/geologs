@@ -1,0 +1,37 @@
+#!/bin/sh
+# Start (or reuse) a throwaway PostGIS server for the test suite, held in memory, and print the
+# variable the tests read. Run the suite with:
+#   export GEOLOGS_TEST_DATABASE_URL=$(scripts/test-db) && python -m unittest discover -s tests
+# Stop it with: docker rm -f geologs-test-db
+set -eu
+
+name=geologs-test-db
+port=${GEOLOGS_TEST_DB_PORT:-55432}
+# postgis/postgis publishes amd64 only; on Apple silicon and other arm64 machines a native
+# community build of the same image runs the suite about twice as fast as emulation.
+case $(uname -m) in
+    arm64|aarch64) image=imresamu/postgis:17-3.5 ;;
+    *) image=postgis/postgis:17-3.5 ;;
+esac
+
+if ! docker inspect "$name" >/dev/null 2>&1; then
+    docker run -d --name "$name" -e POSTGRES_USER=geologs -e POSTGRES_PASSWORD=test -e POSTGRES_DB=geologs \
+        -p "127.0.0.1:$port:5432" --tmpfs /var/lib/postgresql/data "$image" \
+        -c fsync=off -c synchronous_commit=off -c full_page_writes=off -c max_connections=200 >/dev/null
+elif [ "$(docker inspect -f '{{.State.Running}}' "$name")" != true ]; then
+    docker start "$name" >/dev/null
+fi
+tries=0
+# Ask over TCP: during first-run setup the image runs a temporary server on its socket only.
+until docker exec "$name" pg_isready -h 127.0.0.1 -U geologs -d geologs >/dev/null 2>&1; do
+    tries=$((tries + 1))
+    if [ "$tries" -gt 60 ]; then
+        echo "The test database did not start; see: docker logs $name" >&2
+        exit 1
+    fi
+    sleep 1
+done
+until docker exec "$name" psql -h 127.0.0.1 -U geologs -d geologs -tAc "SELECT 1 FROM pg_available_extensions WHERE name='postgis'" 2>/dev/null | grep -q 1; do
+    sleep 1
+done
+echo "postgresql://geologs:test@127.0.0.1:$port/geologs"

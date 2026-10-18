@@ -7,11 +7,14 @@ import json
 import urllib.parse
 import urllib.request
 
+from . import usage
+
 URL = "https://nominatim.openstreetmap.org/reverse"
 
 
 def locality(lat, lon):
     """{city, region, country, country_code} at a position; parts it cannot name are None."""
+    usage.count("nominatim.openstreetmap.org")
     params = {"lat": lat, "lon": lon, "format": "jsonv2", "zoom": 10, "addressdetails": 1, "accept-language": "en"}
     request = urllib.request.Request(URL + "?" + urllib.parse.urlencode(params),
                                      headers={"User-Agent": "GeoLogs/0.1 (personal self-hosted location archive)"})

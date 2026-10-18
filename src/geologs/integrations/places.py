@@ -15,6 +15,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 from .. import config
+from . import usage
 from ..domain.geo import metres
 
 
@@ -29,6 +30,7 @@ def reverse_cache_radius(result_type):
 
 
 def json_get(url):
+    usage.count(urllib.parse.urlparse(url).hostname or "places")
     req = urllib.request.Request(url, headers={"User-Agent": "GeoLogs/0.1 (personal self-hosted location archive)"})
     with urllib.request.urlopen(req, timeout=12) as response:
         return json.load(response)

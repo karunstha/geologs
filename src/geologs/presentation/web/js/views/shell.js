@@ -4,6 +4,7 @@ import { state } from "../core/state.js";
 import { map } from "../map/map.js";
 import { renderExplore } from "./history.js";
 import { refreshSources } from "./settings.js";
+import { refreshAdmin } from "./admin.js";
 import { refreshSummaries } from "./summaries.js";
 
 export function showView(view) {
@@ -17,6 +18,7 @@ export function showView(view) {
   });
   if (view === "explore" && map) setTimeout(() => map.invalidateSize(), 20);
   if (view === "summaries") refreshSummaries().catch((error) => toast(error.message));
+  if (view === "admin") refreshAdmin().catch((error) => toast(error.message));
 }
 
 // The top bar is clear at the top of the page and frosted once the page scrolls under it.

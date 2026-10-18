@@ -70,7 +70,8 @@
   font-size: 20px;
   font-weight: 650;
 }
-.auth-card > p.muted {
+.auth-card > p.muted,
+.auth-mode > p.muted {
   margin: 6px 0 18px;
   color: var(--text-2);
   font-size: 13.5px;
@@ -165,4 +166,29 @@
   display: grid;
   gap: 2px;
   margin-bottom: 16px;
+}
+/* The sign-in screen's other modes: a token, a forgotten password, a new password, an invite. */
+.auth-mode .form-stack {
+  gap: 14px;
+}
+.field-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.auth-alt {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px 18px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+.auth-alt:not(:has(> :not([hidden]))) {
+  display: none;
+}
+.auth-sent {
+  margin-top: 4px;
 }

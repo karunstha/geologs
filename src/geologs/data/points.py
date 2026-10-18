@@ -4,7 +4,6 @@ from __future__ import annotations
 import hashlib
 import json
 
-from ..domain.geo import metres
 from ..domain.motion import mode_for
 from ..domain.timing import parse_time
 from .repository import Repository
@@ -91,27 +90,20 @@ class PointsRepository(Repository):
     def nearest_in_time(self, timestamp):
         at = parse_time(timestamp)
         columns = "id,source,external_id,timestamp,lat,lon,accuracy_m,speed_mps,speed_origin,mode"
-        if self.db.postgres:
-            rows = self.rows(f"SELECT {columns}, ABS(EXTRACT(EPOCH FROM timestamp::timestamptz - ?::timestamptz))::double precision AS seconds_away FROM points ORDER BY seconds_away LIMIT 1", (at,))
-        else:
-            rows = self.rows(f"SELECT {columns}, ABS(strftime('%s',timestamp)-strftime('%s',?)) AS seconds_away FROM points ORDER BY seconds_away LIMIT 1", (at,))
+        rows = self.rows(f"SELECT {columns}, ABS(EXTRACT(EPOCH FROM timestamp::timestamptz - ?::timestamptz))::double precision AS seconds_away FROM points ORDER BY seconds_away LIMIT 1", (at,))
         return rows[0] if rows else None
 
-    def coverage(self):
+    def coverage(self, gaps=True):
+        """Each source's sample count and span, and (with `gaps`) its silences of over a day, which
+        read every sample in order and so cost the most on a long archive."""
         sources = self.rows("SELECT source,COUNT(*) AS points,MIN(timestamp) AS first,MAX(timestamp) AS last FROM point_observations GROUP BY source ORDER BY source")
-        if self.db.postgres:
-            gaps = self.rows("""SELECT source, previous AS start, timestamp AS end,
-                ROUND(((EXTRACT(EPOCH FROM timestamp::timestamptz)-EXTRACT(EPOCH FROM previous::timestamptz))/3600)::numeric,1)::double precision AS hours
-                FROM (SELECT source,timestamp,LAG(timestamp) OVER
-                      (PARTITION BY source ORDER BY timestamp) AS previous FROM point_observations) p
-                WHERE previous IS NOT NULL AND timestamp::timestamptz-previous::timestamptz>interval '24 hours'
-                ORDER BY timestamp DESC LIMIT 200""")
-        else:
-            gaps = self.rows("""SELECT source, previous AS start, timestamp AS end,
-            ROUND((strftime('%s',timestamp)-strftime('%s',previous))/3600.0,1) AS hours
+        if not gaps:
+            return {"sources": sources}
+        gaps = self.rows("""SELECT source, previous AS start, timestamp AS end,
+            ROUND(((EXTRACT(EPOCH FROM timestamp::timestamptz)-EXTRACT(EPOCH FROM previous::timestamptz))/3600)::numeric,1)::double precision AS hours
             FROM (SELECT source,timestamp,LAG(timestamp) OVER
-                  (PARTITION BY source ORDER BY timestamp) AS previous FROM point_observations)
-            WHERE previous IS NOT NULL AND strftime('%s',timestamp)-strftime('%s',previous)>86400
+                  (PARTITION BY source ORDER BY timestamp) AS previous FROM point_observations) p
+            WHERE previous IS NOT NULL AND timestamp::timestamptz-previous::timestamptz>interval '24 hours'
             ORDER BY timestamp DESC LIMIT 200""")
         return {"sources": sources, "gaps_over_24h": gaps}
 
@@ -129,27 +121,18 @@ class PointsRepository(Repository):
 
     def near(self, lat, lon, radius_m, start=None, end=None, limit=100, source=None):
         """Points within radius_m of a position, newest first, each with its distance."""
-        if self.db.postgres:
-            clauses = ["ST_DWithin(position, ST_SetSRID(ST_MakePoint(?,?),4326)::geography, ?)"]
-            where_args = [lon, lat, radius_m]
-            if start:
-                clauses.append("timestamp>=?"); where_args.append(parse_time(start))
-            if end:
-                clauses.append("timestamp<=?"); where_args.append(parse_time(end))
-            if source:
-                clauses.append("source=?"); where_args.append(source)
-            return self.rows("SELECT id,source,external_id,timestamp,lat,lon,accuracy_m,speed_mps,speed_origin,mode, "
-                             "ROUND(ST_Distance(position,ST_SetSRID(ST_MakePoint(?,?),4326)::geography)) AS distance_m "
-                             "FROM points WHERE " + " AND ".join(clauses) + " ORDER BY timestamp DESC LIMIT ?",
-                             [lon, lat] + where_args + [min(int(limit), 500)])
-        found = []
-        for point in self.points(start, end, source=source, limit=None):
-            distance = metres(lat, lon, point["lat"], point["lon"])
-            if distance <= radius_m:
-                found.append({**point, "distance_m": round(distance)})
-                if len(found) >= min(int(limit), 500):
-                    break
-        return found
+        clauses = ["ST_DWithin(position, ST_SetSRID(ST_MakePoint(?,?),4326)::geography, ?)"]
+        where_args = [lon, lat, radius_m]
+        if start:
+            clauses.append("timestamp>=?"); where_args.append(parse_time(start))
+        if end:
+            clauses.append("timestamp<=?"); where_args.append(parse_time(end))
+        if source:
+            clauses.append("source=?"); where_args.append(source)
+        return self.rows("SELECT id,source,external_id,timestamp,lat,lon,accuracy_m,speed_mps,speed_origin,mode, "
+                         "ROUND(ST_Distance(position,ST_SetSRID(ST_MakePoint(?,?),4326)::geography)) AS distance_m "
+                         "FROM points WHERE " + " AND ".join(clauses) + " ORDER BY timestamp DESC LIMIT ?",
+                         [lon, lat] + where_args + [min(int(limit), 500)])
 
     def sources(self):
         """Every tracker that has sent a sample."""
@@ -206,25 +189,24 @@ class PointsRepository(Repository):
         fingerprint = hashlib.sha256(json.dumps(identity, separators=(",", ":")).encode()).hexdigest()
         return self.execute("""INSERT INTO point_observations
             (point_id,source,timestamp,lat,lon,accuracy_m,speed_mps,speed_origin,received_at,fingerprint)
-            VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(fingerprint) DO NOTHING""",
+            VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id,fingerprint) DO NOTHING""",
             (point_id, source, timestamp, lat, lon, accuracy, speed, origin, received_at, fingerprint)).rowcount
 
     def set_live_point(self, source, point_id):
-        self.execute("INSERT INTO source_state(source,point_id) VALUES (?,?) ON CONFLICT(source) DO UPDATE SET point_id=excluded.point_id",
+        self.execute("INSERT INTO source_state(source,point_id) VALUES (?,?) ON CONFLICT(user_id,source) DO UPDATE SET point_id=excluded.point_id",
                      (source, point_id))
 
     def lock_source(self, source):
-        """Serialize a source's previous-fix and reminder decisions across workers (PostgreSQL)."""
-        if self.db.postgres:
-            self.execute("SELECT pg_advisory_xact_lock(hashtext(?))", (source,))
+        """Serialize a source's previous-fix and reminder decisions across workers (a user's own source)."""
+        self.execute("SELECT pg_advisory_xact_lock(hashtext(geologs_user()::text || ':' || ?))", (source,))
 
     # Reading samples for stays (see services.stays).
 
     def first_new(self, source, after_id):
         """The earliest timestamp among a source's samples newer than after_id."""
-        row = self.execute("""SELECT timestamp FROM point_observations
-            WHERE source=? AND id>? ORDER BY timestamp,id LIMIT 1""", (source, after_id)).fetchone()
-        return row["timestamp"] if row else None
+        # MIN over the id range reads only the new samples (point_observations_source_id).
+        return self.execute("""SELECT MIN(timestamp) AS timestamp FROM point_observations
+            WHERE source=? AND id>?""", (source, after_id)).fetchone()["timestamp"]
 
     def max_id(self, source, default):
         return self.execute("SELECT COALESCE(MAX(id),?) AS id FROM point_observations WHERE source=?",
@@ -233,6 +215,12 @@ class PointsRepository(Repository):
     def best_fixes_after(self, source, after_id, batch=1000):
         """A source's samples newer than after_id, one per moment, in time order, in batches."""
         cursor = self.execute(BEST_FIXES.format(where="o.source=? AND o.id>?"), (source, after_id))
+        while rows := cursor.fetchmany(batch):
+            yield [dict(row) for row in rows]
+
+    def best_fixes_after_time(self, source, after, batch=1000):
+        """A source's samples after a moment, one per moment, in time order, in batches."""
+        cursor = self.execute(BEST_FIXES.format(where="o.source=? AND o.timestamp>?"), (source, after))
         while rows := cursor.fetchmany(batch):
             yield [dict(row) for row in rows]
 

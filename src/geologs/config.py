@@ -15,18 +15,19 @@ def _env(name, default=""):
 # Storage
 
 def database_url():
-    """GEOLOGS_DATABASE_URL: a PostgreSQL/PostGIS archive (else SQLite)."""
+    """GEOLOGS_DATABASE_URL: the PostgreSQL/PostGIS archive, as its owner (who creates and upgrades the tables)."""
     return _env("GEOLOGS_DATABASE_URL") or None
 
 
-def database_file():
-    """GEOLOGS_DB, else ~/.local/share/geologs/geologs.db (or the archive from before the rename, if it is there)."""
-    if _env("GEOLOGS_DB"):
-        return _env("GEOLOGS_DB")
-    path = Path.home() / ".local/share/geologs/geologs.db"
-    # An archive created before the rename (as Geotracker) stays where it is.
-    legacy = Path.home() / ".local/share/geotracker/geotracker.db"
-    return str(legacy if legacy.exists() and not path.exists() else path)
+def app_database_password():
+    """GEOLOGS_APP_DB_PASSWORD: the password of the login the app's requests use (geologs_app), which
+    can never skip row-level security. Without it, requests use the owner's login and switch role."""
+    return _env("GEOLOGS_APP_DB_PASSWORD") or None
+
+
+def database_pool_size():
+    """GEOLOGS_DB_POOL_SIZE: how many database connections the server keeps for its requests (2 to 100, 10 by default)."""
+    return max(2, min(int(_env("GEOLOGS_DB_POOL_SIZE", "10")), 100))
 
 
 def default_timezone():
@@ -91,16 +92,6 @@ def env_file():
     return Path(_env("GEOLOGS_ENV_FILE", ".env"))
 
 
-def remote_server():
-    """(GEOLOGS_URL, GEOLOGS_TOKEN): the server a Home Assistant poll sends to, else (None, token)."""
-    return _env("GEOLOGS_URL") or None, _env("GEOLOGS_TOKEN") or None
-
-
-def home_assistant():
-    """(HA_URL, HA_TOKEN, HA_ENTITY) for polling a device tracker."""
-    return _env("HA_URL").rstrip("/"), _env("HA_TOKEN"), _env("HA_ENTITY")
-
-
 # Outside services
 
 def geoapify_key():
@@ -134,3 +125,20 @@ def webhook():
     """(GEOLOGS_WEBHOOK_URL, GEOLOGS_WEBHOOK_TOKEN, GEOLOGS_WEBHOOK_SECRET); unset ones are None."""
     return (_env("GEOLOGS_WEBHOOK_URL") or None, _env("GEOLOGS_WEBHOOK_TOKEN") or None,
             _env("GEOLOGS_WEBHOOK_SECRET") or None)
+
+
+def public_url():
+    """GEOLOGS_PUBLIC_URL: where people open GeoLogs (https://geologs.example.com); links in emails point here."""
+    return _env("GEOLOGS_PUBLIC_URL").strip().rstrip("/") or None
+
+
+def smtp():
+    """The mail server for invites and password resets: (host, port, username, password, sender, security),
+    where security is starttls (the default, port 587), ssl (port 465) or none. None without
+    GEOLOGS_SMTP_HOST and GEOLOGS_SMTP_FROM."""
+    host, sender = _env("GEOLOGS_SMTP_HOST").strip(), _env("GEOLOGS_SMTP_FROM").strip()
+    if not host or not sender:
+        return None
+    security = (_env("GEOLOGS_SMTP_SECURITY", "starttls").strip().lower() or "starttls")
+    port = int(_env("GEOLOGS_SMTP_PORT") or (465 if security == "ssl" else 25 if security == "none" else 587))
+    return (host, port, _env("GEOLOGS_SMTP_USERNAME") or None, _env("GEOLOGS_SMTP_PASSWORD") or None, sender, security)

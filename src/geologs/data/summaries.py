@@ -23,7 +23,7 @@ class SummariesRepository(Repository):
         self.execute("""INSERT INTO daily_summaries
             (summary_date,timezone,source,watermark,points,distance_km,trip_count,place_count,
              reminder_count,summary,brief,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-            ON CONFLICT(summary_date,timezone,source) DO UPDATE SET
+            ON CONFLICT(user_id,summary_date,timezone,source) DO UPDATE SET
             watermark=excluded.watermark,points=excluded.points,distance_km=excluded.distance_km,
             trip_count=excluded.trip_count,place_count=excluded.place_count,
             reminder_count=excluded.reminder_count,summary=excluded.summary,brief=excluded.brief,

@@ -10,6 +10,7 @@ from ..domain.stay_detection import candidate_duration
 from ..domain.timing import parse_time
 from ..integrations import webhooks
 from .places import geocode
+from ..data import OWNER_ID
 from .use_case import use_case
 
 
@@ -136,9 +137,10 @@ def check_name_reminders(db, sources, now=None):
 
 @use_case
 def deliver_webhook(db, events):
-    """Send fired reminders to GEOLOGS_WEBHOOK_URL, noting how each went."""
+    """Send the owner's fired reminders to GEOLOGS_WEBHOOK_URL, noting how each went. The webhook is
+    the server owner's (their assistant, say), so other users' reminders never go to it."""
     target = webhooks.url()
-    if not target or not events:
+    if not target or not events or db.user_id != OWNER_ID:
         return
     for event in events:
         db.reminders.set_webhook_status(event["id"], webhooks.send(target, event))

@@ -3,6 +3,8 @@ import json
 import urllib.parse
 import urllib.request
 
+from . import usage
+
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 # Reanalysis for days older than the forecast API keeps (about three months).
 ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
@@ -11,6 +13,7 @@ CURRENT = "temperature_2m,apparent_temperature,relative_humidity_2m,weather_code
 
 
 def _get(url, params):
+    usage.count(urllib.parse.urlparse(url).hostname)
     request = urllib.request.Request(url + "?" + urllib.parse.urlencode(params),
                                      headers={"User-Agent": "GeoLogs/0.1 (personal self-hosted location archive)"})
     with urllib.request.urlopen(request, timeout=10) as response:

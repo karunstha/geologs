@@ -1,6 +1,6 @@
 // Settings: sources and tracker setup, time and speed, stays and activities, place names, summaries, and access.
 import { refreshMeta } from "../app/refresh.js";
-import { api, openAuth, post, setConnection } from "../core/api.js";
+import { api, post } from "../core/api.js";
 import { $, copyText, safe, toast } from "../core/dom.js";
 import {
   ago,
@@ -31,6 +31,7 @@ import { actionIcon, onEach } from "../ui/actions.js";
 import { modeIcon, modeInfo, sourceName, statusPill } from "../ui/icons.js";
 import { refreshCurrent, refreshExplore } from "./history.js";
 import { refreshInsights } from "./patterns.js";
+import { showAccount } from "./account.js";
 import { showView } from "./shell.js";
 
 export function populateTimezones(selected) {
@@ -418,8 +419,7 @@ ${HA_SEND}`;
     <li><span>Add the automation. In Home Assistant, open <a href="https://my.home-assistant.io/redirect/automations/" target="_blank" rel="noopener">Automations</a>, choose <strong>Create automation</strong> → <strong>Create new automation</strong>, then <strong>⋮</strong> → <strong>Edit in YAML</strong>, paste this, and put your trackers in place of <code>device_tracker.your_phone</code>:</span>${copyBlock("Automation YAML", automation)}
       <span class="help">Or import it as a blueprint and pick trackers from a list. Home Assistant downloads it from <a href="${safe(base + HA_BLUEPRINT_PATH)}" target="_blank" rel="noopener">${safe(base + HA_BLUEPRINT_PATH)}</a>, so that address must work from Home Assistant; “Unknown error” means it couldn't.</span>
       <a class="button secondary small ha-import" href="${safe(importUrl)}" target="_blank" rel="noopener">Import blueprint into Home Assistant</a></li>
-  </ol>
-  <p class="help">Positions arrive under the same names as <code>./geologs poll-ha</code>, so history continues: stop that cron job once this works.</p>`;
+  </ol>`;
 }
 
 // One REST command and an automation: no polling, and positions arrive as Home Assistant sees them.
@@ -1185,15 +1185,7 @@ export function initSettings() {
     refreshSources()
       .then(() => toast("Sources updated"))
       .catch((error) => toast(error.message));
-  $("sign-out").onclick = async () => {
-    try {
-      await fetch("/api/session", { method: "DELETE", credentials: "same-origin" });
-    } catch (_error) {}
-    sessionStorage.removeItem("geologs-token");
-    state.authDismissed = false;
-    setConnection("warning", "Signed out");
-    openAuth("You are signed out. Enter the access token to sign in again.");
-  };
+  $("open-account").onclick = () => showAccount();
   setInterval(() => {
     if ($("settings-view").classList.contains("active") && !document.hidden) refreshSources().catch(() => {});
   }, 30000);

@@ -14,7 +14,7 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 RUN --mount=type=cache,target=/root/.cache/pip \
     mkdir -p src/geologs && touch src/geologs/__init__.py \
-    && pip install '.[postgres]' \
+    && pip install . \
     && pip uninstall -y geologs \
     && rm -rf build src
 

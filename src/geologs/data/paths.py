@@ -19,7 +19,7 @@ class PathsRepository(Repository):
         min_lat, min_lon, max_lat, max_lon = bounds
         self.execute("""INSERT INTO known_paths
             (source,started_at,ended_at,mode,distance_m,min_lat,min_lon,max_lat,max_lon,coordinates)
-            VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(source,started_at) DO NOTHING""",
+            VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id,source,started_at) DO NOTHING""",
             (source, started_at, ended_at, mode, distance_m, min_lat, min_lon, max_lat, max_lon, coordinates))
 
     def delete(self, path_id):
@@ -37,7 +37,7 @@ class PathsRepository(Repository):
     def exclude(self, path, now):
         """Never learn this trip's path again (kept with what it was, to list and undo)."""
         self.execute("""INSERT INTO path_exclusions(source,started_at,ended_at,mode,distance_m,created_at)
-            VALUES (?,?,?,?,?,?) ON CONFLICT(source,started_at) DO NOTHING""",
+            VALUES (?,?,?,?,?,?) ON CONFLICT(user_id,source,started_at) DO NOTHING""",
             (path["source"], path["started_at"], path["ended_at"], path["mode"], path["distance_m"], now))
 
     def include(self, source, started_at):

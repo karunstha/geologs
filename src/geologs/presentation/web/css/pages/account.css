@@ -1,0 +1,61 @@
+/* Account: profile, password, signed-in browsers, and API tokens, one column of cards. */
+.account-layout {
+  display: grid;
+  gap: 16px;
+  max-width: 760px;
+}
+.inline-form {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.inline-form .input {
+  width: 240px;
+}
+.account-change {
+  margin-top: 10px;
+}
+.account-change summary {
+  width: fit-content;
+  color: var(--accent-text);
+  font-size: 13px;
+  font-weight: 560;
+  cursor: pointer;
+}
+.account-form {
+  display: grid;
+  gap: 14px;
+  padding-top: 12px;
+}
+.account-form .field {
+  max-width: 360px;
+}
+.account-form .form-pair .field {
+  max-width: none;
+}
+.account-form .form-pair {
+  max-width: 560px;
+}
+.account-form-actions {
+  display: flex;
+}
+.account-token-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 10px;
+  max-width: 560px;
+}
+@media (max-width: 760px) {
+  .inline-form {
+    width: 100%;
+  }
+  .inline-form .input {
+    flex: 1;
+    width: auto;
+  }
+  .account-form .form-pair {
+    grid-template-columns: 1fr;
+  }
+}

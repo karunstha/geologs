@@ -51,7 +51,7 @@ class PlaceRoutesRepository(Repository):
     def add_track(self, track):
         self.execute("""INSERT INTO trip_tracks
             (source,started_at,ended_at,mode,from_lat,from_lon,to_lat,to_lon,from_name,to_name,distance_m,observed_m,pieces)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(source,started_at) DO NOTHING""",
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id,source,started_at) DO NOTHING""",
             (track["source"], track["started_at"], track["ended_at"], track["mode"], track["from"][1], track["from"][0],
              track["to"][1], track["to"][0], track["from_name"], track["to_name"], track["distance_m"],
              track["observed_m"], json.dumps(track["pieces"], separators=(",", ":"))))
@@ -87,7 +87,7 @@ class PlaceRoutesRepository(Repository):
         self.execute("""INSERT INTO place_routes
             (mode,from_lat,from_lon,to_lat,to_lon,from_name,to_name,distance_m,observed_m,
              min_lat,min_lon,max_lat,max_lon,parts,members,latest,seed)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(seed) DO NOTHING""",
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id,seed) DO NOTHING""",
             (route["mode"], route["from"][1], route["from"][0], route["to"][1], route["to"][0], route["from_name"],
              route["to_name"], route["distance_m"], route["observed_m"], min_lat, min_lon, max_lat, max_lon,
              json.dumps(route["parts"], separators=(",", ":")), json.dumps(route["members"], separators=(",", ":")),

@@ -6,15 +6,19 @@ import io
 import math
 import os
 import re
+import sys
 import tempfile
 import unittest
+
+import psycopg
 from datetime import datetime, timedelta, timezone
 from email.message import Message
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from unittest.mock import Mock, patch
 
-from geologs.services import open_database
+from geologs.services import open_database, open_pool
+from geologs.data.database import STAY_REBUILDS
 from geologs.services.corrections import delete_stay_edit, save_mode_override, save_stay_edit
 from geologs.services.devices import create_ingest_token
 from geologs.services.imports import import_csv
@@ -26,7 +30,6 @@ from geologs.services.samples import near, stats
 from geologs.services.saved_places import delete_label, delete_place, place_visits, save_label, save_place
 from geologs.services.settings import save_settings
 from geologs.services.stays import anchored_trips
-from geologs.data.database import database_path
 from geologs.services.places import place_details, geocode, nearby_places, places_provider, places_provider_identity, reverse_geocode
 from geologs.services.location import current_location
 from geologs.services.reminders import deliver_webhook
@@ -38,7 +41,7 @@ from geologs.domain.briefs import daily_brief
 from geologs.services.overview import daily_briefs, daily_overview, stored_daily_record, save_scheduled_summaries
 from geologs.services.day import day_summary
 from geologs.services.patterns import insights, place_overview, place_patterns, predict_next, resolve_place_patterns, search_visits, transitions, visited_places
-from geologs.services.stays import stays
+from geologs.services.stays import process_stays, stays
 
 
 HOME = (41.0, -87.9)
@@ -93,15 +96,37 @@ def lake_run_day(hold=1):
                         source="home_assistant:phone", hold=hold)
 from geologs.services.imports import import_takeout
 from geologs.presentation.mcp import dispatch
-from geologs.presentation.cli import load_env_file, main, poll_home_assistant
+from geologs.presentation.cli import load_env_file, main
 from geologs.config import api_token as active_token
-from geologs.presentation.http import Handler
+from geologs.presentation.http import Handler, Server
+from geologs.data import database as storage
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # scratch_db sits beside this file
+from scratch_db import scratch_database  # noqa: E402
+
+
+def as_if_restarted(url):
+    """Forget that this process already upgraded the archive, as a newly started server would."""
+    storage.upgrade_again(url)
+
+
+def older_schema(url, *migrations, changes=()):
+    """Make an archive look like it predates these migrations, so the next open applies them again.
+    `changes` are SQL statements that undo what they did (run as the tables' owner: the app may not)."""
+    archive = psycopg.connect(url, autocommit=True)
+    try:
+        for statement in changes:
+            archive.execute(statement)
+        archive.execute("DELETE FROM schema_migrations WHERE version = ANY(%s)", (list(migrations),))
+    finally:
+        archive.close()
+    as_if_restarted(url)
 
 
 class StoreTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.db = open_database(Path(self.tmp.name) / "test.db")
+        self.url = scratch_database(self)
+        self.db = open_database(self.url)
 
     def tearDown(self):
         self.db.close()
@@ -165,7 +190,8 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(event["place"], "Lake Example")
         history = self.db.reminders.history()[0]
         self.assertNotIn("acknowledged_at", history)
-        self.assertNotIn("acknowledged_at", {row[1] for row in self.db.conn.execute("PRAGMA table_info(events)")})
+        self.assertNotIn("acknowledged_at", {row["column_name"] for row in self.db.rows(
+            "SELECT column_name FROM information_schema.columns WHERE table_name='events'")})
 
     def test_stale_and_cross_source_segments_do_not_inflate_distance(self):
         ingest(self.db, {"source": "one", "timestamp": "2026-09-26T10:00:00Z", "lat": 41, "lon": -87})
@@ -295,10 +321,38 @@ class StoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "IANA timezone"):
             save_settings(self.db, {"timezone": "not/a-zone"})
 
+    def test_every_table_is_a_users_or_is_meant_to_be_shared(self):
+        # A new table must say which it is: its rows are someone's (user_id, row-level security), or
+        # it is shared by everyone or holds the accounts themselves.
+        from geologs.data import postgres
+        tables = {row["relname"]: row for row in self.db.rows("""SELECT c.relname,c.relrowsecurity,c.relforcerowsecurity
+            FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+            WHERE n.nspname='public' AND c.relkind='r' AND c.relname<>'spatial_ref_sys'""")}
+        known = set(postgres.USER_TABLES) | set(postgres.SHARED_TABLES) | set(postgres.ACCOUNT_TABLES) | set(postgres.ADMIN_TABLES)
+        self.assertEqual(set(tables) - known, set(), "classify new tables in data/postgres.py")
+        policies = {row["tablename"] for row in self.db.rows("SELECT tablename FROM pg_policies WHERE policyname='own_rows'")}
+        for table in postgres.USER_TABLES:
+            with self.subTest(table=table):
+                self.assertTrue(tables[table]["relrowsecurity"] and tables[table]["relforcerowsecurity"])
+                self.assertIn(table, policies)
+                column = self.db.rows("""SELECT is_nullable FROM information_schema.columns
+                    WHERE table_name=? AND column_name='user_id'""", (table,))
+                self.assertEqual(column, [{"is_nullable": "NO"}])
+        self.assertEqual(self.db.rows("SELECT current_user AS role")[0]["role"], postgres.APP_ROLE)
+
+    def test_requests_log_in_as_a_role_that_cannot_see_past_row_level_security(self):
+        from geologs.data import postgres
+        who = self.db.rows("""SELECT session_user AS login, r.rolsuper, r.rolbypassrls
+            FROM pg_roles r WHERE r.rolname=session_user""")[0]
+        self.assertEqual((who["login"], who["rolsuper"], who["rolbypassrls"]), (postgres.APP_ROLE, False, False))
+        self.db.conn.execute("RESET ROLE")  # nothing to go back to: the login itself is the app's
+        self.assertEqual(self.db.rows("SELECT current_user AS role")[0]["role"], postgres.APP_ROLE)
+        self.db.rollback()
+
     def test_query_paths_have_storage_indexes(self):
-        indexes = {row["name"] for row in self.db.rows("SELECT name FROM sqlite_master WHERE type='index'")}
-        self.assertTrue({"point_observations_source_time", "observed_stays_v2_source_time",
-                         "reminders_active_created", "events_triggered", "daily_summaries_date"}.issubset(indexes))
+        indexes = {row["name"] for row in self.db.rows("SELECT indexname AS name FROM pg_indexes")}
+        self.assertTrue({"point_observations_user_source_time", "observed_stays_v2_user_source_time",
+                         "reminders_user_active_created", "events_user_triggered", "daily_summaries_user_date"}.issubset(indexes))
 
     def test_trip_classification_uses_connected_trip_context(self):
         ingest(self.db, [
@@ -394,27 +448,6 @@ class StoreTests(unittest.TestCase):
         day = day_summary(self.db, "2026-09-25", "UTC")
         self.assertEqual((day["timeline_points"], day["points"]), (2, 3))
 
-    def test_home_assistant_polls_record_repeated_coordinates(self):
-        state = {"last_updated": "2026-09-25T08:00:00Z",
-                 "attributes": {"latitude": 41, "longitude": -87.9, "gps_accuracy": 8}}
-        times = [datetime(2026, 9, 25, 10, 0, 0, 100000, tzinfo=timezone.utc),
-                 datetime(2026, 9, 25, 10, 0, 0, 200000, tzinfo=timezone.utc)]
-        env = {"HA_URL": "http://home-assistant.test:8123", "HA_TOKEN": "test", "HA_ENTITY": "device_tracker.phone",
-               "GEOLOGS_URL": "", "GEOLOGS_DATABASE_URL": "", "GEOLOGS_DB": str(Path(self.tmp.name) / "poll.db")}
-        with patch.dict(os.environ, env), patch("geologs.presentation.home_assistant.urllib.request.urlopen") as urlopen, \
-                patch("geologs.presentation.home_assistant.datetime") as clock:
-            urlopen.side_effect = lambda *_args, **_kwargs: io.BytesIO(json.dumps(state).encode())
-            clock.now.side_effect = times
-            first, second = poll_home_assistant(), poll_home_assistant()
-        self.assertEqual((first["inserted"], first["recorded"]), (1, 1))
-        self.assertEqual((second["duplicates"], second["recorded"]), (1, 1))
-        archive = open_database(Path(self.tmp.name) / "poll.db")
-        try:
-            day = day_summary(archive, "2026-09-25", "UTC")
-            self.assertEqual((day["timeline_points"], day["points"]), (2, 2))
-        finally:
-            archive.close()
-
     def test_repeated_poll_does_not_inherit_previous_movement_speed(self):
         ingest(self.db, {"source": "ha", "external_id": "first", "timestamp": "2026-09-25T10:00:00Z",
                            "lat": 41, "lon": -87.9, "accuracy_m": 4})
@@ -457,7 +490,7 @@ class StoreTests(unittest.TestCase):
         self.assertEqual([point["accuracy_m"] for point in timeline], [5, 5])
 
     def test_existing_observations_get_speed_origin_without_inheriting_speed(self):
-        path = Path(self.tmp.name) / "v2.db"
+        path = scratch_database(self)
         archive = open_database(path)
         ingest(archive, {"source": "ha", "external_id": "first", "timestamp": "2026-09-25T10:00:00Z",
                         "lat": 41, "lon": -87.9, "accuracy_m": 4})
@@ -466,10 +499,9 @@ class StoreTests(unittest.TestCase):
         ingest(archive, moving)
         ingest(archive, {**moving, "timestamp": "2026-09-25T10:01:01Z"})
         archive.conn.execute("UPDATE point_observations SET speed_mps=NULL")
-        archive.conn.execute("ALTER TABLE point_observations DROP COLUMN speed_origin")
-        archive.conn.execute("PRAGMA user_version=2")
         archive.commit()
         archive.close()
+        older_schema(path, 3, changes=["ALTER TABLE point_observations DROP COLUMN speed_origin"])
         migrated = open_database(path)
         try:
             newest, previous = migrated.points.observations(limit=2)
@@ -630,30 +662,17 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(os.environ["GEOLOGS_TOKEN"], "process-token")
 
     def test_settings_named_for_geotracker_still_work_with_a_reminder(self):
-        # A cron poll with an un-renamed .env must still post to the server, not a local database.
+        # An un-renamed .env keeps working, and the command line says what to rename.
         path = Path(self.tmp.name) / ".env"
-        path.write_text("GEOTRACKER_URL=http://127.0.0.1:8766\nGEOTRACKER_TOKEN=old-token\nGEOLOGS_TIMEZONE=UTC\n")
+        path.write_text("GEOTRACKER_TOKEN=old-token\nGEOTRACKER_TIMEZONE=UTC\n")
         errors = io.StringIO()
         with patch.dict(os.environ, {"GEOTRACKER_ENV_FILE": str(path), "GEOLOGS_PORT": "9000"}, clear=True), \
-                patch("sys.argv", ["geologs", "poll-ha"]), patch("sys.stderr", errors):
-            self.assertEqual(main(), 1)  # No Home Assistant settings; it stops before polling.
-            self.assertEqual((os.environ["GEOLOGS_URL"], os.environ["GEOLOGS_TOKEN"]), ("http://127.0.0.1:8766", "old-token"))
+                patch("sys.argv", ["geologs"]), patch("sys.stderr", errors):
+            with self.assertRaises(SystemExit):  # no command given: argparse stops after the reminder
+                main()
+            self.assertEqual((os.environ["GEOLOGS_TOKEN"], os.environ["GEOLOGS_TIMEZONE"]), ("old-token", "UTC"))
             self.assertEqual(os.environ["GEOLOGS_PORT"], "9000")
-        self.assertIn("rename GEOTRACKER_ENV_FILE, GEOTRACKER_TOKEN, GEOTRACKER_URL to GEOLOGS_*", errors.getvalue())
-
-    def test_default_database_stays_where_an_archive_from_before_the_rename_is(self):
-        home = Path(self.tmp.name)
-        legacy, current = home / ".local/share/geotracker/geotracker.db", home / ".local/share/geologs/geologs.db"
-        with patch.dict(os.environ, {}, clear=True), patch("geologs.config.Path.home", return_value=home):
-            self.assertEqual(database_path(), str(current))
-            legacy.parent.mkdir(parents=True)
-            legacy.touch()
-            self.assertEqual(database_path(), str(legacy))
-            current.parent.mkdir(parents=True)
-            current.touch()
-            self.assertEqual(database_path(), str(current))
-            os.environ["GEOLOGS_DB"] = str(home / "chosen.db")
-            self.assertEqual(database_path(), str(home / "chosen.db"))
+        self.assertIn("rename GEOTRACKER_ENV_FILE, GEOTRACKER_TIMEZONE, GEOTRACKER_TOKEN to GEOLOGS_*", errors.getvalue())
 
     def test_mounted_token_file_tracks_changes(self):
         path = Path(self.tmp.name) / ".env"
@@ -994,7 +1013,7 @@ class StoreTests(unittest.TestCase):
         # Reading a day can look up many places; each is kept as it arrives, so the write lock
         # is never held across the provider calls between them.
         found = ({"name": "Cafe", "place_name": "Cafe", "address": "1 Main St", "lat": HOME[0], "lon": HOME[1]}, "place")
-        other = open_database(Path(self.tmp.name) / "test.db")
+        other = open_database(self.url)
         try:
             with patch.dict(os.environ, {"GEOAPIFY_API_KEY": "key"}), \
                     patch("geologs.integrations.places.lookup", return_value=found), self.db.transaction():
@@ -1030,7 +1049,7 @@ class StoreTests(unittest.TestCase):
         now = datetime.now(timezone.utc)
         seen = []
         def send(_target, event):
-            other = open_database(Path(self.tmp.name) / "test.db")
+            other = open_database(self.url)
             try:
                 seen.append([row["id"] for row in other.reminders.events()] == [event["id"]])
             finally:
@@ -1189,7 +1208,7 @@ class StoreTests(unittest.TestCase):
         self.assertEqual([(row["point_count"], row["observed_minutes"]) for row in rows], [(4, 66)])
 
     def test_existing_raw_samples_bootstrap_stays_when_opened(self):
-        path = Path(self.tmp.name) / "bootstrap.db"
+        path = scratch_database(self)
         archive = open_database(path)
         base = datetime(2026, 9, 25, 10, tzinfo=timezone.utc)
         for minute in (0, 16):
@@ -1198,6 +1217,7 @@ class StoreTests(unittest.TestCase):
                             "lat": 41, "lon": -87.9, "accuracy_m": 4}, process_analysis=False)
         self.assertEqual(len(stays(archive)), 0)
         archive.close()
+        as_if_restarted(path)
         reopened = open_database(path)
         try:
             self.assertEqual(len(stays(reopened)), 1)
@@ -1206,7 +1226,7 @@ class StoreTests(unittest.TestCase):
             reopened.close()
 
     def test_stay_threshold_migration_removes_old_short_stays(self):
-        path = Path(self.tmp.name) / "old-stays.db"
+        path = scratch_database(self)
         archive = open_database(path)
         base = datetime(2026, 9, 25, 10, tzinfo=timezone.utc)
         ingest(archive, [
@@ -1220,13 +1240,13 @@ class StoreTests(unittest.TestCase):
             VALUES (?,?,?,?,?,?,?,?,1)""",
             ("phone", observations[0]["id"], observations[1]["id"], observations[0]["timestamp"],
              observations[1]["timestamp"], 41, -87.9, 2))
-        archive.conn.execute("PRAGMA user_version=7")
         archive.commit()
         archive.close()
+        older_schema(path, 8, 12, 14, 17, 18, 19, 20, 21)
         migrated = open_database(path)
         try:
             self.assertEqual(stays(migrated), [])
-            self.assertEqual(migrated.conn.execute("PRAGMA user_version").fetchone()[0], 18)
+            self.assertEqual(migrated._missing_migrations(STAY_REBUILDS), [])
         finally:
             migrated.close()
 
@@ -1521,7 +1541,7 @@ class StoreTests(unittest.TestCase):
         self.assertEqual([row["timezone"] for row in daily_overviews(self.db, )], ["America/Chicago"])
 
     def test_upgrade_removes_duplicate_daily_summaries_and_keeps_reminders(self):
-        path = Path(self.tmp.name) / "before-name-reminders.db"
+        path = scratch_database(self)
         archive = open_database(path)
         save_settings(archive, {"timezone": "UTC"})
         place = save_place(archive, {"name": "Market", "lat": 41, "lon": -87.9})
@@ -1534,30 +1554,17 @@ class StoreTests(unittest.TestCase):
             archive.conn.execute("""INSERT INTO daily_summaries(summary_date,timezone,source,watermark,points,distance_km,
                 trip_count,place_count,reminder_count,summary,created_at,updated_at) VALUES (?,?,?,?,5,0,0,0,0,'{}',?,?)""",
                 ("2026-09-27", zone, source, "w", "2026-09-28T00:00:00+00:00", "2026-09-28T00:00:00+00:00"))
-        # Recreate the pre-v13 reminders table, where place_id could not be empty.
-        archive.commit()
-        archive.conn.execute("PRAGMA foreign_keys=OFF")
-        archive.conn.execute("""CREATE TABLE reminders_legacy (id INTEGER PRIMARY KEY, text TEXT NOT NULL,
-            place_id INTEGER NOT NULL REFERENCES places(id), active INTEGER NOT NULL DEFAULT 1,
-            repeat INTEGER NOT NULL DEFAULT 0, cooldown_minutes INTEGER NOT NULL DEFAULT 1440,
-            created_at TEXT NOT NULL, last_triggered_at TEXT, cancelled_at TEXT, destination_name TEXT,
-            destination_address TEXT, destination_category TEXT, destination_provider_place_id TEXT,
-            FOREIGN KEY(place_id) REFERENCES places(id))""")
-        archive.conn.execute("""INSERT INTO reminders_legacy SELECT id,text,place_id,active,repeat,cooldown_minutes,created_at,
-            last_triggered_at,cancelled_at,destination_name,destination_address,destination_category,
-            destination_provider_place_id FROM reminders""")
-        archive.conn.execute("DROP TABLE reminders")
-        archive.conn.execute("ALTER TABLE reminders_legacy RENAME TO reminders")
-        archive.conn.execute("PRAGMA user_version=12")
         archive.commit()
         archive.close()
+        # Before name-only reminders, a reminder needed a place.
+        older_schema(path, 15, 16, changes=["ALTER TABLE reminders DROP COLUMN match_name",
+                                             "ALTER TABLE reminders ALTER COLUMN place_id SET NOT NULL"])
         migrated = open_database(path)
         try:
             self.assertEqual([(row["timezone"], row["source"]) for row in daily_overviews(migrated, )], [("UTC", None)])
             self.assertEqual(migrated.conn.execute("SELECT COUNT(*) AS n FROM daily_summaries").fetchone()["n"], 1)
             self.assertEqual([item["text"] for item in migrated.reminders.active()], ["Buy salt"])
             self.assertEqual(len(migrated.reminders.events()), 1)
-            self.assertEqual(migrated.conn.execute("PRAGMA foreign_key_check").fetchall(), [])
             named = create_reminder(migrated, {"text": "Get beans", "match_name": "Starbucks"})
             self.assertIsNone(named["place_id"])
         finally:
@@ -2355,7 +2362,7 @@ class StoreTests(unittest.TestCase):
             return rows
         errors = []
         def view():
-            db = open_database(Path(self.tmp.name) / "test.db")
+            db = open_database(self.url)
             try:
                 learn_paths(db, trips, start, end)
             except Exception as exc:
@@ -2851,18 +2858,72 @@ class StoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "query is required"):
             search_visits(self.db, "  ")
 
+    def test_a_sqlite_archive_is_copied_into_postgres(self):
+        # The oldest archives GeoLogs kept in SQLite: points only, before observations were kept apart.
+        import sqlite3
+        from geologs.services import migrate_sqlite
+        path = Path(self.tmp.name) / "old.db"
+        old = sqlite3.connect(path)
+        old.executescript("""
+            CREATE TABLE points (id INTEGER PRIMARY KEY, source TEXT NOT NULL, external_id TEXT, timestamp TEXT NOT NULL,
+                lat REAL NOT NULL, lon REAL NOT NULL, accuracy_m REAL, speed_mps REAL, speed_origin TEXT, mode TEXT NOT NULL);
+            CREATE TABLE places (id INTEGER PRIMARY KEY, name TEXT NOT NULL, lat REAL NOT NULL, lon REAL NOT NULL,
+                radius_m REAL NOT NULL DEFAULT 150, address TEXT);
+            CREATE TABLE reminders (id INTEGER PRIMARY KEY, text TEXT NOT NULL, place_id INTEGER, active INTEGER NOT NULL,
+                repeat INTEGER NOT NULL, cooldown_minutes INTEGER NOT NULL, created_at TEXT NOT NULL, last_triggered_at TEXT);
+            CREATE TABLE events (id INTEGER PRIMARY KEY, reminder_id INTEGER NOT NULL, point_id INTEGER NOT NULL,
+                triggered_at TEXT NOT NULL, webhook_status TEXT);
+            CREATE TABLE source_state (source TEXT PRIMARY KEY, point_id INTEGER NOT NULL);
+            CREATE TABLE observed_stays (id INTEGER PRIMARY KEY, source TEXT NOT NULL, start_point_id INTEGER NOT NULL,
+                end_point_id INTEGER NOT NULL, started_at TEXT NOT NULL, ended_at TEXT NOT NULL, lat REAL NOT NULL,
+                lon REAL NOT NULL, point_count INTEGER NOT NULL, ongoing INTEGER NOT NULL);
+            CREATE TABLE stay_processing_state (source TEXT PRIMARY KEY, last_point_id INTEGER NOT NULL,
+                last_timestamp TEXT NOT NULL, candidate TEXT NOT NULL);
+            CREATE TABLE geocode_cache (cache_key TEXT PRIMARY KEY, provider TEXT NOT NULL, value TEXT NOT NULL,
+                created_at TEXT NOT NULL);
+            CREATE TABLE reverse_regions (id INTEGER PRIMARY KEY, provider TEXT NOT NULL, center_lat REAL NOT NULL,
+                center_lon REAL NOT NULL, radius_m REAL NOT NULL, value TEXT NOT NULL, created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL);
+            CREATE TABLE path_exclusions (id INTEGER PRIMARY KEY, source TEXT NOT NULL, started_at TEXT NOT NULL,
+                ended_at TEXT NOT NULL, mode TEXT NOT NULL, distance_m REAL NOT NULL, created_at TEXT NOT NULL);
+            INSERT INTO places VALUES (1, 'Market', 41, -87.9, 120, NULL);
+            INSERT INTO reminders VALUES (1, 'Buy salt', 1, 1, 0, 1440, '2026-09-20T10:00:00+00:00', NULL);
+        """)
+        old.executemany("INSERT INTO points VALUES (?,?,?,?,?,?,?,?,?,?)", [
+            (minute + 1, "phone", None, f"2026-09-25T10:{minute:02d}:00+00:00", 41, -87.9, 5, None, None, "idle")
+            for minute in (0, 10, 20)])
+        old.commit()
+        old.close()
+        target = scratch_database(self)
+        counts = migrate_sqlite(path, target)
+        self.assertEqual((counts["points"], counts["point_observations"], counts["places"]), (3, 3, 1))
+        archive = open_database(target)
+        try:
+            self.assertEqual([place["name"] for place in archive.places.saved()], ["Market"])
+            self.assertEqual([item["text"] for item in archive.reminders.active()], ["Buy salt"])
+            self.assertEqual([stay["point_count"] for stay in stays(archive)], [3])  # stays are found on first open
+            # New rows continue after the copied ids instead of colliding with them.
+            ingest(archive, {"source": "phone", "timestamp": "2026-09-25T10:30:00Z", "lat": 41, "lon": -87.9})
+            ids = [point["id"] for point in archive.points.points(limit=None)]
+            self.assertEqual((len(ids), len(set(ids))), (4, 4))
+            self.assertGreater(ids[0], 3)
+        finally:
+            archive.close()
+        with self.assertRaisesRegex(ValueError, "must be empty"):
+            migrate_sqlite(path, target)
+
     def test_area_stay_migration_rebuilds_an_existing_archive(self):
-        path = Path(self.tmp.name) / "before-area-stays.db"
+        path = scratch_database(self)
         archive = open_database(path)
         ingest(archive, lake_run_day())
         archive.conn.execute("DELETE FROM observed_stays_v2 WHERE kind='area'")
-        archive.conn.execute("PRAGMA user_version=10")
         archive.commit()
         archive.close()
+        older_schema(path, 12, 14, 17, 18, 19, 20, 21)
         migrated = open_database(path)
         try:
             self.assertEqual([row["kind"] for row in reversed(stays(migrated, limit=None))], ["stationary", "area", "stationary"])
-            self.assertEqual(migrated.conn.execute("PRAGMA user_version").fetchone()[0], 18)
+            self.assertEqual(migrated._missing_migrations(STAY_REBUILDS), [])
         finally:
             migrated.close()
 
@@ -2906,7 +2967,8 @@ class AmbientTests(unittest.TestCase):
         module._weather.clear()
         module._reported.clear()
         self.tmp = tempfile.TemporaryDirectory()
-        self.db = open_database(Path(self.tmp.name) / "test.db")
+        self.url = scratch_database(self)
+        self.db = open_database(self.url)
         self.place = {"city": "Little Rock", "region": "Arkansas", "country": "United States", "country_code": "US"}
         self.rain = {"current": {"time": "2026-10-17T15:30", "code": 63, "is_day": True, "temperature_c": 14.0,
                                  "feels_like_c": 12.0, "humidity": 90, "wind_kmh": 20.0, "precipitation_mm": 1.2},
@@ -3021,6 +3083,101 @@ class AmbientTests(unittest.TestCase):
         self.assertTrue(photos[0]["url"].startswith("https://images.unsplash.com/a?ixid=1&w=2400"))
 
 
+class LateFixTests(unittest.TestCase):
+    """A fix that arrives late resumes stay detection from a checkpoint, with the same result as
+    reading every fix again in time order."""
+
+    def setUp(self):
+        self.url = scratch_database(self)
+        self.db = open_database(self.url)
+
+    def tearDown(self):
+        self.db.close()
+
+    @staticmethod
+    def long_day():
+        """7.5 hours: home, the market, a lake run, home, the market again, home (indices noted)."""
+        market, shore, run = shifted(HOME, 3000, 2000), shifted(LAKE, -500, 0), laps(LAKE, 500, 60, 9)
+        return minute_fixes([still(HOME, 90),             # 0-89 home
+                             line(HOME, market, 10),      # 90-99 drive
+                             still(market, 40),           # 100-139 market
+                             line(market, shore, 14),     # 140-153 drive
+                             run,                         # 154-213 run around the lake
+                             line(run[-1], HOME, 12),     # 214-225 drive
+                             still(HOME, 120),            # 226-345 home
+                             line(HOME, market, 10),      # 346-355 drive
+                             still(market, 25),           # 356-380 market
+                             line(market, HOME, 10),      # 381-390 drive
+                             still(HOME, 60)],            # 391-450 home
+                            start=datetime(2026, 9, 27, 6, tzinfo=timezone.utc))
+
+    def snapshot(self):
+        stays_found = self.db.rows("""SELECT source,kind,started_at,ended_at,ROUND(lat::numeric,7) AS lat,
+            ROUND(lon::numeric,7) AS lon,point_count,ongoing,activity,ROUND(distance_m::numeric,1) AS distance_m,
+            ROUND(radius_m::numeric,1) AS radius_m,went_elsewhere,start_observation_id,end_observation_id
+            FROM observed_stays_v2 ORDER BY started_at,kind""")
+        timeline = self.db.rows("""SELECT t.observation_id,t.role,s.start_observation_id AS stay
+            FROM timeline_fixes t LEFT JOIN observed_stays_v2 s ON s.id=t.stay_id ORDER BY t.observation_id""")
+        return stays_found, timeline, self.db.stays.state("phone")
+
+    def check(self, *late_ranges):
+        fixes = self.long_day()
+        late = {index for first, last in late_ranges for index in range(first, last + 1)}
+        on_time = [fix for index, fix in enumerate(fixes) if index not in late]
+        for start in range(0, len(on_time), 5):  # a phone sending every few minutes
+            ingest(self.db, on_time[start:start + 5])
+        with patch.object(self.db.stays, "delete_source", side_effect=AssertionError("found every stay again")):
+            for index in sorted(late):
+                ingest(self.db, fixes[index])
+        live = self.snapshot()
+        process_stays(self.db, rebuild=True)
+        self.db.commit()
+        self.assertEqual(live, self.snapshot())
+        return live
+
+    def test_a_late_fix_during_a_stay(self):
+        self.check((30, 40))
+
+    def test_late_fixes_during_a_drive(self):
+        stays_found, _, _ = self.check((95, 99))
+        self.assertTrue(any(stay["kind"] == "stationary" for stay in stays_found))
+
+    def test_most_of_a_stop_arriving_late(self):
+        self.check((105, 135))
+
+    def test_late_fixes_during_a_run(self):
+        stays_found, _, _ = self.check((160, 170))
+        self.assertIn("area", {stay["kind"] for stay in stays_found})
+
+    def test_late_fixes_in_the_last_hour_and_earlier_at_once(self):
+        self.check((50, 52), (200, 230), (370, 375))
+
+    def test_a_fix_older_than_every_checkpoint_finds_every_stay_again(self):
+        fixes = self.long_day()
+        for start in range(1, len(fixes), 5):
+            ingest(self.db, fixes[start:start + 5])
+        ingest(self.db, fixes[0])  # before the first checkpoint: the source starts over
+        live = self.snapshot()
+        process_stays(self.db, rebuild=True)
+        self.db.commit()
+        self.assertEqual(live, self.snapshot())
+
+    def test_checkpoints_are_hourly_for_a_week_then_daily(self):
+        start = datetime(2026, 9, 1, tzinfo=timezone.utc)
+        week = minute_fixes([still(HOME, 60 * 24 * 10)], start=start, hold=1)[::10]  # ten days, a fix every 10 minutes
+        for first in range(0, len(week), 500):
+            ingest(self.db, week[first:first + 500], process_analysis=False)
+        process_stays(self.db, rebuild=True)
+        self.db.commit()
+        taken = [row["last_timestamp"] for row in self.db.rows(
+            "SELECT last_timestamp FROM stay_checkpoints WHERE source='phone' ORDER BY last_timestamp")]
+        newest = datetime.fromisoformat(taken[-1])
+        older = [stamp for stamp in taken if datetime.fromisoformat(stamp) < newest - timedelta(days=7)]
+        recent = [stamp for stamp in taken if datetime.fromisoformat(stamp) >= newest - timedelta(days=7)]
+        self.assertEqual(len(older), len({stamp[:10] for stamp in older}))  # one a day
+        self.assertGreaterEqual(len(recent), 7 * 24 - 1)  # about one an hour
+
+
 class LiveServerCase(unittest.TestCase):
     """A real server on a free port, with a scratch database and known tokens."""
 
@@ -3028,18 +3185,20 @@ class LiveServerCase(unittest.TestCase):
         import threading
         from http.server import ThreadingHTTPServer
         self.tmp = tempfile.TemporaryDirectory()
-        self.db = str(Path(self.tmp.name) / "ingest.db")
-        self.env = patch.dict(os.environ, {"GEOLOGS_DB": self.db, "GEOLOGS_TOKEN": "main-token",
+        self.db = scratch_database(self)
+        self.env = patch.dict(os.environ, {"GEOLOGS_DATABASE_URL": self.db, "GEOLOGS_TOKEN": "main-token",
                                            "GEOLOGS_INGEST_TOKEN": "phone-token"})
         self.env.start()
-        for name in ("GEOLOGS_DATABASE_URL", "GEOLOGS_TOKEN_FILE", "GEOLOGS_WEBHOOK_URL"):
+        for name in ("GEOLOGS_TOKEN_FILE", "GEOLOGS_WEBHOOK_URL"):
             os.environ.pop(name, None)
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.pool = open_pool(self.db, size=4)
+        self.server = Server(("127.0.0.1", 0), self.pool)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
     def tearDown(self):
         self.server.shutdown()
         self.server.server_close()
+        self.pool.close()
         self.env.stop()
         self.tmp.cleanup()
 
@@ -3098,7 +3257,6 @@ class IngestTests(LiveServerCase):
         self.assertIn("/srv/secret.db is locked", log.getvalue())  # the server's owner still sees why
 
     def test_a_request_mistake_is_said_plainly(self):
-        import sqlite3
         from geologs.presentation.errors import input_message
         bearer = {"Authorization": "Bearer main-token"}
         self.assertEqual(self.send("POST", "/api/places", {"name": "Market", "lat": 41, "lon": -87.9}, bearer)[0], 200)
@@ -3106,7 +3264,7 @@ class IngestTests(LiveServerCase):
         self.assertEqual((status, body), (400, {"error": "you already have a place named market"}))
         self.assertEqual(self.send("POST", "/api/places/delete", {}, bearer)[1], {"error": "missing field: id"})
         # Whatever else a database refuses is never shown in its own words.
-        self.assertEqual(input_message(sqlite3.IntegrityError("UNIQUE constraint failed: places.name")),
+        self.assertEqual(input_message(psycopg.errors.UniqueViolation('duplicate key value violates unique constraint "places_name_ci"')),
                          "that conflicts with something already saved")
 
     def test_a_bad_content_length_is_refused_without_waiting_for_the_body(self):
@@ -3259,9 +3417,11 @@ class IngestTests(LiveServerCase):
         self.send("POST", "/api/ingest/generic?device=old", {"lat": 1, "lon": 2}, {"Authorization": "Bearer wrong"})
         self.send("POST", "/api/ingest/generic?device=phone", {"lat": 41, "lon": -87.9}, {"Authorization": "Bearer phone-token"})
         auth = {"Authorization": "Bearer main-token"}
+        self.send("POST", "/api/ingest/generic?device=tablet&token=main-token", {"lat": "x"})
         _, sources, _ = self.send("GET", "/api/sources", headers=auth)
-        self.assertEqual(sorted(device["device"] for device in sources["devices"]), ["generic:old", "generic:phone"])
-        status, _, _ = self.send("POST", "/api/ingest-devices/delete", {"kind": "generic", "device": "generic:old"}, auth)
+        # A request with a wrong token is no one's, so it is not listed (generic:old).
+        self.assertEqual(sorted(device["device"] for device in sources["devices"]), ["generic:phone", "generic:tablet"])
+        status, _, _ = self.send("POST", "/api/ingest-devices/delete", {"kind": "generic", "device": "generic:tablet"}, auth)
         self.assertEqual(status, 200)
         _, sources, _ = self.send("GET", "/api/sources", headers=auth)
         self.assertEqual([device["device"] for device in sources["devices"]], ["generic:phone"])
@@ -3308,7 +3468,8 @@ class IngestTests(LiveServerCase):
         self.assertEqual(self.send("GET", "/api/sources", headers=main)[1]["devices"], [])
         self.send("POST", "/api/ingest/owntracks", {"_type": "location", "lat": 41, "lon": -87.9, "tst": 1790514000},
                   {"Authorization": "Bearer phone-token", "X-Limit-U": "karun", "X-Limit-D": "pixel"})
-        # A second phone with the wrong token is still told apart by the name it sends.
+        # A phone with the wrong token is no one's: with many users, listing it would show one
+        # person's device names to another.
         self.send("POST", "/api/ingest/owntracks", {"_type": "location", "lat": 41, "lon": -87.9, "tst": 1790514060},
                   {"Authorization": "Bearer wrong", "X-Limit-U": "karun", "X-Limit-D": "ipad"})
         self.send("POST", "/api/ingest/overland?token=wrong", {"locations": []})
@@ -3316,10 +3477,10 @@ class IngestTests(LiveServerCase):
         status, value, _ = self.send("GET", "/api/sources", headers=main)
         self.assertEqual((status, value["ingest_token"]), (200, True))
         devices = {(item["kind"], item["device"]): item for item in value["devices"]}
-        pixel, ipad = devices[("owntracks", "owntracks:karun/pixel")], devices[("owntracks", "owntracks:karun/ipad")]
+        pixel = devices[("owntracks", "owntracks:karun/pixel")]
         self.assertEqual((pixel["last_status"], pixel["received"], pixel["last_message"]), (200, 1, None))
-        self.assertEqual((ipad["last_status"], ipad["last_message"], ipad["last_success_at"]), (401, "Wrong or missing token", None))
-        self.assertEqual((devices[("overland", "")]["last_status"]), 401)
+        self.assertNotIn(("owntracks", "owntracks:karun/ipad"), devices)
+        self.assertNotIn(("overland", ""), devices)
         self.assertEqual(devices[("generic", "generic:tasker")]["last_message"], "1 malformed fix skipped")
         sources = {item["source"]: item for item in value["sources"]}
         self.assertEqual(set(sources), {"owntracks:karun/pixel", "generic:tasker"})
@@ -3330,7 +3491,7 @@ class IngestTests(LiveServerCase):
         self.assertEqual(self.send("GET", "/api/sources", headers={"Authorization": "Bearer phone-token"})[0], 401)
 
     def test_unreachable_database_is_reported_not_a_dropped_connection(self):
-        with patch("geologs.presentation.http.open_database", side_effect=RuntimeError("password authentication failed for user \"geologs\"")):
+        with patch.object(self.pool, "open", side_effect=RuntimeError("password authentication failed for user \"geologs\"")):
             status, value, _ = self.send("GET", "/api/status", headers={"Authorization": "Bearer main-token"})
         self.assertEqual((status, value["error"]), (503, 'Database unavailable: password authentication failed for user "geologs"'))
 
@@ -3369,9 +3530,623 @@ class DeploymentTests(unittest.TestCase):
         app = compose[compose.index("\n  app:"):]
         passed = set(re.findall(r"^\s+([A-Z_]+):", app[app.index("environment:"):app.index("ports:")], re.M))
         # Set by the image (host, port), read from the mounted token file, or only for the command line.
-        elsewhere = {"GEOLOGS_HOST", "GEOLOGS_PORT", "GEOLOGS_INGEST_TOKEN", "GEOLOGS_DB", "GEOLOGS_ENV_FILE",
-                     "GEOLOGS_URL", "HA_URL", "HA_TOKEN", "HA_ENTITY"}
+        elsewhere = {"GEOLOGS_HOST", "GEOLOGS_PORT", "GEOLOGS_INGEST_TOKEN", "GEOLOGS_ENV_FILE"}
         self.assertEqual(read - passed - elsewhere, set())
+
+
+class ServerCapacityTests(LiveServerCase):
+    """Requests share a few database connections; a burst of clients is served, not refused."""
+
+    def test_requests_give_their_connection_back_even_when_they_fail(self):
+        bearer = {"Authorization": "Bearer main-token"}
+        for _ in range(3 * 4):  # three times the pool, so a single unreturned connection would block
+            self.assertEqual(self.send("GET", "/api/current", headers=bearer)[0], 200)
+            self.assertEqual(self.send("POST", "/api/places/delete", {}, bearer)[0], 400)
+            self.assertEqual(self.send("POST", "/api/points", {"lat": 999}, bearer)[0], 400)
+        # Nothing half-written was left on a connection for the next request to commit.
+        self.assertEqual(self.points(), [])
+
+    def test_a_burst_of_clients_is_served(self):
+        from concurrent.futures import ThreadPoolExecutor
+        bearer = {"Authorization": "Bearer main-token"}
+        self.assertGreaterEqual(Server.request_queue_size, 128)
+        with ThreadPoolExecutor(40) as clients:
+            statuses = list(clients.map(lambda _: self.send("GET", "/api/current", headers=bearer)[0], range(200)))
+        self.assertEqual(set(statuses), {200})
+
+    def test_a_request_waits_for_a_connection_then_says_the_database_is_busy(self):
+        import threading
+        busy = open_pool(self.db, size=2, timeout=0.5)
+        server = Server(("127.0.0.1", 0), busy)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        held = [busy.open(), busy.open()]
+        try:
+            import http.client
+            connection = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=10)
+            connection.request("GET", "/api/current", headers={"Authorization": "Bearer main-token"})
+            response = connection.getresponse()
+            body = json.loads(response.read())
+            connection.close()
+            self.assertEqual(response.status, 503)
+            self.assertIn("Database unavailable", body["error"])
+        finally:
+            for db in held:
+                db.close()
+            server.shutdown()
+            server.server_close()
+            busy.close()
+
+
+class AccountTests(LiveServerCase):
+    """Signing in with an email and password, and the tokens that stand for a user."""
+
+    def setUp(self):
+        super().setUp()
+        from geologs.services import accounts
+        accounts._attempts.clear()
+        db = open_database(self.db)
+        try:
+            self.bob = accounts.add_user(db, "Bob@example.com", "correct horse battery", name="Bob")
+            self.bob_token = accounts.create_api_token(db, self.bob["id"], "laptop")["token"]
+        finally:
+            db.close()
+
+    def sign_in(self, email, password):
+        status, body, response = self.send("POST", "/api/session", {"email": email, "password": password})
+        cookie = (response.getheader("Set-Cookie") or "").split(";", 1)[0]
+        return status, body, cookie
+
+    def test_a_user_signs_in_and_out_with_an_email_and_password(self):
+        status, body, cookie = self.sign_in("bob@EXAMPLE.com", "correct horse battery")
+        self.assertEqual((status, body["user"]["email"], body["user"]["role"]), (200, "Bob@example.com", "user"))
+        self.assertTrue(cookie.startswith("geologs_session=gls_"))
+        self.assertEqual(self.send("GET", "/api/me", headers={"Cookie": cookie})[1]["user"]["name"], "Bob")
+        self.assertEqual(self.send("DELETE", "/api/session", headers={"Cookie": cookie})[0], 200)
+        self.assertEqual(self.send("GET", "/api/me", headers={"Cookie": cookie})[0], 401)  # the session is gone, not just the cookie
+
+    def test_a_wrong_password_and_an_unknown_email_read_the_same(self):
+        wrong = self.sign_in("bob@example.com", "not the password")
+        unknown = self.sign_in("nobody@example.com", "not the password")
+        self.assertEqual((wrong[0], wrong[1]), (unknown[0], unknown[1]))
+        self.assertEqual(wrong[:2], (401, {"error": "wrong email or password"}))
+
+    def test_sign_in_waits_after_too_many_attempts(self):
+        for _ in range(10):
+            self.assertEqual(self.sign_in("bob@example.com", "guess guess guess")[0], 401)
+        self.assertEqual(self.sign_in("bob@example.com", "correct horse battery")[0], 429)
+
+    def test_a_disabled_user_is_signed_out_everywhere(self):
+        _, _, cookie = self.sign_in("bob@example.com", "correct horse battery")
+        db = open_database(self.db)
+        try:
+            db.users.set_disabled(self.bob["id"], "2026-10-01T00:00:00+00:00")
+            db.commit()
+        finally:
+            db.close()
+        self.assertEqual(self.send("GET", "/api/me", headers={"Cookie": cookie})[0], 401)
+        self.assertEqual(self.send("GET", "/api/me", headers={"Authorization": "Bearer " + self.bob_token})[0], 401)
+        self.assertEqual(self.sign_in("bob@example.com", "correct horse battery")[0], 401)
+
+    def test_the_owner_still_signs_in_with_the_server_token(self):
+        status, body, response = self.send("POST", "/api/session", {"token": "main-token"})
+        cookie = response.getheader("Set-Cookie").split(";", 1)[0]
+        self.assertEqual((status, body["user"]["id"]), (200, 1))
+        self.assertEqual(self.send("GET", "/api/me", headers={"Cookie": cookie})[1]["user"]["role"], "admin")
+        # A browser signed in before accounts keeps working, as the owner.
+        legacy = "geologs_session=" + Handler.session_value("main-token")
+        self.assertEqual(self.send("GET", "/api/me", headers={"Cookie": legacy})[1]["user"]["id"], 1)
+        self.assertEqual(self.send("POST", "/api/session", {"token": "wrong"})[0], 401)
+
+    def test_a_personal_token_reads_and_writes_as_its_user(self):
+        bob = {"Authorization": "Bearer " + self.bob_token}
+        self.assertEqual(self.send("GET", "/api/me", headers=bob)[1]["user"]["email"], "Bob@example.com")
+        self.assertEqual(self.send("POST", "/api/places", {"name": "Bob's", "lat": 35, "lon": -90}, bob)[0], 200)
+        main = {"Authorization": "Bearer main-token"}
+        self.assertEqual(self.send("GET", "/api/places", headers=main)[1], [])
+        self.assertEqual(self.send("GET", "/api/me", headers={"Authorization": "Bearer gla_madeup"})[0], 401)
+
+    def test_the_account_page_shows_and_ends_your_browsers(self):
+        _, _, laptop = self.sign_in("bob@example.com", "correct horse battery")
+        _, _, phone = self.sign_in("bob@example.com", "correct horse battery")
+        page = self.send("GET", "/api/account", headers={"Cookie": laptop})[1]
+        self.assertEqual((page["user"]["email"], page["user"]["has_password"]), ("Bob@example.com", True))
+        self.assertEqual(sorted(item["current"] for item in page["sessions"]), [False, True])
+        other = next(item["id"] for item in page["sessions"] if not item["current"])
+        self.assertEqual(self.send("POST", "/api/account/sessions/end", {"id": other}, {"Cookie": laptop})[0], 200)
+        self.assertEqual(self.send("GET", "/api/me", headers={"Cookie": phone})[0], 401)
+        self.assertEqual(self.send("GET", "/api/me", headers={"Cookie": laptop})[0], 200)
+
+    def test_changing_your_password_needs_the_old_one_and_signs_out_other_browsers(self):
+        _, _, laptop = self.sign_in("bob@example.com", "correct horse battery")
+        _, _, phone = self.sign_in("bob@example.com", "correct horse battery")
+        wrong = self.send("POST", "/api/account/password", {"current": "nope", "password": "a new long password"}, {"Cookie": laptop})
+        self.assertEqual(wrong[:2], (400, {"error": "your current password is wrong"}))
+        self.assertEqual(self.send("POST", "/api/account/password", {"current": "correct horse battery", "password": "short"},
+                                   {"Cookie": laptop})[0], 400)
+        changed = self.send("POST", "/api/account/password", {"current": "correct horse battery", "password": "a new long password"},
+                            {"Cookie": laptop})
+        self.assertEqual(changed[0], 200)
+        self.assertEqual(self.send("GET", "/api/me", headers={"Cookie": laptop})[0], 200)  # this browser stays in
+        self.assertEqual(self.send("GET", "/api/me", headers={"Cookie": phone})[0], 401)
+        self.assertEqual(self.sign_in("bob@example.com", "a new long password")[0], 200)
+
+    def test_the_owner_without_a_password_may_set_one_and_an_email(self):
+        owner = {"Authorization": "Bearer main-token"}
+        self.assertFalse(self.send("GET", "/api/account", headers=owner)[1]["user"]["has_password"])
+        self.assertEqual(self.send("POST", "/api/account/email", {"email": "bob@example.com"}, owner)[0], 400)  # taken
+        self.assertEqual(self.send("POST", "/api/account/email", {"email": "me@example.com"}, owner)[1]["user"]["email"], "me@example.com")
+        self.assertEqual(self.send("POST", "/api/account/password", {"password": "the owner's password"}, owner)[0], 200)
+        self.assertEqual(self.sign_in("me@example.com", "the owner's password")[1]["user"]["id"], 1)
+
+    def test_your_name_and_api_tokens(self):
+        _, _, cookie = self.sign_in("bob@example.com", "correct horse battery")
+        self.assertEqual(self.send("POST", "/api/account", {"name": "Robert"}, {"Cookie": cookie})[1]["name"], "Robert")
+        made = self.send("POST", "/api/account/tokens", {"name": "Claude Desktop"}, {"Cookie": cookie})[1]
+        self.assertTrue(made["token"].startswith("gla_"))
+        self.assertEqual(self.send("GET", "/api/me", headers={"Authorization": "Bearer " + made["token"]})[1]["user"]["name"], "Robert")
+        listed = self.send("GET", "/api/account", headers={"Cookie": cookie})[1]["api_tokens"]
+        self.assertEqual(sorted(item["name"] for item in listed), ["Claude Desktop", "laptop"])
+        self.assertNotIn(made["token"], json.dumps(listed))
+        self.assertEqual(self.send("POST", "/api/account/tokens/delete", {"id": made["id"]}, {"Cookie": cookie})[0], 200)
+        self.assertEqual(self.send("GET", "/api/me", headers={"Authorization": "Bearer " + made["token"]})[0], 401)
+
+    def test_the_sign_in_screen_learns_what_it_can_offer(self):
+        self.assertEqual(self.send("GET", "/api/sign-in-options")[1], {"email": False, "token": True, "signup": False})
+
+    def test_passwords_and_tokens_are_kept_only_as_hashes(self):
+        with psycopg.connect(self.db) as raw:
+            stored = " ".join(str(value) for row in raw.execute(
+                "SELECT u.password_hash, t.token_hash FROM users u JOIN api_tokens t ON t.user_id=u.id").fetchall() for value in row)
+        self.assertNotIn("correct horse battery", stored)
+        self.assertNotIn(self.bob_token, stored)
+        self.assertTrue(stored.startswith("scrypt$"))
+
+
+class MailTests(LiveServerCase):
+    """Invites, password resets and address checks, by email through an outbox."""
+
+    def setUp(self):
+        super().setUp()
+        from geologs.services import accounts, mail
+        accounts._attempts.clear()
+        self.mail_env = patch.dict(os.environ, {"GEOLOGS_PUBLIC_URL": "https://geologs.example.com/",
+                                                "GEOLOGS_SMTP_HOST": "smtp.example.com",
+                                                "GEOLOGS_SMTP_FROM": "GeoLogs <geologs@example.com>"})
+        self.mail_env.start()
+        self.addCleanup(self.mail_env.stop)
+        self.sent = []
+        sender = patch("geologs.integrations.email.send", side_effect=lambda to, subject, body: self.sent.append((to, subject, body)))
+        sender.start()
+        self.addCleanup(sender.stop)
+        self.mail = mail
+        db = open_database(self.db)
+        try:
+            self.bob = accounts.add_user(db, "bob@example.com", "correct horse battery", name="Bob")
+        finally:
+            db.close()
+
+    def deliver(self):
+        db = open_database(self.db)
+        try:
+            return self.mail.deliver_due(db)
+        finally:
+            db.close()
+
+    def link_token(self, kind):
+        to, subject, body = self.sent[-1]
+        return re.search(r"https://geologs\.example\.com/#" + kind + r"=(\S+)", body).group(1)
+
+    def sign_in(self, password):
+        status, _, response = self.send("POST", "/api/session", {"email": "bob@example.com", "password": password})
+        return status, (response.getheader("Set-Cookie") or "").split(";", 1)[0]
+
+    def test_a_forgotten_password_is_reset_from_an_emailed_link(self):
+        _, old_session = self.sign_in("correct horse battery")
+        self.assertEqual(self.send("POST", "/api/password/forgot", {"email": "BOB@example.com"})[1], {"ok": True})
+        self.assertEqual(self.deliver(), {"sent": 1, "failed": 0})
+        to, subject, body = self.sent[-1]
+        self.assertEqual((to, subject), ("bob@example.com", "Reset your GeoLogs password"))
+        token = self.link_token("reset")
+        status, body, _ = self.send("POST", "/api/password/reset", {"token": token, "password": "a brand new password"})
+        self.assertEqual((status, body["user"]["email"]), (200, "bob@example.com"))
+        self.assertEqual(self.send("GET", "/api/me", headers={"Cookie": old_session})[0], 401)  # signed out everywhere
+        self.assertEqual(self.sign_in("correct horse battery")[0], 401)
+        self.assertEqual(self.sign_in("a brand new password")[0], 200)
+        self.assertEqual(self.send("POST", "/api/password/reset", {"token": token, "password": "another password!"})[0], 400)
+        with psycopg.connect(self.db) as raw:
+            row = raw.execute("SELECT u.email_verified_at, o.body FROM users u, outbox o WHERE u.id=%s", (self.bob["id"],)).fetchone()
+        self.assertIsNotNone(row[0])  # the link reached the address
+        self.assertEqual(row[1], "")  # a sent message's text, with its link, is not kept
+
+    def test_asking_for_a_reset_says_the_same_whether_or_not_there_is_an_account(self):
+        self.assertEqual(self.send("POST", "/api/password/forgot", {"email": "nobody@example.com"})[:2], (200, {"ok": True}))
+        self.assertEqual(self.deliver(), {"sent": 0, "failed": 0})
+        for _ in range(5):
+            self.assertEqual(self.send("POST", "/api/password/forgot", {"email": "bob@example.com"})[0], 200)
+        self.assertEqual(self.send("POST", "/api/password/forgot", {"email": "bob@example.com"})[0], 429)
+
+    def test_a_reset_link_expires(self):
+        self.send("POST", "/api/password/forgot", {"email": "bob@example.com"})
+        self.deliver()
+        with psycopg.connect(self.db) as raw:
+            raw.execute("UPDATE email_tokens SET expires_at='2000-01-01T00:00:00+00:00'")
+        status, body, _ = self.send("POST", "/api/password/reset", {"token": self.link_token("reset"), "password": "a brand new password"})
+        self.assertEqual(status, 400)
+        self.assertIn("expired", body["error"])
+
+    def test_an_admin_invites_someone_who_then_makes_an_account(self):
+        admin = {"Authorization": "Bearer main-token"}
+        status, made, _ = self.send("POST", "/api/invites", {"email": "carol@example.com"}, admin)
+        self.assertEqual((status, made["emailed"], made["role"]), (200, True, "user"))
+        self.assertTrue(made["link"].startswith("https://geologs.example.com/#invite=gli_"))
+        bob = self.send("POST", "/api/session", {"email": "bob@example.com", "password": "correct horse battery"})[2]
+        bob_cookie = bob.getheader("Set-Cookie").split(";", 1)[0]
+        self.assertEqual(self.send("POST", "/api/invites", {"email": "dave@example.com"}, {"Cookie": bob_cookie})[0], 403)
+        self.assertEqual(self.send("POST", "/api/invites", {"email": "bob@example.com"}, admin)[0], 400)  # already has an account
+        self.deliver()
+        token = self.link_token("invite")
+        self.assertEqual(self.send("GET", "/api/invite?token=" + token)[1]["email"], "carol@example.com")
+        self.assertEqual([item["email"] for item in self.send("GET", "/api/invites", headers=admin)[1]], ["carol@example.com"])
+        status, body, response = self.send("POST", "/api/invites/accept", {"token": token, "password": "carol's password", "name": "Carol"})
+        self.assertEqual((status, body["user"]["role"]), (200, "user"))
+        cookie = response.getheader("Set-Cookie").split(";", 1)[0]
+        self.assertEqual(self.send("GET", "/api/me", headers={"Cookie": cookie})[1]["user"]["name"], "Carol")  # signed in
+        self.assertEqual(self.send("POST", "/api/invites/accept", {"token": token, "password": "carol's password"})[0], 400)
+        self.assertEqual(self.send("GET", "/api/invite?token=" + token)[0], 404)
+
+    def test_an_address_is_confirmed_from_an_emailed_link(self):
+        _, cookie = self.sign_in("correct horse battery")
+        self.assertEqual(self.send("POST", "/api/email/verify/send", {}, {"Cookie": cookie})[1], {"sent": True})
+        self.deliver()
+        status, body, _ = self.send("POST", "/api/email/verify", {"token": self.link_token("verify")})
+        self.assertEqual(status, 200)
+        self.assertEqual(self.send("POST", "/api/email/verify/send", {}, {"Cookie": cookie})[1], {"sent": False})  # already confirmed
+
+    def test_a_failing_mail_server_is_tried_again_later_then_given_up(self):
+        self.send("POST", "/api/password/forgot", {"email": "bob@example.com"})
+        with patch("geologs.integrations.email.send", side_effect=OSError("connection refused")):
+            now = datetime.now(timezone.utc)
+            db = open_database(self.db)
+            try:
+                for attempt in range(self.mail.MAX_ATTEMPTS):
+                    self.assertEqual(self.mail.deliver_due(db, now + timedelta(hours=attempt * 6))["failed"], 1)
+                self.assertEqual(self.mail.deliver_due(db, now + timedelta(days=3))["failed"], 0)  # given up
+            finally:
+                db.close()
+        with psycopg.connect(self.db) as raw:
+            attempts, failed, body, error = raw.execute("SELECT attempts,failed_at,body,last_error FROM outbox").fetchone()
+        self.assertEqual((attempts, body), (self.mail.MAX_ATTEMPTS, ""))
+        self.assertIsNotNone(failed)
+        self.assertIn("connection refused", error)
+
+    def test_without_a_mail_server_an_invite_link_is_still_given_to_the_admin(self):
+        with patch.dict(os.environ, {"GEOLOGS_SMTP_HOST": ""}):
+            made = self.send("POST", "/api/invites", {"email": "erin@example.com"}, {"Authorization": "Bearer main-token"})[1]
+            self.assertEqual(self.send("POST", "/api/password/forgot", {"email": "bob@example.com"})[1], {"ok": True})
+            self.assertFalse(self.send("GET", "/api/me", headers={"Authorization": "Bearer main-token"})[1]["can_email"])
+        self.assertFalse(made["emailed"])
+        self.assertTrue(made["link"].startswith("https://geologs.example.com/#invite="))
+        self.assertEqual(self.deliver(), {"sent": 0, "failed": 0})
+
+
+
+class SmtpTests(unittest.TestCase):
+    """What GeoLogs says to the mail server."""
+
+    def test_mail_goes_through_starttls_with_the_configured_login(self):
+        from geologs.integrations import email
+        settings = {"GEOLOGS_SMTP_HOST": "smtp.example.com", "GEOLOGS_SMTP_FROM": "GeoLogs <geologs@example.com>",
+                    "GEOLOGS_SMTP_USERNAME": "geologs", "GEOLOGS_SMTP_PASSWORD": "secret"}
+        with patch.dict(os.environ, settings), patch("geologs.integrations.email.smtplib.SMTP") as smtp:
+            email.send("carol@example.com", "Hello", "Body text")
+        server = smtp.return_value  # a real SMTP object is its own context manager
+        self.assertEqual(smtp.call_args.args[:2], ("smtp.example.com", 587))
+        server.starttls.assert_called_once()
+        server.login.assert_called_once_with("geologs", "secret")
+        message = server.send_message.call_args.args[0]
+        self.assertEqual((message["To"], message["From"], message["Subject"]),
+                         ("carol@example.com", "GeoLogs <geologs@example.com>", "Hello"))
+
+    def test_ssl_and_a_custom_port(self):
+        from geologs.integrations import email
+        settings = {"GEOLOGS_SMTP_HOST": "smtp.example.com", "GEOLOGS_SMTP_FROM": "geologs@example.com",
+                    "GEOLOGS_SMTP_SECURITY": "ssl"}
+        with patch.dict(os.environ, settings), patch("geologs.integrations.email.smtplib.SMTP_SSL") as smtp:
+            email.send("carol@example.com", "Hello", "Body text")
+        self.assertEqual(smtp.call_args.args[:2], ("smtp.example.com", 465))
+        smtp.return_value.login.assert_not_called()
+
+
+class AdminTests(LiveServerCase):
+    """The admin portal: accounts, sign-up, the audit log and the server's health; never locations."""
+
+    def setUp(self):
+        super().setUp()
+        from geologs.services import accounts
+        accounts._attempts.clear()
+        self.admin = {"Authorization": "Bearer main-token"}  # the owner, an admin
+        db = open_database(self.db)
+        try:
+            self.bob = accounts.add_user(db, "bob@example.com", "correct horse battery", name="Bob")
+            self.bob_auth = {"Authorization": "Bearer " + accounts.create_api_token(db, self.bob["id"], "t")["token"]}
+        finally:
+            db.close()
+        fixes = [{"source": "phone", "lat": 41.4321, "lon": -87.6543, "timestamp": f"2026-10-01T12:{minute:02d}:00Z"}
+                 for minute in range(20)]
+        self.send("POST", "/api/points", fixes, self.bob_auth)
+
+    def count(self):
+        """Count every user's archive, as the background worker does."""
+        from geologs.services.admin import refresh_user_stats
+        db = open_database(self.db)
+        try:
+            for user_id in db.users.ids():
+                db.as_user(user_id)
+                refresh_user_stats(db, force=True)
+        finally:
+            db.close()
+
+    def test_only_admins_reach_the_portal(self):
+        for path in ("/api/admin/users", "/api/admin/audit", "/api/admin/health"):
+            self.assertEqual(self.send("GET", path, headers=self.bob_auth)[0], 403, path)
+            self.assertEqual(self.send("GET", path, headers=self.admin)[0], 200, path)
+        self.assertEqual(self.send("POST", "/api/admin/users/role", {"id": self.bob["id"], "role": "admin"}, self.bob_auth)[0], 403)
+
+    def test_admins_see_counts_but_never_locations(self):
+        self.count()
+        users = {row["email"]: row for row in self.send("GET", "/api/admin/users", headers=self.admin)[1]}
+        bob = users["bob@example.com"]
+        self.assertEqual((bob["fixes"], bob["sources"], bob["api_tokens"]), (20, 1, 1))
+        self.assertEqual(bob["last_fix"], "2026-10-01T12:19:00+00:00")
+        text = json.dumps(users)
+        self.assertNotIn("41.4321", text)
+        self.assertNotIn("-87.6543", text)
+        self.assertNotIn("password_hash", text)
+
+    def test_counts_follow_new_fixes(self):
+        from geologs.services.admin import refresh_user_stats
+        db = open_database(self.db, user_id=self.bob["id"])
+        try:
+            self.assertEqual(refresh_user_stats(db)["fixes"], 20)
+            self.assertIsNone(refresh_user_stats(db))  # nothing new: not counted again
+            self.send("POST", "/api/points", {"source": "phone", "lat": 41.4321, "lon": -87.6543,
+                                              "timestamp": "2026-10-01T13:00:00Z"}, self.bob_auth)
+            self.assertIsNone(refresh_user_stats(db))  # new, but counted moments ago
+            with psycopg.connect(self.db) as raw:
+                raw.execute("UPDATE user_stats SET updated_at='2000-01-01T00:00:00+00:00'")
+            self.assertEqual(refresh_user_stats(db)["fixes"], 21)
+        finally:
+            db.close()
+
+    def test_roles_and_the_last_admin(self):
+        self.assertEqual(self.send("POST", "/api/admin/users/role", {"id": 1, "role": "user"}, self.admin)[0], 400)
+        self.assertEqual(self.send("POST", "/api/admin/users/role", {"id": self.bob["id"], "role": "admin"}, self.admin)[1]["role"], "admin")
+        self.assertEqual(self.send("GET", "/api/admin/users", headers=self.bob_auth)[0], 200)  # Bob is an admin now
+        self.assertEqual(self.send("POST", "/api/admin/users/role", {"id": self.bob["id"], "role": "user"}, self.admin)[0], 200)
+
+    def test_disabling_signs_a_user_out_and_spares_the_owner(self):
+        self.assertEqual(self.send("POST", "/api/admin/users/disable", {"id": self.bob["id"]}, self.admin)[0], 200)
+        self.assertEqual(self.send("GET", "/api/me", headers=self.bob_auth)[0], 401)
+        self.assertEqual(self.send("POST", "/api/admin/users/disable", {"id": 1}, self.admin)[0], 400)
+        self.assertEqual(self.send("POST", "/api/admin/users/disable", {"id": self.bob["id"], "disabled": False}, self.admin)[0], 200)
+        self.assertEqual(self.send("GET", "/api/me", headers=self.bob_auth)[0], 200)
+
+    def test_a_reset_link_for_a_user(self):
+        with patch.dict(os.environ, {"GEOLOGS_PUBLIC_URL": "https://geologs.example.com"}):
+            made = self.send("POST", "/api/admin/users/reset", {"id": self.bob["id"]}, self.admin)[1]
+        self.assertFalse(made["emailed"])  # no mail server here: the admin passes the link on
+        status, _, _ = self.send("POST", "/api/password/reset", {"token": made["token"], "password": "reset by an admin"})
+        self.assertEqual(status, 200)
+
+    def test_deleting_a_user_erases_everything_of_theirs(self):
+        wrong = self.send("POST", "/api/admin/users/delete", {"id": self.bob["id"], "email": "someone@else"}, self.admin)
+        self.assertEqual(wrong[0], 400)
+        self.assertEqual(self.send("POST", "/api/admin/users/delete", {"id": 1, "email": ""}, self.admin)[0], 400)
+        self.assertEqual(self.send("POST", "/api/admin/users/delete", {"id": self.bob["id"], "email": "BOB@example.com"}, self.admin)[0], 200)
+        with psycopg.connect(self.db) as raw:
+            left = raw.execute("""SELECT (SELECT COUNT(*) FROM point_observations WHERE user_id=%s)
+                + (SELECT COUNT(*) FROM points WHERE user_id=%s) + (SELECT COUNT(*) FROM api_tokens WHERE user_id=%s)""",
+                               (self.bob["id"],) * 3).fetchone()[0]
+        self.assertEqual(left, 0)
+        self.assertEqual(self.send("GET", "/api/me", headers=self.bob_auth)[0], 401)
+
+    def test_open_sign_up_is_off_until_an_admin_turns_it_on(self):
+        new = {"email": "erin@example.com", "password": "erin's password", "name": "Erin"}
+        self.assertEqual(self.send("POST", "/api/signup", new)[0], 403)
+        self.assertEqual(self.send("POST", "/api/admin/signup", {"mode": "open"}, self.admin)[1], {"signup": "open"})
+        self.assertTrue(self.send("GET", "/api/sign-in-options")[1]["signup"])
+        status, body, response = self.send("POST", "/api/signup", new)
+        self.assertEqual((status, body["user"]["role"]), (200, "user"))
+        cookie = response.getheader("Set-Cookie").split(";", 1)[0]
+        self.assertEqual(self.send("GET", "/api/me", headers={"Cookie": cookie})[1]["user"]["name"], "Erin")
+        self.assertEqual(self.send("POST", "/api/signup", new)[0], 400)  # that email has an account now
+
+    def test_every_admin_action_is_logged(self):
+        self.send("POST", "/api/admin/users/role", {"id": self.bob["id"], "role": "admin"}, self.admin)
+        self.send("POST", "/api/invites", {"email": "carol@example.com"}, self.admin)
+        self.send("POST", "/api/admin/signup", {"mode": "open"}, self.admin)
+        log = self.send("GET", "/api/admin/audit", headers=self.admin)[1]
+        self.assertEqual([entry["action"] for entry in log], ["sign-up", "invite", "role"])
+        self.assertEqual((log[2]["target_email"], log[2]["details"]), ("bob@example.com", {"from": "user", "to": "admin"}))
+        self.assertEqual(log[1]["target_email"], "carol@example.com")
+
+    def test_the_server_page_shows_failed_attempts_jobs_and_the_database(self):
+        self.send("POST", "/api/ingest/generic?device=stranger", {"lat": 1, "lon": 2}, {"Authorization": "Bearer wrong"})
+        health = self.send("GET", "/api/admin/health", headers=self.admin)[1]
+        self.assertEqual([(item["device"], item["status"]) for item in health["failed_attempts"]], [("generic:stranger", 401)])
+        self.assertGreater(health["database"]["total"], 0)
+        self.assertEqual((health["signup"], health["email"]["can_send"]), ("invite", False))
+        self.send("POST", "/api/admin/failures/clear", {}, self.admin)
+        self.assertEqual(self.send("GET", "/api/admin/health", headers=self.admin)[1]["failed_attempts"], [])
+
+
+class TwoFactorTests(LiveServerCase):
+    """Two-factor sign-in with an authenticator app, and recovery codes."""
+
+    def setUp(self):
+        super().setUp()
+        from geologs.services import accounts
+        accounts._attempts.clear()
+        db = open_database(self.db)
+        try:
+            accounts.add_user(db, "bob@example.com", "correct horse battery")
+        finally:
+            db.close()
+        _, _, response = self.send("POST", "/api/session", {"email": "bob@example.com", "password": "correct horse battery"})
+        self.cookie = {"Cookie": response.getheader("Set-Cookie").split(";", 1)[0]}
+
+    def code(self, offset=0):
+        import time as clock
+        from geologs.domain.two_factor import STEP_SECONDS, code_at
+        return code_at(self.secret, int(clock.time()) // STEP_SECONDS + offset)
+
+    def sign_in(self, code=None):
+        body = {"email": "bob@example.com", "password": "correct horse battery"}
+        if code is not None:
+            body["code"] = code
+        return self.send("POST", "/api/session", body)[:2]
+
+    def turn_on(self):
+        self.secret = self.send("POST", "/api/account/2fa/begin", {}, self.cookie)[1]["secret"]
+        return self.send("POST", "/api/account/2fa/confirm", {"code": self.code()}, self.cookie)[1]["recovery_codes"]
+
+    def test_signing_in_asks_for_a_code_that_works_once(self):
+        self.turn_on()
+        self.assertEqual(self.sign_in(), (401, {"error": "enter the code from your authenticator app", "needs_code": True}))
+        self.assertEqual(self.sign_in("000000")[0], 401)
+        code = self.code(1)  # the next step: unused, and within the drift allowed
+        self.assertEqual(self.sign_in(code)[0], 200)
+        self.assertEqual(self.sign_in(code)[0], 401)  # a code works once
+        self.assertTrue(self.send("GET", "/api/account", headers=self.cookie)[1]["two_factor"]["enabled"])
+
+    def test_a_recovery_code_works_once(self):
+        codes = self.turn_on()
+        self.assertEqual(len(codes), 8)
+        self.assertEqual(self.sign_in(codes[0].upper())[0], 200)
+        self.assertEqual(self.sign_in(codes[0])[0], 401)
+        self.assertEqual(self.send("GET", "/api/account", headers=self.cookie)[1]["two_factor"]["recovery_codes_left"], 7)
+
+    def test_turning_it_off_needs_the_password(self):
+        self.turn_on()
+        self.assertEqual(self.send("POST", "/api/account/2fa/stop", {"current": "nope"}, self.cookie)[0], 400)
+        self.assertEqual(self.send("POST", "/api/account/2fa/stop", {"current": "correct horse battery"}, self.cookie)[0], 200)
+        self.assertEqual(self.sign_in()[0], 200)
+
+    def test_a_wrong_code_does_not_turn_it_on(self):
+        self.secret = self.send("POST", "/api/account/2fa/begin", {}, self.cookie)[1]["secret"]
+        self.assertEqual(self.send("POST", "/api/account/2fa/confirm", {"code": "123456"}, self.cookie)[0], 400)
+        self.assertEqual(self.sign_in()[0], 200)  # still off
+
+
+class IsolationTests(LiveServerCase):
+    """Two users with the same tracker name and times, in different towns, never see each other.
+
+    Each asks every read route and MCP tool, naming the other's coordinates and ids, and finds
+    nothing of theirs; writes aimed at the other's rows change nothing.
+    """
+    ALPHA, BRAVO = (41.1234, -87.4321), (35.5678, -90.8765)
+    # Routes that ask outside services (the places provider, the weather), which these tests leave alone.
+    OUTSIDE = {"/api/geocode", "/api/geocode/place", "/api/reverse", "/api/nearby-places", "/api/ambient"}
+
+    def setUp(self):
+        super().setUp()
+        from geologs.services import accounts
+        db = open_database(self.db)
+        try:
+            bob = accounts.add_user(db, "bob@example.com", "correct horse battery")
+            self.bob = {"Authorization": "Bearer " + accounts.create_api_token(db, bob["id"], "test")["token"]}
+        finally:
+            db.close()
+        self.alice = {"Authorization": "Bearer main-token"}  # the owner
+        self.ids = {}
+        for who, headers, (lat, lon), word in (("alice", self.alice, self.ALPHA, "Alpha"), ("bob", self.bob, self.BRAVO, "Bravo")):
+            fixes = [{"source": "phone", "external_id": f"fix-{minute}", "lat": lat, "lon": lon, "accuracy_m": 5,
+                      "timestamp": f"2026-10-01T12:{minute:02d}:00Z"} for minute in range(40)]
+            self.assertEqual(self.send("POST", "/api/points", fixes, headers)[1]["inserted"], 40)
+            place = self.send("POST", "/api/places", {"name": f"{word} Secret", "lat": lat, "lon": lon}, headers)[1]
+            reminder = self.send("POST", "/api/reminders", {"text": f"{word.lower()} secret note", "place_id": place["id"]}, headers)[1]
+            label = self.send("POST", "/api/place-labels", {"name": f"{word} Label", "lat": lat, "lon": lon,
+                                                            "address": f"{word} Street"}, headers)[1]
+            token = self.send("POST", "/api/ingest-tokens", {"name": f"{word} phone"}, headers)[1]
+            self.ids[who] = {"place": place["id"], "reminder": reminder["id"], "label": label["id"], "token": token["id"],
+                             "lat": lat, "lon": lon}
+        self.send("POST", "/api/settings", {"units": "imperial"}, self.alice)
+
+    def markers(self, who):
+        word, (lat, lon) = ("Alpha", self.ALPHA) if who == "alice" else ("Bravo", self.BRAVO)
+        return (word, word.lower(), str(lat), str(lon))
+
+    def assert_none_of(self, who, text, where):
+        for marker in self.markers(who):
+            self.assertNotIn(marker, text, f"{who}'s {marker!r} leaked into {where}")
+
+    def get_routes(self):
+        source = (Path(__file__).resolve().parent.parent / "src/geologs/presentation/http.py").read_text()
+        reads = source[source.index("def do_GET"):source.index("def do_POST")]
+        return sorted(set(re.findall(r'url\.path == "(/api/[^"]+)"', reads)) - self.OUTSIDE)
+
+    def test_every_read_route_shows_only_your_own(self):
+        routes = self.get_routes()
+        self.assertGreater(len(routes), 35)
+        for reader, other in (("bob", "alice"), ("alice", "bob")):
+            headers, theirs = (self.bob, self.ids["alice"]) if reader == "bob" else (self.alice, self.ids["bob"])
+            query = {"date": "2026-10-01", "end_date": "2026-10-01", "timezone": "UTC", "start": "2026-10-01T00:00:00Z",
+                     "end": "2026-10-02T00:00:00Z", "lat": theirs["lat"], "lon": theirs["lon"], "radius_m": 5000,
+                     "place_id": theirs["place"], "id": theirs["place"], "q": "secret", "limit": 500}
+            from urllib.parse import urlencode
+            for route in routes:
+                status, body, _ = self.send("GET", route + "?" + urlencode(query), headers=headers)
+                self.assertIn(status, (200, 400, 403, 404), route)  # 403: an admin-only route
+                self.assert_none_of(other, json.dumps(body, default=str), f"{reader}'s {route}")
+        # Not vacuous: each does see their own.
+        for reader, headers, word in (("bob", self.bob, "Bravo"), ("alice", self.alice, "Alpha")):
+            self.assertIn(f"{word} Secret", json.dumps(self.send("GET", "/api/places", headers=headers)[1]))
+            day = self.send("GET", "/api/day?date=2026-10-01&timezone=UTC", headers=headers)[1]
+            self.assertEqual(day["points"], 40)
+        self.assertEqual(self.send("GET", "/api/settings", headers=self.bob)[1]["units"], "metric")
+
+    def test_every_read_tool_shows_only_your_own(self):
+        mcp = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+        writes = {"save_place", "delete_place", "set_place_label", "set_travel_mode", "remove_place_label",
+                  "create_reminder", "cancel_reminder", "ingest_location", "geocode_address", "list_nearby_places",
+                  "reverse_geocode"}
+        values = {"start": "2026-10-01T00:00:00Z", "end": "2026-10-02T00:00:00Z", "date": "2026-10-01",
+                  "end_date": "2026-10-01", "timestamp": "2026-10-01T12:10:00Z", "radius_m": 5000, "query": "secret",
+                  "limit": 100, "days": 3650, "timezone": "UTC", "since_id": 0, "offset": 0}
+        listed = self.send("POST", "/mcp", {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, {**mcp, **self.bob})[1]
+        tools = [tool for tool in listed["result"]["tools"] if tool["name"] not in writes]
+        self.assertGreater(len(tools), 20)
+        for reader, other in (("bob", "alice"), ("alice", "bob")):
+            headers, theirs = (self.bob, self.ids["alice"]) if reader == "bob" else (self.alice, self.ids["bob"])
+            for tool in tools:
+                arguments = {name: values.get(name, {"lat": theirs["lat"], "lon": theirs["lon"], "place_id": theirs["place"],
+                                                      "id": theirs["place"]}.get(name))
+                             for name in tool["inputSchema"]["properties"]}
+                arguments = {name: value for name, value in arguments.items() if value is not None}
+                call = {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": tool["name"], "arguments": arguments}}
+                body = self.send("POST", "/mcp", call, {**mcp, **headers})[1]
+                self.assert_none_of(other, json.dumps(body, default=str), f"{reader}'s {tool['name']}")
+
+    def test_writes_aimed_at_another_users_rows_change_nothing(self):
+        alice = self.ids["alice"]
+        for path, payload in (("/api/places/delete", {"id": alice["place"]}),
+                              ("/api/reminders/cancel", {"id": alice["reminder"]}),
+                              ("/api/place-labels/delete", {"id": alice["label"]}),
+                              ("/api/ingest-tokens/delete", {"id": alice["token"]}),
+                              ("/api/places", {"id": alice["place"], "name": "Taken", "lat": 1, "lon": 1})):
+            self.send("POST", path, payload, self.bob)
+        self.assertEqual([place["name"] for place in self.send("GET", "/api/places", headers=self.alice)[1]], ["Alpha Secret"])
+        self.assertEqual([item["text"] for item in self.send("GET", "/api/reminders", headers=self.alice)[1]], ["alpha secret note"])
+        self.assertEqual([label["name"] for label in self.send("GET", "/api/place-labels", headers=self.alice)[1]], ["Alpha Label"])
+        self.assertEqual(len(self.send("GET", "/api/ingest-tokens", headers=self.alice)[1]["tokens"]), 1)
+
+    def test_a_device_token_sends_as_the_user_who_made_it(self):
+        token = self.send("POST", "/api/ingest-tokens", {"name": "bob's tablet"}, self.bob)[1]["token"]
+        self.assertEqual(self.send("POST", f"/api/ingest/generic?token={token}",
+                                   {"lat": 35.6, "lon": -90.9, "device": "tablet"})[0], 200)
+        sources = lambda headers: {item["source"] for item in self.send("GET", "/api/sources", headers=headers)[1]["sources"]}
+        self.assertIn("generic:tablet", sources(self.bob))
+        self.assertNotIn("generic:tablet", sources(self.alice))
 
 
 class WebAppTests(LiveServerCase):

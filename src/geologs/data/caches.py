@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import math
 from datetime import datetime, timedelta, timezone
 
 from .. import config
@@ -33,7 +32,7 @@ class CachesRepository(Repository):
 
     def save_analysis(self, cache_key, watermark, value):
         self._keep("""INSERT INTO analysis_cache(cache_key,watermark,value,created_at) VALUES (?,?,?,?)
-            ON CONFLICT(cache_key) DO UPDATE SET watermark=excluded.watermark,value=excluded.value,created_at=excluded.created_at""",
+            ON CONFLICT(user_id,cache_key) DO UPDATE SET watermark=excluded.watermark,value=excluded.value,created_at=excluded.created_at""",
             (cache_key, watermark, json.dumps(value, separators=(",", ":")), parse_time(None)))
 
     def clear_analysis(self):
@@ -50,20 +49,13 @@ class CachesRepository(Repository):
             (key, provider, json.dumps(value), parse_time(None)))
 
     def reverse_region(self, provider, lat, lon):
-        """Use an indexed bounding box, then an exact distance check for a safe cache hit."""
+        """Regions near the position (indexed), then an exact distance check for a safe cache hit."""
         now = parse_time(None)
-        if self.db.postgres:
-            candidates = self.rows("""SELECT id,provider,center_lat,center_lon,radius_m,value,created_at,expires_at
-                FROM reverse_regions WHERE provider=? AND expires_at>?
-                  AND ST_DWithin(center,ST_SetSRID(ST_MakePoint(?,?),4326)::geography,30)
-                  AND ST_DWithin(center,ST_SetSRID(ST_MakePoint(?,?),4326)::geography,radius_m)
-                ORDER BY id DESC LIMIT 64""", (provider, now, lon, lat, lon, lat))
-        else:
-            candidates = self.rows("""SELECT r.* FROM reverse_regions r
-            JOIN reverse_regions_spatial s ON s.id=r.id
-            WHERE r.provider=? AND r.expires_at>?
-              AND s.min_lat<=? AND s.max_lat>=? AND s.min_lon<=? AND s.max_lon>=?
-            ORDER BY r.id DESC LIMIT 64""", (provider, now, lat, lat, lon, lon))
+        candidates = self.rows("""SELECT id,provider,center_lat,center_lon,radius_m,value,created_at,expires_at
+            FROM reverse_regions WHERE provider=? AND expires_at>?
+              AND ST_DWithin(center,ST_SetSRID(ST_MakePoint(?,?),4326)::geography,30)
+              AND ST_DWithin(center,ST_SetSRID(ST_MakePoint(?,?),4326)::geography,radius_m)
+            ORDER BY id DESC LIMIT 64""", (provider, now, lon, lat, lon, lat))
         for row in candidates:
             if metres(lat, lon, row["center_lat"], row["center_lon"]) <= row["radius_m"]:
                 return json.loads(row["value"])
@@ -75,34 +67,17 @@ class CachesRepository(Repository):
 
     def forget_reverse_regions_near(self, lat, lon, radius_m):
         """Drop cached reverse lookups made within radius_m of a position."""
-        if self.db.postgres:
-            self.execute("""DELETE FROM reverse_regions
-                WHERE ST_DWithin(center,ST_SetSRID(ST_MakePoint(?,?),4326)::geography,?)""", (lon, lat, radius_m))
-            return
-        lat_delta = radius_m / 111320
-        lon_delta = min(180, radius_m / max(1, 111320 * abs(math.cos(math.radians(lat)))))
-        candidates = self.rows("""SELECT r.id,r.center_lat,r.center_lon FROM reverse_regions r
-            JOIN reverse_regions_spatial s ON s.id=r.id
-            WHERE s.max_lat>=? AND s.min_lat<=? AND s.max_lon>=? AND s.min_lon<=?""",
-            (lat - lat_delta, lat + lat_delta, lon - lon_delta, lon + lon_delta))
-        for row in candidates:
-            if metres(lat, lon, row["center_lat"], row["center_lon"]) <= radius_m:
-                # The delete trigger keeps reverse_regions_spatial in step.
-                self.execute("DELETE FROM reverse_regions WHERE id=?", (row["id"],))
+        self.execute("""DELETE FROM reverse_regions
+            WHERE ST_DWithin(center,ST_SetSRID(ST_MakePoint(?,?),4326)::geography,?)""", (lon, lat, radius_m))
 
     def save_reverse_region(self, provider, lat, lon, radius_m, value):
         """Keep a lookup for reuse within radius_m (at most 30 m) for GEOLOGS_REVERSE_CACHE_DAYS (180)."""
         radius = max(0.0, min(float(radius_m), 30.0))
         now = datetime.now(timezone.utc)
         days = config.reverse_cache_days()
-        lat_delta = radius / 111320
-        lon_delta = min(180, radius / max(1, 111320 * abs(math.cos(math.radians(lat)))))
         pending = self.db.pending_writes
-        cursor = self.execute("""INSERT INTO reverse_regions
+        self.execute("""INSERT INTO reverse_regions
             (provider,center_lat,center_lon,radius_m,value,created_at,expires_at)
-            VALUES (?,?,?,?,?,?,?) RETURNING id""", (provider, lat, lon, radius, json.dumps(value), now.isoformat(timespec="seconds"), (now + timedelta(days=days)).isoformat(timespec="seconds")))
-        region_id = cursor.fetchone()["id"]
-        if not self.db.postgres:
-            self.execute("INSERT INTO reverse_regions_spatial VALUES (?,?,?,?,?)", (region_id, lat-lat_delta, lat+lat_delta, lon-lon_delta, lon+lon_delta))
+            VALUES (?,?,?,?,?,?,?)""", (provider, lat, lon, radius, json.dumps(value), now.isoformat(timespec="seconds"), (now + timedelta(days=days)).isoformat(timespec="seconds")))
         if not pending:
             self.db.commit()

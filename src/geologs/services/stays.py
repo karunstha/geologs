@@ -11,7 +11,7 @@ from ..domain.trips import trips_between_stays, went_elsewhere_between
 from .use_case import use_case
 
 
-def sync_timeline(db, sources=None, rebuild=False, since_ids=None):
+def sync_timeline(db, sources=None, rebuild=False, since_ids=None, from_times=None):
     """Materialize an efficient timeline from raw observations and confirmed stays.
 
     Samples while travelling remain available. A confirmed stationary run keeps
@@ -20,14 +20,14 @@ def sync_timeline(db, sources=None, rebuild=False, since_ids=None):
     """
     if sources is None:
         sources = db.points.sources()
-    since_ids = since_ids or {}
+    since_ids, from_times = since_ids or {}, from_times or {}
     stay_seconds = min_stay_seconds(db.settings.get())
     for source in sources:
         state = db.stays.state(source)
         candidate = state["candidate"] if state else None
         # A stop that is still open but not yet long enough to be a stay is compacted too.
         open_stop = candidate if candidate and candidate["count"] >= 2 and candidate_duration(candidate) < stay_seconds else None
-        db.timeline.sync(source, 0 if rebuild else since_ids.get(source, 0), rebuild, open_stop)
+        db.timeline.sync(source, 0 if rebuild else since_ids.get(source, 0), rebuild, open_stop, from_times.get(source))
 
 
 class _DetectedStays:
@@ -88,8 +88,23 @@ def _refresh_area_stays(db, source, since=None, rules=None):
             db.stays.set_went_elsewhere(following["id"], flags.get(id(following)))
 
 
+# How often the stay candidate is saved as fixes go by, and how long every one is kept: a fix that
+# arrives late resumes from the checkpoint before it rather than finding every stay again.
+CHECKPOINT_EVERY = timedelta(hours=1)
+CHECKPOINTS_KEPT_HOURLY = timedelta(days=7)
+
+
+def _after(timestamp, step):
+    return (datetime.fromisoformat(timestamp) + step).isoformat()
+
+
 def process_stays(db, sources=None, rebuild=False):
-    """Process raw observations; a late import rebuilds that source safely."""
+    """Find stays in a source's new fixes, picking up where the last call left off.
+
+    A fix older than ones already read reshapes what came after it. Detection then resumes from
+    the newest checkpoint before that fix, the same work as reading every fix in time order, but
+    from there on only. Without such a checkpoint (or with `rebuild`), the source starts over.
+    """
     if rebuild:
         db.caches.clear_analysis()
     rules = db.settings.get()
@@ -98,18 +113,31 @@ def process_stays(db, sources=None, rebuild=False):
     processed = 0
     processed_sources = set()
     rebuilt_sources = set()
-    since_ids = {}
+    since_ids, from_times = {}, {}
     for source in sources:
         state = db.stays.state(source)
         last_id = state["last_observation_id"] if state else 0
         since_ids[source] = 0 if rebuild else last_id
         first_new = db.points.first_new(source, last_id)
+        late = bool(state and first_new and first_new <= state["last_timestamp"])
+        resume = db.stays.checkpoint_before(source, first_new) if late and not rebuild else None
         area_since = None
-        if rebuild or (state and first_new and first_new <= state["last_timestamp"]):
+        if rebuild or (late and resume is None):
             rebuilt_sources.add(source)
             db.stays.delete_source(source)
             state = None
             last_id = 0
+        elif resume is not None:
+            # Forget what was found after the checkpoint and go on from it. Its open candidate began
+            # earlier, so the timeline and area stays are made again from where that began.
+            db.stays.rewind(source, resume["last_timestamp"])
+            state, last_id = resume, resume["last_observation_id"]
+            begun = (resume["candidate"] or {}).get("start") or resume["last_timestamp"]
+            from_times[source] = min(begun, resume["last_timestamp"])
+            area_since = db.stays.last_end(source, "stationary", before=from_times[source])
+            if area_since is None:
+                area_since = db.stays.last_end(source, "area", closed=True, before=from_times[source])
+            db.stays.delete_areas(source, area_since)
         elif first_new:
             # New fixes can reshape area stays after the last settled stationary
             # stay. Remove those before stationary stays grow, so the two kinds
@@ -127,21 +155,35 @@ def process_stays(db, sources=None, rebuild=False):
             candidate.pop("nearby_names", None)  # kept beside the candidate since the name lookups moved out
         max_id, last_time = source_max_id, state["last_timestamp"] if state else None
         detected = _DetectedStays(db, source)
-        for batch in db.points.best_fixes_after(source, last_id):
+        newest_checkpoint = None if state is None else (resume["last_timestamp"] if resume else db.stays.last_checkpoint(source))
+        next_checkpoint = _after(newest_checkpoint, CHECKPOINT_EVERY) if newest_checkpoint else None
+        wrote_checkpoint = False
+        fixes = db.points.best_fixes_after_time(source, resume["last_timestamp"]) if resume else \
+            db.points.best_fixes_after(source, last_id)
+        for batch in fixes:
             for point in batch:
                 processed += 1
                 last_time = point["timestamp"]
                 # A low-accuracy fix neither confirms nor ends a stay.
                 if accurate_enough(point):
                     candidate = advance(candidate, point, rules, detected)
+                if next_checkpoint is None or last_time >= next_checkpoint:
+                    db.stays.save_checkpoint(source, point["id"], last_time, candidate)
+                    next_checkpoint = _after(last_time, CHECKPOINT_EVERY)
+                    newest_checkpoint, wrote_checkpoint = last_time, True
         if max_id == last_id:
             continue
         processed_sources.add(source)
         db.stays.save_state(source, max_id, last_time, candidate)
+        if wrote_checkpoint:
+            db.stays.thin_checkpoints(source, _after(newest_checkpoint, -CHECKPOINTS_KEPT_HOURLY))
         _refresh_area_stays(db, source, area_since, rules)
-    incremental_sources = processed_sources - rebuilt_sources
+    incremental_sources = processed_sources - rebuilt_sources - set(from_times)
     if incremental_sources:
         sync_timeline(db, incremental_sources, since_ids=since_ids)
+    rewound_sources = (processed_sources - rebuilt_sources) & set(from_times)
+    if rewound_sources:
+        sync_timeline(db, rewound_sources, from_times=from_times)
     if rebuilt_sources:
         sync_timeline(db, rebuilt_sources, rebuild=True)
     return {"processed_points": processed}

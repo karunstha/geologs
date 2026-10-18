@@ -1,0 +1,189 @@
+#!/usr/bin/env python3
+"""Fill an empty archive with a believable routine, then time what the browser asks for.
+
+    GEOLOGS_DATABASE_URL=postgresql://.../load scripts/load-test --days 365
+    scripts/load-test --skip-fill        # time an archive filled earlier
+
+Each day: home overnight, a drive to work, a walk to lunch and back, sometimes a drive to the shops
+on the way home, and a park on weekends. Stationary fixes arrive every five minutes and moving
+ones every thirty seconds, as a phone app in its usual mode would send them, with GPS jitter.
+Never point this at an archive you care about: it refuses one that already has samples.
+"""
+import argparse
+import math
+import random
+import statistics
+import sys
+import time
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
+from geologs.services import open_database  # noqa: E402
+from geologs.services.day import day_summary  # noqa: E402
+from geologs.services.ingest import ingest  # noqa: E402
+from geologs.services.location import current_location  # noqa: E402
+from geologs.services.overview import daily_overviews  # noqa: E402
+from geologs.services.paths import learn_path_history  # noqa: E402
+from geologs.services.patterns import place_overview, search_visits  # noqa: E402
+from geologs.services.stays import process_stays  # noqa: E402
+
+ZONE = ZoneInfo("America/Chicago")
+HOME, WORK, LUNCH = (34.7465, -92.2896), (34.7480, -92.2720), (34.7462, -92.2705)
+SHOP, PARK = (34.7520, -92.3400), (34.7300, -92.3000)
+
+
+def jitter(position, metres, rng):
+    angle, distance = rng.uniform(0, 2 * math.pi), abs(rng.gauss(0, metres))
+    return (position[0] + distance * math.cos(angle) / 111320,
+            position[1] + distance * math.sin(angle) / (111320 * math.cos(math.radians(position[0]))))
+
+
+class Day:
+    """One day's fixes, written in order: stay somewhere, then travel somewhere else."""
+
+    def __init__(self, day, rng):
+        self.at = datetime(day.year, day.month, day.day, tzinfo=ZONE)
+        self.rng, self.place, self.fixes = rng, HOME, []
+
+    def fix(self, position, accuracy, speed=None):
+        lat, lon = jitter(position, accuracy / 2, self.rng)
+        fix = {"timestamp": self.at.astimezone(timezone.utc).isoformat(), "lat": round(lat, 6),
+               "lon": round(lon, 6), "accuracy_m": accuracy}
+        if speed is not None:
+            fix["speed_mps"] = round(speed, 1)
+        self.fixes.append(fix)
+
+    def stay_until(self, hour, minute=0):
+        end = self.at.replace(hour=hour, minute=minute)
+        while self.at < end:
+            self.fix(self.place, self.rng.choice((8, 10, 12, 16, 20)), 0)
+            self.at += timedelta(minutes=5)
+
+    def travel_to(self, place, kmh):
+        metres = math.dist((self.place[0] * 111320, self.place[1] * 91500), (place[0] * 111320, place[1] * 91500))
+        steps = max(2, int(metres / (kmh / 3.6 * 30)))
+        for step in range(1, steps + 1):
+            share = step / steps
+            bend = math.sin(share * math.pi) * 0.002  # roads are not straight lines
+            position = (self.place[0] + (place[0] - self.place[0]) * share + bend,
+                        self.place[1] + (place[1] - self.place[1]) * share)
+            self.at += timedelta(seconds=30)
+            self.fix(position, 6, kmh / 3.6 * self.rng.uniform(0.6, 1.2))
+        self.place = place
+
+
+def routine(day, rng):
+    plan = Day(day, rng)
+    if day.weekday() < 5:
+        plan.stay_until(7, rng.randint(20, 50))
+        plan.travel_to(WORK, 45)
+        plan.stay_until(12, rng.randint(0, 20))
+        plan.travel_to(LUNCH, 5)
+        plan.stay_until(13, rng.randint(0, 15))
+        plan.travel_to(WORK, 5)
+        plan.stay_until(17, rng.randint(15, 50))
+        if rng.random() < 0.4:
+            plan.travel_to(SHOP, 50)
+            plan.stay_until(18, rng.randint(30, 59))
+        plan.travel_to(HOME, 45)
+    else:
+        plan.stay_until(rng.randint(9, 11), rng.randint(0, 59))
+        plan.travel_to(PARK, 40)
+        plan.stay_until(13, rng.randint(0, 59))
+        plan.travel_to(HOME, 40)
+    plan.stay_until(23, 55)
+    return plan.fixes
+
+
+def fill(db, days, source):
+    if db.points.span()[0]:
+        sys.exit("load-test: this archive already has samples; give it an empty database")
+    rng, first, started, total = random.Random(7), date.today() - timedelta(days=days), time.perf_counter(), 0
+    batch = []
+    for offset in range(days):
+        batch += [{**fix, "source": source} for fix in routine(first + timedelta(days=offset), rng)]
+        # The CSV importer's way: batches of at most 1000, each kept as it goes, stays found after.
+        while len(batch) >= 1000 or (batch and offset == days - 1):
+            total += ingest(db, batch[:1000], trigger_reminders=False, process_analysis=False)["inserted"]
+            db.commit()
+            batch = batch[1000:]
+            print(f"\r  {offset + 1}/{days} days, {total:,} fixes", end="", flush=True)
+    print(f"\n  stored in {time.perf_counter() - started:.0f} s")
+    for name, step in (("stays", lambda: process_stays(db, {source}, rebuild=True)),
+                       ("paths", lambda: learn_path_history(db, source=source))):
+        started = time.perf_counter()
+        step()
+        db.commit()
+        print(f"  {name} found in {time.perf_counter() - started:.0f} s")
+
+
+def timed(name, call, runs):
+    times = []
+    for _ in range(runs):
+        started = time.perf_counter()
+        call()
+        times.append((time.perf_counter() - started) * 1000)
+    times.sort()
+    print(f"  {name:34} median {statistics.median(times):8.1f} ms   worst {times[-1]:8.1f} ms")
+
+
+def measure(db, days, source):
+    # A day's analysis is kept once built; forget them so "first view" means what it says.
+    db.caches.clear_analysis()
+    db.commit()
+    print(f"  archive: {db.points.count():,} samples, {len(db.stays.between(limit=None)):,} stays")
+    rng = random.Random(11)
+    # A day's analysis is stored once it is built, so its first view and later views differ.
+    for label, back in (("a recent day", (1, min(days, 30))), ("a day a year back", (max(1, days - 365), max(1, days - 335)))):
+        picked = iter(sorted({(date.today() - timedelta(days=rng.randint(*back))).isoformat() for _ in range(12)}))
+        chosen = list(picked)
+        first, again = iter(chosen), iter(chosen)
+        timed(f"day view, {label}, first view", lambda: (day_summary(db, next(first), "America/Chicago"), db.rollback()), len(chosen))
+        timed(f"day view, {label}, seen before", lambda: (day_summary(db, next(again), "America/Chicago"), db.rollback()), len(chosen))
+    timed("coverage, as the page asks", lambda: (db.points.coverage(gaps=False), db.rollback()), 10)
+    timed("coverage with gaps (MCP)", lambda: (db.points.coverage(), db.rollback()), 5)
+    timed("sources and activity", lambda: (db.points.activity(date.today().isoformat()), db.rollback()), 10)
+    timed("current location", lambda: (current_location(db), db.rollback()), 10)
+    timed("places overview", lambda: (place_overview(db, 100), db.rollback()), 5)
+    timed("search visits", lambda: (search_visits(db, "34.75", limit=50), db.rollback()), 5)
+    timed("stored daily summaries", lambda: (daily_overviews(db, limit=90), db.rollback()), 5)
+    if db.stays.last_checkpoint(source) is None:
+        # An archive filled before stay checkpoints existed gets them from one full pass, which the
+        # first late fix would otherwise pay for.
+        started = time.perf_counter()
+        process_stays(db, {source}, rebuild=True)
+        db.commit()
+        print(f"  one-time pass to add checkpoints:  {time.perf_counter() - started:8.1f} s")
+    # Fixes are kept (each ingest commits), so live ones go after the newest and late ones before it.
+    newest = datetime.fromisoformat(db.points.span()[1])
+    ahead, behind = iter(range(1, 10_000)), iter(range(1, 10_000))
+
+    def fix(at):
+        return {"source": source, "timestamp": at.isoformat(), "lat": HOME[0], "lon": HOME[1], "accuracy_m": 10}
+    timed("ingest one live fix", lambda: ingest(db, fix(newest + timedelta(seconds=next(ahead)))), 20)
+    timed("ingest a fix two hours late", lambda: ingest(db, fix(newest - timedelta(hours=2, seconds=next(behind)))), 10)
+    timed("ingest a fix three days late", lambda: ingest(db, fix(newest - timedelta(days=3, seconds=next(behind)))), 5)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--days", type=int, default=365)
+    parser.add_argument("--source", default="load:phone")
+    parser.add_argument("--skip-fill", action="store_true", help="time an archive filled by an earlier run")
+    args = parser.parse_args()
+    db = open_database()
+    try:
+        if not args.skip_fill:
+            print(f"Filling {args.days} days…")
+            fill(db, args.days, args.source)
+        print("Timing…")
+        measure(db, args.days, args.source)
+    finally:
+        db.close()
+
+
+if __name__ == "__main__":
+    main()
