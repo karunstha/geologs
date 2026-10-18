@@ -65,6 +65,31 @@ body:has(#explore-view.active) .backdrop {
   background: linear-gradient(180deg, rgb(0 0 0/0.6) 0%, rgb(0 0 0/0.38) 45%, rgb(0 0 0/0) 80%);
 }
 
+/* The photo's credit: tiny and translucent in the corner of the photo, as Unsplash asks. */
+#explore-view {
+  position: relative;
+}
+.photo-credit {
+  position: absolute;
+  top: -14px;
+  right: 0;
+  z-index: 1;
+  margin: 0;
+  color: rgb(255 255 255/0.5);
+  font-size: 10.5px;
+  line-height: 1.4;
+  text-shadow: 0 1px 4px rgb(0 0 0/0.6);
+}
+.photo-credit a {
+  color: inherit;
+  text-decoration: none;
+}
+.photo-credit a:hover,
+.photo-credit a:focus-visible {
+  color: #fff;
+  text-decoration: underline;
+}
+
 /* The day's head on the backdrop: white text, glass controls. */
 .history-head {
   --on-photo: #fff;

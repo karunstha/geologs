@@ -19,6 +19,7 @@ Generate each with `openssl rand -base64 32 | tr -d '/+='`.
 | `GEOLOGS_DATABASE_URL` | | The PostgreSQL/PostGIS database, as its owner. Compose sets it. |
 | `GEOLOGS_TIMEZONE` | `UTC` | The timezone new users start with (an IANA name such as `America/Chicago`); each user changes theirs in Settings. |
 | `GEOLOGS_PUBLISHED_PORT` | `8765` | The port Compose publishes the app on. |
+| `GEOLOGS_BIND` | `127.0.0.1` | Which address that port is published on. The default reaches the app from this machine only (and from a proxy or tunnel running on it). Set `0.0.0.0` to reach it from other devices on your network, over plain HTTP. |
 | `GEOLOGS_HOST`, `GEOLOGS_PORT` | `127.0.0.1`, `8765` | Where `geologs serve` listens. Beyond loopback, `GEOLOGS_TOKEN` is required. |
 | `GEOLOGS_DB_POOL_SIZE` | `10` | Database connections kept for requests (2–100). A request waits up to 10 seconds for one, then gets a 503. |
 | `GEOLOGS_PUBLIC_URL` | | Where people open GeoLogs (`https://geologs.example.com`). Links in emails point here. |

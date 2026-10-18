@@ -1,6 +1,6 @@
 // History's backdrop: the day's town, and an Unsplash photo of it in its weather, fading down the top of the page.
 import { api } from "../core/api.js";
-import { $ } from "../core/dom.js";
+import { $, safe } from "../core/dom.js";
 import { localDateKey } from "../core/format.js";
 import { state } from "../core/state.js";
 
@@ -24,10 +24,29 @@ function fallbackSky() {
   return hour >= 7 && hour < 19 ? "clear" : "clear-night";
 }
 
+const UNSPLASH = "https://unsplash.com/";
+const REFERRAL = "utm_source=geologs&utm_medium=referral";
+
+// Only links back to Unsplash itself are used, whatever the server sent.
+function unsplashLink(url, fallback) {
+  return typeof url === "string" && url.startsWith(UNSPLASH) ? url : fallback;
+}
+
+// Unsplash asks that a photo credit its photographer and Unsplash, with links back.
+function showCredit(photo) {
+  const credit = $("photo-credit");
+  const photographer = unsplashLink(photo.photographer_url, `${UNSPLASH}?${REFERRAL}`);
+  const home = `${UNSPLASH}?${REFERRAL}`;
+  credit.innerHTML = `Photo by <a href="${safe(photographer)}" target="_blank" rel="noopener">${safe(photo.photographer)}</a> on <a href="${safe(home)}" target="_blank" rel="noopener">Unsplash</a>`;
+  credit.title = photo.description || "";
+  credit.hidden = false;
+}
+
 function renderPhoto(photo, previous) {
   const backdrop = $("backdrop");
   if (!photo) {
     backdrop.classList.remove("has-photo");
+    $("photo-credit").hidden = true;
     return;
   }
   if (previous?.photo?.id === photo.id && backdrop.classList.contains("has-photo")) return;
@@ -37,6 +56,7 @@ function renderPhoto(photo, previous) {
     if (shown?.photo?.id !== photo.id) return;
     backdrop.style.setProperty("--photo", `url("${photo.url.replace(/"/g, "%22")}")`);
     backdrop.classList.add("has-photo");
+    showCredit(photo);
   };
   image.src = photo.url;
 }

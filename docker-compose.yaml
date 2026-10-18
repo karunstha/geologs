@@ -19,7 +19,8 @@ services:
       retries: 20
     restart: unless-stopped
     ports:
-      - "0.0.0.0:15432:5432"
+      # Only this machine: the database holds everyone's data and must not be reachable from the network.
+      - "127.0.0.1:15432:5432"
 
   app:
     build: .
@@ -58,7 +59,9 @@ services:
       GEOLOGS_SMTP_PASSWORD: ${GEOLOGS_SMTP_PASSWORD:-}
       GEOLOGS_SMTP_FROM: ${GEOLOGS_SMTP_FROM:-}
     ports:
-      - "0.0.0.0:${GEOLOGS_PUBLISHED_PORT:-8765}:8765"
+      # Only this machine by default; a proxy or tunnel on it reaches the app, other devices do not.
+      # GEOLOGS_BIND=0.0.0.0 in .env makes it reachable from the network (over plain HTTP: see docs/deploying.md).
+      - "${GEOLOGS_BIND:-127.0.0.1}:${GEOLOGS_PUBLISHED_PORT:-8765}:8765"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
