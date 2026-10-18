@@ -25,7 +25,7 @@ from geologs.services.imports import import_csv
 from geologs.services.ingest import ingest
 from geologs.services.position import latest
 from geologs.services.overview import daily_overviews
-from geologs.services.reminders import cancel_reminder, create_reminder
+from geologs.services.reminders import cancel_reminder, create_reminder, delete_reminder
 from geologs.services.samples import near, stats
 from geologs.services.saved_places import delete_label, delete_place, place_visits, save_label, save_place
 from geologs.services.settings import save_settings
@@ -172,6 +172,27 @@ class StoreTests(unittest.TestCase):
         self.assertIsNotNone(history[0]["cancelled_at"])
         with self.assertRaisesRegex(ValueError, "active reminder"):
             cancel_reminder(self.db, reminder["id"])
+
+    def test_ended_reminders_can_be_deleted_from_history_with_their_destinations(self):
+        place = save_place(self.db, {"name": "Market", "lat": 41, "lon": -87.9})
+        kept = create_reminder(self.db, {"text": "Buy salt", "place_id": place["id"]})
+        with patch("geologs.services.places.place_for_coordinate", return_value={}):
+            gone = create_reminder(self.db, {"text": "Swim", "place_name": "Lake", "lat": 41.2, "lon": -87.7})
+            other = create_reminder(self.db, {"text": "Run", "place_name": "Track", "lat": 41.3, "lon": -87.6})
+        waiting = create_reminder(self.db, {"text": "Still waiting", "place_id": place["id"]})
+        for reminder in (kept, gone, other):
+            cancel_reminder(self.db, reminder["id"])
+        with self.assertRaisesRegex(ValueError, "not found in history"):
+            delete_reminder(self.db, waiting["id"])
+        self.assertEqual(delete_reminder(self.db, gone["id"]), {"deleted": 1})
+        self.assertEqual({item["text"] for item in self.db.reminders.history()}, {"Buy salt", "Run"})
+        # Its hidden destination goes with it; a saved place stays.
+        self.assertIsNone(self.db.places.get(gone["place_id"]))
+        self.assertEqual(delete_reminder(self.db), {"deleted": 2})
+        self.assertEqual(self.db.reminders.history(), [])
+        self.assertIsNone(self.db.places.get(other["place_id"]))
+        self.assertEqual([item["name"] for item in self.db.places.saved()], ["Market"])
+        self.assertEqual([item["text"] for item in self.db.reminders.active()], ["Still waiting"])
 
     def test_unsaved_coordinate_reminder_stays_out_of_saved_places_and_triggers(self):
         found = {"name": "Lake Example", "address": "Lake Example, Chicago",
@@ -601,6 +622,37 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(summary["totals"]["reminders_triggered"], 1)
         self.assertEqual(len(daily_overviews(self.db, )), 1)
         self.assertEqual(current_location(self.db)["place_name"], "Campus")
+
+    def test_a_month_adds_up_its_days_building_the_ones_not_yet_saved(self):
+        from geologs.services.periods import period_summary
+        save_place(self.db, {"name": "Home", "lat": 41, "lon": -87.9, "radius_m": 150})
+        save_place(self.db, {"name": "Campus", "lat": 41.02, "lon": -87.9, "radius_m": 150})
+        for day in (25, 26):
+            base = datetime(2026, 9, day, 10, tzinfo=timezone.utc)
+            ingest(self.db, [{"source": "phone", "timestamp": (base + timedelta(minutes=minute)).isoformat(),
+                                "lat": lat, "lon": -87.9, "accuracy_m": 5}
+                               for minute, lat in [(0, 41), (16, 41), (17, 41.005), (18, 41.01), (20, 41.02), (36, 41.02)]])
+        town = {"city": "Chicago", "region": "Illinois", "country": "United States", "country_code": "US"}
+        with patch("geologs.services.ambient.place_of", return_value=town):
+            # With no time to spare, one day is built per call and the rest are left for the next.
+            first = period_summary(self.db, "2026-09", budget_seconds=0)
+            self.assertEqual((first["days_with_data"], first["pending"]["days"], first["totals"]["days"]), (2, 1, 1))
+            month = period_summary(self.db, "2026-09")
+        self.assertEqual(month["pending"], {"days": 0, "towns": 0})
+        self.assertEqual((month["kind"], month["first"], month["last"]), ("month", "2026-09-01", "2026-09-30"))
+        # The drive home that ran overnight is one trip, though both days' records hold it.
+        self.assertEqual((month["totals"]["days"], month["totals"]["trips"]), (2, 3))
+        # Campus is one place across both days; Home is kept apart from the list.
+        self.assertEqual([(place["name"], place["days"]) for place in month["places"]], [("Campus", 2)])
+        self.assertEqual(month["home"]["days"], 2)
+        self.assertEqual([town["name"] for town in month["towns"]], ["Chicago"])
+        self.assertEqual([day["date"] for day in month["days"]], ["2026-09-25", "2026-09-26"])
+        self.assertGreater(month["highlights"]["longest_trip"]["distance_km"], 2)
+        year = period_summary(self.db, "2026")
+        self.assertEqual([item["days"] for item in year["months"]][8], 2)
+        for wrong in ("2026-13", "26", "2026-9"):
+            with self.assertRaises(ValueError):
+                period_summary(self.db, wrong)
 
     def test_csv_import_and_mcp(self):
         csv = "timestamp,lat,lon,accuracy_m,speed_mps\n2026-09-26T10:00:00Z,41,-87.9,,\n"
@@ -2772,6 +2824,21 @@ class StoreTests(unittest.TestCase):
         exclude_path(self.db, "phone", first["started_at"])
         self.assertEqual(self.db.place_routes.recent(), [])
         self.assertIsNone(self.db.place_routes.track("phone", first["started_at"]))
+
+    def test_the_places_map_gets_the_routes_through_its_view_with_their_trips(self):
+        from geologs.services.place_routes import regroup, route_map
+        home, campus, road, first, second = self.campus_tracks()
+        for track in (first, second):
+            self.db.place_routes.add_track(track)
+        regroup(self.db, [(home, campus)])
+        shown = route_map(self.db, 40.9, -88.0, 41.1, -87.7)
+        self.assertEqual([route["trips"] for route in shown["routes"]], [2])
+        lines = shown["routes"][0]["lines"]
+        # As [lat, lon] for the map, end to end.
+        self.assertEqual((lines[0][0], lines[-1][-1]), ([home[1], home[0]], [campus[1], campus[0]]))
+        self.assertEqual(route_map(self.db, 10, 10, 11, 11)["routes"], [])
+        with self.assertRaises(ValueError):
+            route_map(self.db, 41.1, -88.0, 40.9, -87.7)
 
     def test_an_excluded_route_is_never_learned_again_until_used_again(self):
         from geologs.services.paths import exclude_path, fill_gap, include_path, learn_path_history

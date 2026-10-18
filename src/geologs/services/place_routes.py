@@ -1,10 +1,14 @@
 """Keeping routes between places in step with the trips that took them (see domain.place_routes)."""
 import json
+import math
 from datetime import datetime
 
 from ..domain.paths import STAY_MATCH_M, path_bounds
 from ..domain.place_routes import group, track_from_trip
 from .use_case import use_case
+
+# A route on the Places map keeps at most this many points per part: enough to follow the roads.
+MAP_POINTS = 160
 
 # Trips whose ends lie this close to a changed trip's may share a route with it: their routes
 # are grouped again together. Twice the farthest a stay may lie from a route's end.
@@ -74,3 +78,29 @@ def rebuild_routes(db):
 def routes_between(db, a, b):
     """Routes that may join [lon, lat] a and b, either way round."""
     return db.place_routes.routes_between(a, b, NEIGHBOURHOOD_M)
+
+
+def _thin(coordinates, most=MAP_POINTS):
+    """Every nth point of a line, keeping both ends, so it has at most `most`."""
+    step = max(1, math.ceil(len(coordinates) / most))
+    kept = coordinates[::step]
+    return kept if kept[-1] == coordinates[-1] else kept + [coordinates[-1]]
+
+
+@use_case
+def route_map(db, south, west, north, east, limit=300):
+    """Routes between places that pass through a map's view, each with how many trips took it and
+    its way as [lat, lon] lines, for the Places map."""
+    south, west, north, east = (float(value) for value in (south, west, north, east))
+    if not (-90 <= south <= north <= 90) or not (-180 <= west <= 180 and -180 <= east <= 180):
+        raise ValueError("bounds must be south ≤ north within ±90 and west, east within ±180")
+    if west > east:  # A view across the antimeridian: everything east and west of it.
+        west, east = -180.0, 180.0
+    routes = db.place_routes.in_bounds(south, west, north, east, limit)
+    return {"routes": [{"id": route["id"], "mode": route["mode"], "from_name": route["from_name"],
+                        "to_name": route["to_name"], "distance_m": route["distance_m"], "latest": route["latest"],
+                        "trips": len(route["members"]),
+                        "lines": [[[point[1], point[0]] for point in _thin(part["coordinates"])]
+                                  for part in route["parts"] if len(part["coordinates"]) >= 2]}
+                       for route in routes],
+            "limited": len(routes) >= min(max(int(limit), 1), 1000)}

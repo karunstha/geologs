@@ -74,6 +74,17 @@ def cancel_reminder(db, reminder_id):
 
 
 @use_case
+def delete_reminder(db, reminder_id=None):
+    """Remove a fired or cancelled reminder from history, or with no id all of them."""
+    ended = db.reminders.delete_ended(reminder_id)
+    if reminder_id is not None and not ended:
+        raise ValueError("reminder not found in history")
+    for place_id in {reminder["place_id"] for reminder in ended if reminder["place_id"] is not None}:
+        db.places.delete_if_unused(place_id)
+    return {"deleted": len(ended)}
+
+
+@use_case
 def arrival_events(db, point_id, lat, lon, accuracy, timestamp, previous):
     """Fire the reminders a fix arrives at; returns their events. Does not commit."""
     events = []

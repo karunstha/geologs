@@ -104,6 +104,13 @@ class PlaceRoutesRepository(Repository):
         row = self.execute("SELECT COUNT(*) AS count,COALESCE(MAX(id),0) AS max_id FROM place_routes").fetchone()
         return f"{row['count']}:{row['max_id']}"
 
+    def in_bounds(self, south, west, north, east, limit=300):
+        """Routes that pass through a box, most recently taken first, with their geometry."""
+        return [self._route(row) for row in self.rows(
+            """SELECT id,mode,from_lat,from_lon,to_lat,to_lon,from_name,to_name,distance_m,parts,members,latest
+            FROM place_routes WHERE max_lat>=? AND min_lat<=? AND max_lon>=? AND min_lon<=?
+            ORDER BY latest DESC,id DESC LIMIT ?""", (south, north, west, east, min(max(int(limit), 1), 1000)))]
+
     def recent(self, limit=200):
         """Routes most recently taken first, without their geometry."""
         return [{**row, "trips": len(json.loads(row.pop("members")))} for row in self.rows(

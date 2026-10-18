@@ -47,7 +47,7 @@ def place_patterns(db, limit=50, rows=None):
             clusters.append({"cluster_id": target, "place_id": stay["place_id"], "label_id": stay.get("label_id"),
                              "name": place["name"] if place else None,
                              "lat": stay["lat"], "lon": stay["lon"], "visits": 0, "observed_minutes": 0,
-                             "last_seen": stay["ended_at"], "radius_m": 0, "activities": {}, "_spans": [], "_members": []})
+                             "first_seen": stay["started_at"], "last_seen": stay["ended_at"], "radius_m": 0, "activities": {}, "_spans": [], "_members": []})
             bucket_index.setdefault(key, set()).add(target)
         cluster = clusters[target]
         if radius > 75 and cluster["radius_m"] <= 75 and target not in wide_clusters:
@@ -60,6 +60,8 @@ def place_patterns(db, limit=50, rows=None):
         cluster["observed_minutes"] += stay["observed_minutes"]
         if stay["ended_at"] > cluster["last_seen"]:
             cluster["last_seen"] = stay["ended_at"]
+        if stay["started_at"] < cluster["first_seen"]:
+            cluster["first_seen"] = stay["started_at"]
         mapping[stay["id"]] = target
     # Spans stay attached so resolve_place_patterns can recount after clusters merge.
     counts = count_visits([(*span, index) for index, cluster in enumerate(clusters) for span in cluster["_spans"]])
@@ -334,6 +336,7 @@ def transitions(db, limit=50, patterns=None, rows=None):
         a, b = cluster_by_id[edge["from_cluster_id"]], cluster_by_id[edge["to_cluster_id"]]
         edge["from_name"] = a["display_name"]
         edge["to_name"] = b["display_name"]
+        edge["from_lat"], edge["from_lon"] = a["lat"], a["lon"]
         edge["to_lat"], edge["to_lon"] = b["lat"], b["lon"]
         edge["weighted_score"] = round(edge["weighted_score"], 4)
     ordered = sorted(result, key=lambda e: (e["weighted_score"], e["count"]), reverse=True)

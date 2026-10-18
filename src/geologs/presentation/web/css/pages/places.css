@@ -270,3 +270,78 @@
   color: var(--text-3);
   font-weight: 500;
 }
+/* The map on the left, held in view while the lists beside it scroll with the page. */
+.places-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 420px;
+  gap: 16px;
+  align-items: start;
+}
+.places-map-shell {
+  position: sticky;
+  top: calc(var(--topbar-h) + 16px);
+  height: var(--panel-h);
+}
+#places-map {
+  position: absolute;
+  inset: 0;
+  background: var(--surface-3);
+}
+.places-side {
+  min-width: 0;
+}
+.places-legend {
+  justify-content: flex-start;
+  gap: 8px;
+  font-size: 12px;
+}
+.heat-scale {
+  width: 72px;
+  height: 8px;
+  border-radius: 4px;
+  background: linear-gradient(90deg, #2563eb, #14b8a6, #facc15, #f97316, #dc2626);
+}
+.heat-layer {
+  pointer-events: none;
+}
+/* A visited place's row is itself the button that shows it on the map. */
+.place-pick {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.place-pick:hover strong {
+  color: var(--accent);
+}
+.saved-pin .place-icon {
+  flex-basis: 32px;
+  width: 32px;
+  height: 32px;
+}
+@media (max-width: 1080px) {
+  .places-layout {
+    grid-template-columns: minmax(0, 1fr) 360px;
+  }
+}
+@media (max-width: 860px) {
+  .places-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .places-map-shell {
+    position: relative;
+    top: 0;
+    height: 52vh;
+    min-height: 320px;
+  }
+}
+.map-footer.places-legend {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+}

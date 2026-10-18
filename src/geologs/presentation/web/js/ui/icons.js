@@ -1,5 +1,6 @@
 // Travel modes, place kinds, and source names, with their icons and status pills.
 import { safe } from "../core/dom.js";
+import { KIND_INFO, kindOf } from "./place-kinds.js";
 
 export const modeInfo = {
   driving: {
@@ -53,62 +54,28 @@ export function modeIcon(mode) {
     : "";
 }
 
-export const placeIcons = {
-  shopping:
-    '<svg viewBox="0 0 24 24"><path d="M3 4h2l2.2 10.2a2 2 0 0 0 2 1.6h7.7a2 2 0 0 0 2-1.6L20 8H7"/><circle cx="10" cy="20" r="1"/><circle cx="18" cy="20" r="1"/></svg>',
-  salon:
-    '<svg viewBox="0 0 24 24"><circle cx="6" cy="7" r="3"/><circle cx="6" cy="17" r="3"/><path d="m8.7 8.3 11.8 7.2M8.7 15.7 20.5 8.5"/></svg>',
-  water:
-    '<svg viewBox="0 0 24 24"><path d="M12 3s6 6.3 6 11a6 6 0 0 1-12 0c0-4.7 6-11 6-11Z"/><path d="M9 15c.7 1.5 1.8 2.2 3.5 2.2"/></svg>',
-  education:
-    '<svg viewBox="0 0 24 24"><path d="m3 10 9-5 9 5-9 5-9-5Z"/><path d="M7 12.5V17c3 2 7 2 10 0v-4.5M21 10v6"/></svg>',
-  bar: '<svg viewBox="0 0 24 24"><path d="M5 4h14l-7 8-7-8Z"/><path d="M12 12v7M8 20h8"/></svg>',
-  park: '<svg viewBox="0 0 24 24"><path d="M12 21V9M7 13c-3-4-.4-9 5-10 5.4 1 8 6 5 10-1.5 2-3.5 2.5-5 2.5S8.5 15 7 13Z"/></svg>',
-  food: '<svg viewBox="0 0 24 24"><path d="M7 3v8M4 3v5c0 2 1 3 3 3s3-1 3-3V3M7 11v10M16 3v18M16 3c3 1 4 4 4 7h-4"/></svg>',
-  health:
-    '<svg viewBox="0 0 24 24"><path d="M12 21S4 16 4 9a4 4 0 0 1 7-2.7L12 7.5l1-1.2A4 4 0 0 1 20 9c0 7-8 12-8 12Z"/><path d="M9 12h6M12 9v6"/></svg>',
-  home: '<svg viewBox="0 0 24 24"><path d="m3 11 9-8 9 8M5 10v11h14V10M9 21v-7h6v7"/></svg>',
-  place:
-    '<svg viewBox="0 0 24 24"><path d="M20 10c0 5-8 11-8 11S4 15 4 10a8 8 0 1 1 16 0Z"/><circle cx="12" cy="10" r="2.5"/></svg>',
-};
-
 // Saved places are zones; a place inside one names it unless it is the zone itself.
 export function zoneText(zone, name) {
   return zone && zone !== name ? "In " + zone : "";
 }
 
 export function placeKind(place = {}) {
-  const text = [place.category, ...(place.categories || []), place.name, place.display_name]
-    .join(" ")
-    .toLowerCase();
-  if (/(^|\s)(home|my home)(\s|$)/.test(text)) return "home";
-  if (
-    /walmart|supermarket|shopping|commercial|retail|convenience|grocery|department_store|shop\b|store\b/.test(
-      text,
-    )
-  )
-    return "shopping";
-  if (/hair|salon|beauty|barber/.test(text)) return "salon";
-  if (/lake|water|reservoir|river|natural\.water/.test(text)) return "water";
-  if (/university|college|school|education|academic/.test(text)) return "education";
-  if (/bar|pub|nightclub|biergarten/.test(text)) return "bar";
-  if (/restaurant|cafe|coffee|food|catering|bakery|fast_food/.test(text)) return "food";
-  if (/park|garden|nature|leisure/.test(text)) return "park";
-  if (/hospital|clinic|pharmacy|healthcare|doctor|dentist|medical/.test(text)) return "health";
-  return "place";
+  return kindOf(place);
 }
 
+// A place's kind as a tinted icon, for lists.
 export function placeIcon(place) {
-  const kind = placeKind(place);
-  return `<span class="place-icon ${kind}" title="${safe(kind)}" aria-hidden="true">${placeIcons[kind]}</span>`;
+  const info = KIND_INFO[kindOf(place)];
+  return `<span class="place-icon" style="--kind:${info.color}" title="${safe(info.label)}" aria-hidden="true"><svg viewBox="0 0 24 24">${info.icon}</svg></span>`;
 }
 
-// A stop on the day: its kind of place as an icon, with the number you reached it in (or every number
-// of a revisited place, "1·3") on its corner. Home has no number, only its house.
-export function stopBadge(place, label) {
-  if (!label) return `<span class="stop-badge">${placeIcon({ name: "Home" })}</span>`;
+// A stop on the day's map: the number you reached it in (or every number of a revisited place,
+// "1·3"), in the colour of its kind. Home has no number, only its house.
+export function stopPin(place, label) {
+  if (!label) return `<span class="stop-pin home">${placeIcon({ name: "Home" })}</span>`;
+  const info = KIND_INFO[kindOf(place)];
   const many = String(label).length > 2 ? " many" : "";
-  return `<span class="stop-badge">${placeIcon(place)}<b class="stop-num${many}">${label}</b></span>`;
+  return `<span class="stop-pin${many}" style="--kind:${info.color}" title="${safe(info.label)}">${label}</span>`;
 }
 
 // Each trip of a day gets its own colour, in the order they happened, so one reads apart from the

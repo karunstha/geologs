@@ -135,6 +135,24 @@ def _photo(db, place, sky, moment):
     return None
 
 
+def place_of(db, lat, lon):
+    """The town at a position (rounded to about a kilometre), from cache or Nominatim; None if unknown."""
+    return _place(db, round(float(lat), 2), round(float(lon), 2))
+
+
+def city_photo(db, place, seed):
+    """A photo of a town for a summary: the same one each time for the same seed, unlike the backdrop's."""
+    if not unsplash.configured() or not place:
+        return None
+    for query in _photo_searches(place, None, None):
+        photos = _photos(db, query)[:PHOTO_CHOICES]
+        if photos:
+            pick = photos[sum(map(ord, seed)) % len(photos)]
+            _report(pick)
+            return {key: value for key, value in pick.items() if key != "download_location"} | {"query": query}
+    return None
+
+
 def _local_now(zone):
     return datetime.now(ZoneInfo(zone))
 

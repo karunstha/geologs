@@ -4,7 +4,7 @@ import { $, safe, toast } from "../core/dom.js";
 import { clock, distanceText, durationText, fuelText, lengthText } from "../core/format.js";
 import { state } from "../core/state.js";
 import { selectItem, selectedItem, stayColor, tripKey } from "../map/map.js";
-import { modeIcon, modeInfo, modeName, stopBadge, tripColors, visitNumbers, zoneText } from "../ui/icons.js";
+import { modeIcon, modeInfo, modeName, placeIcon, tripColors, visitNumbers, zoneText } from "../ui/icons.js";
 import { refreshExplore } from "./history.js";
 import { keepPossibleStop, openStopDialog, removeStay } from "./stay-edits.js";
 
@@ -171,7 +171,7 @@ export function renderTimeline(day) {
   $("timeline-count").hidden = !(day.stays.length || day.trips.length);
   $("timeline-count").title =
     (day.timeline_sources || []).length > 1
-      ? `Combined from ${day.timeline_sources.join(", ")}; where sources overlap, the one with the most samples is shown.`
+      ? `Combined from ${day.timeline_sources.join(", ")}.`
       : "";
   $("day-timeline").innerHTML =
     items
@@ -183,7 +183,7 @@ export function renderTimeline(day) {
           return `<li class="tl-gap"><span>No location data</span><small>${safe(clock(item.gap.start))} – ${safe(clock(item.gap.end))} · ${safe(durationText(item.gap.minutes))}</small></li>`;
         if (item.type === "stay") {
           const stay = item.stay;
-          return `<li><button type="button" class="tl-stay" data-item="stay:${stay.id}" aria-pressed="false">${stopBadge({ ...stay, name: stay.display_name }, numbers.get(stay.id))}<span class="tl-body"><strong>${safe(stay.display_name || stay.place_name || "Observed stay")}</strong><small>${safe([zoneText(stay.zone, stay.display_name), stayWhen(stay, day), durationText(stay.observed_minutes)].filter(Boolean).join(" · "))}</small>${originTag(stay)}${activityTag(stay)}${movedWithin(stay)}</span></button></li>`;
+          return `<li><button type="button" class="tl-stay" data-item="stay:${stay.id}" aria-pressed="false">${placeIcon(numbers.has(stay.id) ? { ...stay, name: stay.display_name } : { name: "Home" })}<span class="tl-body"><strong>${safe(stay.display_name || stay.place_name || "Observed stay")}</strong><small>${safe([zoneText(stay.zone, stay.display_name), stayWhen(stay, day), durationText(stay.observed_minutes)].filter(Boolean).join(" · "))}</small>${originTag(stay)}${activityTag(stay)}${movedWithin(stay)}</span></button></li>`;
         }
         const trip = item.trip,
           // A move nothing recorded has no mode until you set one (or a past trip's route gives it one).

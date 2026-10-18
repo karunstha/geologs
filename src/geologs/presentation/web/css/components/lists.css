@@ -81,6 +81,11 @@
   background: color-mix(in srgb, var(--kind) 13%, var(--surface));
   color: var(--kind);
 }
+/* Each kind's colour is set inline; on dark it is lifted so it reads on the dark surface. */
+:root[data-theme="dark"] .place-icon {
+  background: color-mix(in srgb, var(--kind) 22%, var(--surface));
+  color: color-mix(in srgb, var(--kind) 55%, #fff);
+}
 .place-icon svg {
   width: 19px;
   height: 19px;
@@ -89,36 +94,6 @@
   stroke-width: 1.75;
   stroke-linecap: round;
   stroke-linejoin: round;
-}
-.place-icon.home {
-  --kind: #5b7286;
-}
-.place-icon.shopping {
-  --kind: #2f6fb0;
-}
-.place-icon.salon {
-  --kind: #a14c7c;
-}
-.place-icon.water {
-  --kind: #1f86ad;
-}
-.place-icon.education {
-  --kind: #6c55b0;
-}
-.place-icon.bar {
-  --kind: #a0652f;
-}
-.place-icon.park {
-  --kind: #3f8a45;
-}
-.place-icon.food {
-  --kind: #c0612a;
-}
-.place-icon.health {
-  --kind: #c24646;
-}
-.place-icon.place {
-  --kind: var(--accent);
 }
 .table-wrap {
   overflow: auto;
@@ -178,34 +153,7 @@ td small {
   color: var(--text-2);
   font-size: 12.5px;
 }
-:root[data-theme="dark"] .place-icon.home {
-  --kind: #9fb3c4;
-}
-:root[data-theme="dark"] .place-icon.shopping {
-  --kind: #6fa8e6;
-}
-:root[data-theme="dark"] .place-icon.salon {
-  --kind: #e28ab9;
-}
-:root[data-theme="dark"] .place-icon.water {
-  --kind: #5cc0e6;
-}
-:root[data-theme="dark"] .place-icon.education {
-  --kind: #a893ec;
-}
-:root[data-theme="dark"] .place-icon.bar {
-  --kind: #e0a46a;
-}
-:root[data-theme="dark"] .place-icon.park {
-  --kind: #7cc883;
-}
-:root[data-theme="dark"] .place-icon.food {
-  --kind: #f09a63;
-}
-:root[data-theme="dark"] .place-icon.health {
-  --kind: #f08080;
-}
-@media (max-width: 760px) {
+:root[data-theme="dark"] :root[data-theme="dark"] :root[data-theme="dark"] :root[data-theme="dark"] :root[data-theme="dark"] :root[data-theme="dark"] :root[data-theme="dark"] :root[data-theme="dark"] :root[data-theme="dark"] @media (max-width: 760px) {
   /* Icon actions and pills fit beside the text, so rows stay on one line. */
   .rows .list-item {
     align-items: flex-start;

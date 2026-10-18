@@ -69,3 +69,9 @@ class SummariesRepository(Repository):
         return [row["summary_date"] for row in self.rows("""SELECT summary_date FROM daily_summaries
             WHERE timezone=? AND source='' AND summary_date>=? AND summary_date<=? ORDER BY summary_date""",
             (timezone_name, first, last))]
+
+    def records_between(self, timezone_name, first, last):
+        """Every stored day with data from first to last (YYYY-MM-DD), oldest first, as {date, summary}."""
+        return [{"date": row["summary_date"], "summary": json.loads(row["summary"])} for row in self.rows(
+            """SELECT summary_date,summary FROM daily_summaries WHERE timezone=? AND source='' AND points>0
+            AND summary_date>=? AND summary_date<=? ORDER BY summary_date""", (timezone_name, first, last))]

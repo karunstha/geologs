@@ -87,6 +87,12 @@ class PointsRepository(Repository):
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         return self.execute("SELECT COUNT(*) AS n FROM point_observations" + where, args).fetchone()["n"]
 
+    def local_dates(self, start, end, timezone_name):
+        """The local dates (YYYY-MM-DD, in a timezone) that have a sample between two instants."""
+        return [row["day"] for row in self.rows("""SELECT DISTINCT to_char(timestamp::timestamptz AT TIME ZONE ?, 'YYYY-MM-DD') AS day
+            FROM point_observations WHERE timestamp>=? AND timestamp<=? ORDER BY day""",
+            (timezone_name, parse_time(start), parse_time(end)))]
+
     def nearest_in_time(self, timestamp):
         at = parse_time(timestamp)
         columns = "id,source,external_id,timestamp,lat,lon,accuracy_m,speed_mps,speed_origin,mode"

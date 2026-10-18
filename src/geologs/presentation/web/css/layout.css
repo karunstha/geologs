@@ -61,30 +61,18 @@ body:has(#explore-view.active) .topbar:not(.scrolled) {
 .brand-mark {
   width: 28px;
   height: 28px;
-  display: grid;
-  place-items: center;
-  border-radius: 8px;
-  background: var(--accent);
-  color: var(--on-accent);
+  display: block;
+  flex: none;
 }
 .brand-mark svg {
-  width: 18px;
-  height: 18px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 2.1;
-  stroke-linecap: round;
-  stroke-linejoin: round;
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 .brand-mark.large {
-  width: 44px;
-  height: 44px;
-  border-radius: 12px;
+  width: 48px;
+  height: 48px;
   margin-bottom: 16px;
-}
-.brand-mark.large svg {
-  width: 26px;
-  height: 26px;
 }
 .main-nav {
   display: flex;

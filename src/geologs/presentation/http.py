@@ -39,9 +39,11 @@ from ..services.ingest import record_locations
 from ..services.location import current_location
 from ..services.overview import daily_briefs, daily_overview, daily_overviews, save_scheduled_summaries, stored_daily_record
 from ..services.paths import exclude_path, include_path, learn_path_history, learn_recent_paths, list_paths
+from ..services.periods import period_summary
+from ..services.place_routes import route_map
 from ..services.patterns import insights, place_overview, place_patterns, predict_next, resolve_place_patterns, search_visits, transitions, visited_places
 from ..services.places import geocode, nearby_places, place_details, places_provider, reverse_geocode
-from ..services.reminders import cancel_reminder, create_reminder
+from ..services.reminders import cancel_reminder, create_reminder, delete_reminder
 from ..services.samples import delete_samples, delete_source, export_geojson, near, stats
 from ..services.saved_places import delete_label, delete_place, enrich_saved_places, place_visits, save_place, save_place_label
 from ..services.settings import place_providers, save_settings
@@ -540,6 +542,7 @@ class Handler(BaseHTTPRequestHandler):
             elif url.path == "/api/day": value = day_summary(db, q["date"], q.get("timezone") or db.settings.get()["timezone"], q.get("source"))
             elif url.path == "/api/daily-summary": value = daily_overview(db, q["date"], q.get("timezone"), q.get("source"))
             elif url.path == "/api/daily-summaries": value = daily_overviews(db, q.get("start"), q.get("end"), q.get("limit", 90))
+            elif url.path == "/api/period-summary": value = period_summary(db, q["period"])
             elif url.path == "/api/daily-summary/stored": value = stored_daily_record(db, q["date"])
             elif url.path == "/api/sources":
                 value = {**source_activity(db), "ingest_token": bool(config.ingest_token()), "formats": list(INGEST_FORMATS),
@@ -565,6 +568,7 @@ class Handler(BaseHTTPRequestHandler):
             elif url.path == "/api/nearby-places": value = nearby_places(db, q["lat"], q["lon"], q.get("radius_m"), q.get("limit", 15))
             elif url.path == "/api/export.geojson": value = export_geojson(db, q.get("start"), q.get("end"))
             elif url.path == "/api/paths": value = list_paths(db, q.get("limit", 200))
+            elif url.path == "/api/route-map": value = route_map(db, q["south"], q["west"], q["north"], q["east"], q.get("limit", 300))
             else:
                 self.error_json(404, "not found"); return
             self.send_json(200, value)
@@ -703,6 +707,8 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/place-labels/delete": result = delete_label(db, payload["id"])
             elif path == "/api/reminders": result = create_reminder(db, payload)
             elif path == "/api/reminders/cancel": result = cancel_reminder(db, payload["id"])
+            elif path == "/api/reminders/delete": result = delete_reminder(db, payload["id"])
+            elif path == "/api/reminders/clear-history": result = delete_reminder(db)
             else:
                 self.error_json(404, "not found"); return
             self.send_json(200, result)

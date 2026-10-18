@@ -2,6 +2,7 @@
 import { toast } from "../core/dom.js";
 import { state } from "../core/state.js";
 import { map } from "../map/map.js";
+import { showPlacesMap } from "../map/places-map.js";
 import { renderExplore } from "./history.js";
 import { refreshSources } from "./settings.js";
 import { refreshAdmin } from "./admin.js";
@@ -17,6 +18,7 @@ export function showView(view) {
     else el.removeAttribute("aria-current");
   });
   if (view === "explore" && map) setTimeout(() => map.invalidateSize(), 20);
+  if (view === "places") showPlacesMap();
   if (view === "summaries") refreshSummaries().catch((error) => toast(error.message));
   if (view === "admin") refreshAdmin().catch((error) => toast(error.message));
 }

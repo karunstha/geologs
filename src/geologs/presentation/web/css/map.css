@@ -1,17 +1,37 @@
 /* Leaflet map: controls, popups, visit pins, and the dark-theme map. */
-/* A visit's pin: the kind of place, solid, with the visit's number on its corner (see .stop-badge). */
-.visit-pin .place-icon {
+/* A visit's pin: its number, in the colour of its kind of place; Home is its house. */
+.stop-pin {
+  --kind: var(--accent);
+  min-width: 30px;
+  height: 30px;
+  padding: 0 7px;
+  display: grid;
+  place-items: center;
+  border: 2px solid #fff;
+  border-radius: 15px;
+  background: color-mix(in srgb, var(--kind) 85%, #000);
+  color: #fff;
+  font: 750 13px/1 var(--font);
+  font-variant-numeric: tabular-nums;
+  box-shadow: 0 2px 8px rgb(0 0 0/0.3);
+}
+.stop-pin.many {
+  font-size: 11.5px;
+}
+.stop-pin.home {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  box-shadow: none;
+}
+.visit-pin .place-icon,
+:root[data-theme="dark"] .visit-pin .place-icon {
   flex-basis: 36px;
   border: 2px solid #fff;
   background: color-mix(in srgb, var(--kind) 82%, #000);
   color: #fff;
   box-shadow: 0 2px 8px rgb(0 0 0/0.3);
-}
-.visit-pin .stop-num {
-  top: -7px;
-  left: -7px;
-  border-color: #fff;
-  box-shadow: 0 1px 4px rgb(0 0 0/0.3);
 }
 .map-popup {
   display: flex;

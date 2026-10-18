@@ -4,7 +4,7 @@ import { $, safe, toast } from "../core/dom.js";
 import { clock, clockPrecise, durationText, formatTime, kmh, lengthText, longDate, plural, speedUnit, toSpeedUnit } from "../core/format.js";
 import { state } from "../core/state.js";
 import { onEach, rowActions } from "../ui/actions.js";
-import { modeInfo, modeName, sourceName, stopBadge, visitNumbers, zoneText } from "../ui/icons.js";
+import { modeInfo, modeName, placeIcon, sourceName, visitNumbers, zoneText } from "../ui/icons.js";
 import { focusPlaceOnMap, params, refreshExplore } from "./history.js";
 import { refreshInsights } from "./patterns.js";
 import { dayVisits, editVisitedPlace } from "./place-dialogs.js";
@@ -33,7 +33,7 @@ export function renderDayPlaces(day) {
         ].filter(Boolean);
         const address =
           place.address && place.address !== place.name ? `<span>${safe(place.address)}</span>` : "";
-        return `<div class="list-item"><div class="place-main">${stopBadge(place, numbers.get(place.cluster_id))}<div><strong>${safe(name)}</strong><small>${safe(details.join(" · "))}</small>${address}</div></div>${rowActions(
+        return `<div class="list-item"><div class="place-main">${numbers.has(place.cluster_id) ? placeIcon(place) : placeIcon({ name: "Home" })}<div><strong>${safe(name)}</strong><small>${safe(details.join(" · "))}</small>${address}</div></div>${rowActions(
           [
             { icon: "map", label: "Show on map", data: `data-day-place="${place.cluster_id}"` },
             { icon: "edit", label: "Rename this place", data: `data-rename-day-place="${place.cluster_id}"` },

@@ -3,7 +3,7 @@ import { api } from "../core/api.js";
 import { $, copyText, safe, toast } from "../core/dom.js";
 import { clock, coordinateText, durationText, formatTime, kmh, lengthText, localDateKey, radiusText } from "../core/format.js";
 import { state } from "../core/state.js";
-import { modeInfo, modeName, stopBadge, tripColors, visitNumbers } from "../ui/icons.js";
+import { modeInfo, modeName, stopPin, tripColors, visitNumbers } from "../ui/icons.js";
 import { params } from "../views/history.js";
 import { dayVisits, editVisitedPlace } from "../views/place-dialogs.js";
 import { renderModePicker, stayWhen } from "../views/timeline.js";
@@ -264,13 +264,13 @@ export function drawMap(fit = false) {
   const numbers = visitNumbers(day).byPlace;
   for (const place of day?.places_including_home || []) {
     const number = numbers.get(place.cluster_id);
-    // The same badge as the lists: the kind of place, with the number of each visit on its corner
-    // ("1·3" for a place visited twice).
+    // The number of each visit ("1·3" for a place visited twice), in its kind's colour.
+    const many = String(number || "").length > 2;
     const icon = L.divIcon({
       className: "visit-pin",
-      html: stopBadge(place, number),
-      iconSize: [38, 38],
-      iconAnchor: [19, 19],
+      html: stopPin(place, number),
+      iconSize: number ? [many ? 44 : 30, 30] : [36, 36],
+      iconAnchor: number ? [many ? 22 : 15, 15] : [18, 18],
     });
     const minutes = durationText(place.observed_minutes);
     L.marker([place.lat, place.lon], { icon, title: place.name || place.display_name })

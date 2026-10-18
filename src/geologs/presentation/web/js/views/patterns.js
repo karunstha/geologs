@@ -4,7 +4,7 @@ import { $, safe } from "../core/dom.js";
 import { plural } from "../core/format.js";
 import { state } from "../core/state.js";
 import { onEach, rowActions } from "../ui/actions.js";
-import { focusPlaceOnMap } from "./history.js";
+import { focusRoute } from "../map/places-map.js";
 
 // The server's reasons, said plainly.
 const NO_PREDICTION = {
@@ -38,13 +38,10 @@ export function renderPatterns() {
     moves
       .map(
         (move, index) =>
-          `<div class="list-item"><div><strong>${safe(move.from_name)} <span class="arrow" aria-label="to">→</span> ${safe(move.to_name)}</strong><small>${plural(move.count, "time")}</small></div>${rowActions([{ icon: "map", label: `Show ${move.to_name} on map`, data: `data-transition="${index}"` }])}</div>`,
+          `<div class="list-item"><div><strong>${safe(move.from_name)} <span class="arrow" aria-label="to">→</span> ${safe(move.to_name)}</strong><small>${plural(move.count, "time")}</small></div>${rowActions([{ icon: "map", label: "Show on the map", data: `data-transition="${index}"` }])}</div>`,
       )
-      .join("") || '<p class="empty">Routes appear after trips between two or more places.</p>';
-  onEach(moveBox, "transition", (index) => {
-    const move = moves[+index];
-    focusPlaceOnMap({ lat: move.to_lat, lon: move.to_lon, display_name: move.to_name });
-  });
+      .join("") || '<p class="empty">Trips between your places show here.</p>';
+  onEach(moveBox, "transition", (index) => focusRoute(moves[+index]));
 }
 
 export async function refreshInsights() {

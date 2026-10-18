@@ -9,13 +9,14 @@ import { refreshInsights } from "../views/patterns.js";
 import { renderPlaces } from "../views/places.js";
 import { renderReminders } from "../views/reminders.js";
 import { renderSettings } from "../views/settings.js";
+import { setSunPosition } from "../ui/theme.js";
 
 export async function refreshMeta() {
   let overview;
   [state.places, overview, state.reminders, state.reminderHistory, state.events, state.labels] =
     await Promise.all([
       api("/api/places"),
-      api("/api/place-overview?limit=100"),
+      api("/api/place-overview?limit=5000"),
       api("/api/reminders"),
       api("/api/reminder-history?limit=200"),
       api("/api/events"),
@@ -52,6 +53,7 @@ export async function refreshAll() {
     showUser();
     state.status = status;
     state.current = current;
+    setSunPosition(current);
     state.settings = settings;
     if (state.followToday) $("day-date").value = localDateKey();
     renderCurrent();

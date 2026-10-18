@@ -44,6 +44,16 @@ class RemindersRepository(Repository):
         return bool(self.execute("UPDATE reminders SET active=0,cancelled_at=? WHERE id=? AND active=1",
                                  (at, int(reminder_id))).rowcount)
 
+    def delete_ended(self, reminder_id=None):
+        """Forget ended reminders (one, or all of them) and the events they fired; the ids of the
+        places they pointed at, which may now be unused."""
+        where, args = ("WHERE active=0 AND id=?", (int(reminder_id),)) if reminder_id is not None else ("WHERE active=0", ())
+        ended = self.rows(f"SELECT id,place_id FROM reminders {where}", args)
+        for reminder in ended:
+            self.execute("DELETE FROM events WHERE reminder_id=?", (reminder["id"],))
+            self.execute("DELETE FROM reminders WHERE id=?", (reminder["id"],))
+        return ended
+
     def geofenced(self):
         """Active reminders that wait for arrival at a place, with its position and radius."""
         return self.rows(f"""SELECT {REMINDER}, p.lat AS place_lat, p.lon AS place_lon, p.radius_m,

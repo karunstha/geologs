@@ -348,28 +348,6 @@
   color: var(--text-3);
   font-size: 12px;
 }
-.stop-badge {
-  position: relative;
-  flex: none;
-  display: inline-block;
-  line-height: 0;
-}
-.stop-num {
-  position: absolute;
-  top: -6px;
-  left: -6px;
-  min-width: 19px;
-  height: 19px;
-  padding: 0 5px;
-  display: grid;
-  place-items: center;
-  border: 2px solid var(--surface);
-  border-radius: 10px;
-  background: var(--accent);
-  color: var(--on-accent);
-  font: 700 11px/1 var(--font);
-  font-variant-numeric: tabular-nums;
-}
 .activity-tag {
   align-self: flex-start;
   display: inline-flex;

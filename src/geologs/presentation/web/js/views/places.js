@@ -5,7 +5,8 @@ import { ago, clock, dateLabel, durationText, formatTime, localDateKey, plural, 
 import { state } from "../core/state.js";
 import { onEach, rowActions } from "../ui/actions.js";
 import { modeName, placeIcon, zoneText } from "../ui/icons.js";
-import { focusPlaceOnMap, refreshExplore } from "./history.js";
+import { drawSaved, drawVisited, fitPlacesMap, focusPlace, onPlacesMapMove, placesInView, setPlacesMapMode } from "../map/places-map.js";
+import { refreshExplore } from "./history.js";
 import { afterPlaceNamesChanged, editVisitedPlace, openPlaceDialog } from "./place-dialogs.js";
 import { fillPlaceSelectors } from "./reminders.js";
 import { showView } from "./shell.js";
@@ -45,9 +46,9 @@ function renderSavedPlaces() {
         )}</div>`;
       })
       .join("") ||
-    `<div class="empty-block"><strong>No saved places yet</strong><span>Save places like Home, work, or a campus. Visits inside keep their own names; the zone adds up your time there and can fire arrival reminders.</span><button type="button" class="button secondary small" data-add-first-place>Add a place</button></div>`;
+    `<div class="empty-block"><strong>No saved places yet</strong><span>Save Home, work or a campus to add up your time there.</span><button type="button" class="button secondary small" data-add-first-place>Add a place</button></div>`;
   const find = (id) => state.places.find((place) => place.id === +id);
-  onEach(box, "focus", (id) => focusPlaceOnMap(find(id)));
+  onEach(box, "focus", (id) => focusPlace(find(id)));
   onEach(box, "edit", (id) => openPlaceDialog(find(id)));
   onEach(box, "add-first-place", () => openPlaceDialog());
   onEach(box, "delete-place", async (id) => {
@@ -68,14 +69,24 @@ function renderSavedPlaces() {
   });
 }
 
+// Only places in the map's view are listed, at most this many, so a long history stays quick.
+const LIST_LIMIT = 80;
+
 function renderVisitedPlaces() {
-  const places = state.visitedPlaces;
-  $("visited-place-count").textContent = places.length ? places.length.toLocaleString() : "";
+  const all = state.visitedPlaces || [];
+  $("visited-place-count").textContent = all.length ? all.length.toLocaleString() : "";
+  const places = placesInView(all);
+  const shown = places.slice(0, LIST_LIMIT);
   const box = $("all-visited-places");
+  $("visited-in-view").textContent = !all.length
+    ? ""
+    : places.length > shown.length
+      ? `${shown.length} of ${places.length.toLocaleString()} in view, by time spent. Zoom in for the rest.`
+      : `${plural(places.length, "place")} in view, by time spent.`;
   // A thin bar shows each place's time against the place you spend most time at.
-  const most = Math.max(1, ...places.map((place) => place.observed_minutes || 0));
+  const most = Math.max(1, ...all.map((place) => place.observed_minutes || 0));
   box.innerHTML =
-    places
+    shown
       .map((place, index) => {
         const details = [
           zoneText(place.zone, place.display_name),
@@ -83,24 +94,25 @@ function renderVisitedPlaces() {
           `last ${ago(place.last_seen)}`,
         ].filter(Boolean);
         const share = Math.max(2, Math.round(((place.observed_minutes || 0) / most) * 100));
-        return `<div class="list-item"><div class="place-main">${placeIcon(place)}<div class="place-text"><div class="place-line"><strong>${safe(place.display_name)}</strong><b class="place-time">${safe(durationText(place.observed_minutes))}</b></div><small title="${safe(formatTime(place.last_seen))}">${safe(details.join(" · "))}</small><div class="time-bar" aria-hidden="true"><i style="width:${share}%"></i></div></div></div>${rowActions(
-          [
-            { icon: "map", label: "Show on map", data: `data-map-visited="${index}"` },
-            { icon: "edit", label: "Rename this place", data: `data-rename-visited="${index}"` },
-          ],
+        return `<div class="list-item"><button type="button" class="place-main place-pick" data-map-visited="${index}" title="Show on the map">${placeIcon(place)}<div class="place-text"><div class="place-line"><strong>${safe(place.display_name)}</strong><b class="place-time">${safe(durationText(place.observed_minutes))}</b></div><small title="${safe(formatTime(place.last_seen))}">${safe(details.join(" · "))}</small><div class="time-bar" aria-hidden="true"><i style="width:${share}%"></i></div></div></button>${rowActions(
+          [{ icon: "edit", label: "Rename this place", data: `data-rename-visited="${index}"` }],
         )}</div>`;
       })
       .join("") ||
-    `<div class="empty-block"><strong>No places yet</strong><span>A place appears here after a stay of ${state.settings?.stay_min_minutes ?? 15} minutes or more.</span></div>`;
-  onEach(box, "map-visited", (index) => focusPlaceOnMap(places[+index]));
+    (all.length
+      ? '<div class="empty-block"><strong>Nothing here</strong><span>Move or zoom out the map to see your places.</span></div>'
+      : `<div class="empty-block"><strong>No places yet</strong><span>A place appears after a stay of ${state.settings?.stay_min_minutes ?? 15} minutes or more.</span></div>`);
+  onEach(box, "map-visited", (index) => focusPlace(shown[+index]));
   // From here there is no particular visit, so a correction applies to every visit to the spot.
-  onEach(box, "rename-visited", (index) => editVisitedPlace(places[+index], []));
+  onEach(box, "rename-visited", (index) => editVisitedPlace(shown[+index], []));
 }
 
 export function renderPlaces() {
   fillPlaceSelectors();
   renderSavedPlaces();
   renderVisitedPlaces();
+  drawVisited();
+  drawSaved();
 }
 
 function showResults(html) {
@@ -161,8 +173,11 @@ export function initPlaces() {
       document
         .querySelectorAll("[data-places-panel]")
         .forEach((panel) => panel.classList.toggle("active", panel.dataset.placesPanel === tab));
+      setPlacesMapMode(tab);
     };
   });
+  onPlacesMapMove(renderVisitedPlaces);
+  $("places-fit").onclick = fitPlacesMap;
   $("add-place").onclick = () => openPlaceDialog();
   $("visit-search-form").onsubmit = async (event) => {
     event.preventDefault();

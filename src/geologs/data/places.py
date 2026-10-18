@@ -50,6 +50,11 @@ class PlacesRepository(Repository):
     def delete(self, place_id):
         self.execute("DELETE FROM places WHERE id=?", (int(place_id),))
 
+    def delete_if_unused(self, place_id):
+        """Drop a hidden place (a reminder's destination) once no reminder points at it."""
+        self.execute("""DELETE FROM places WHERE id=? AND COALESCE(saved,1)=0
+            AND NOT EXISTS (SELECT 1 FROM reminders WHERE place_id=places.id)""", (int(place_id),))
+
     def labels(self):
         """Name corrections. Without a time window one names every visit to its spot;
         with one (and usually a source) it names only the visit it was made for."""

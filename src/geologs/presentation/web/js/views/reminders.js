@@ -88,10 +88,32 @@ export function renderReminders() {
       .map((item) => {
         const fired = item.status === "triggered";
         const at = fired ? item.triggered_at || item.last_triggered_at : item.cancelled_at || item.created_at;
-        return `<div class="list-item reminder-row"><div class="reminder-main"><strong>${safe(item.text)}</strong><small>${whereMarkup(item)}<span title="${safe(formatTime(at))}">${fired ? "Fired" : "Cancelled"} ${safe(ago(at))}</span></small></div>${statusPill(fired ? "success" : "neutral", fired ? "Fired" : "Cancelled")}</div>`;
+        return `<div class="list-item reminder-row"><div class="reminder-main"><strong>${safe(item.text)}</strong><small>${whereMarkup(item)}<span title="${safe(formatTime(at))}">${fired ? "Fired" : "Cancelled"} ${safe(ago(at))}</span></small></div><div class="reminder-end">${statusPill(fired ? "success" : "neutral", fired ? "Fired" : "Cancelled")}${rowActions([{ icon: "delete", label: "Delete from history", data: `data-delete-reminder="${item.id}"`, tone: "danger" }])}</div></div>`;
       })
-      .join("") ||
-    '<div class="empty-block"><strong>No history yet</strong><span>Reminders that fire or are cancelled are kept here.</span></div>';
+      .join("") || '<div class="empty-block"><strong>No history yet</strong><span>Fired and cancelled reminders show here.</span></div>';
+  const history = $("reminder-history");
+  if (state.reminderHistory.length)
+    history.insertAdjacentHTML("beforeend", '<div class="list-foot"><button type="button" class="button secondary small" data-clear-history>Clear history</button></div>');
+  onEach(history, "delete-reminder", async (id) => {
+    try {
+      await post("/api/reminders/delete", { id: +id });
+      await refreshMeta();
+      toast("Deleted from history");
+    } catch (error) {
+      toast(error.message);
+    }
+  });
+  history.querySelector("[data-clear-history]")?.addEventListener("click", async () => {
+    const count = state.reminderHistory.length;
+    if (!confirm(`Delete all ${count} reminder${count === 1 ? "" : "s"} in history? This can't be undone.`)) return;
+    try {
+      await post("/api/reminders/clear-history", {});
+      await refreshMeta();
+      toast("History cleared");
+    } catch (error) {
+      toast(error.message);
+    }
+  });
 }
 
 function showReminderTab(tab) {

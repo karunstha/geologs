@@ -277,7 +277,7 @@ export function renderPlacesProvider() {
     .join("");
   $("places-provider-help").textContent = providers.some((provider) => provider.configured)
     ? "Turns coordinates into place names for stays, places, and search."
-    : "No provider is set up yet. Add an API key to .env and restart the server; until then places are named by address or not at all.";
+    : "No provider set up. Add an API key to .env and restart; until then places are named by address.";
   document
     .querySelectorAll('input[name="places-provider"]')
     .forEach((input) => (input.onchange = updateProviderNotice));
@@ -728,7 +728,7 @@ export function renderPriority(focusSource, focusMove) {
   list.classList.toggle("single", !several);
   $("priority-note").hidden = !!order.length;
   $("priority-help").textContent = several
-    ? "Most trusted first. When trackers disagree about the same moment, the higher one wins; the others only fill times it has nothing to say. Drag or use the arrows to reorder."
+    ? "Most trusted first: when trackers disagree, the higher one wins. Drag to reorder."
     : "Once a second tracker sends locations, you can choose which one wins when they disagree.";
   $("priority-help").hidden = !order.length;
   list.innerHTML = order

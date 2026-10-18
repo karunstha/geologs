@@ -892,3 +892,553 @@
   font-size: 20px;
   font-weight: 650;
 }
+
+/* Day, Month or Year, and the period's arrows. */
+.summary-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.period-step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.period-label {
+  min-width: 132px;
+  text-align: center;
+  font-size: 14.5px;
+  font-weight: 650;
+}
+
+/* A month or year: photos of its towns, then what it added up to. */
+.period-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.period-hero {
+  position: relative;
+  overflow: hidden;
+  min-height: 260px;
+  color: #fff;
+}
+.period-mosaic {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  gap: 2px;
+  background: #111;
+}
+.period-mosaic.n2 {
+  grid-template-columns: 1.4fr 1fr;
+}
+.period-mosaic.n3 {
+  grid-template-columns: 1.6fr 1fr;
+  grid-template-rows: 1fr 1fr;
+}
+.period-mosaic.n3 figure:first-child {
+  grid-row: span 2;
+}
+.period-mosaic.n4 {
+  grid-template-columns: 1.6fr 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
+}
+.period-mosaic.n4 figure:first-child {
+  grid-row: span 2;
+}
+.period-mosaic.n4 figure:last-child {
+  grid-column: span 2;
+}
+.period-mosaic figure {
+  position: relative;
+  margin: 0;
+  background: var(--tone) var(--photo) center / cover no-repeat;
+}
+.period-mosaic figcaption {
+  position: absolute;
+  right: 10px;
+  bottom: 8px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: rgb(0 0 0/0.38);
+  backdrop-filter: blur(6px);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+.period-mosaic.empty {
+  background:
+    radial-gradient(circle at 18% 30%, rgb(255 255 255/0.16) 0 2px, transparent 3px) 0 0 / 34px 34px,
+    linear-gradient(135deg, #0f766e, #134e4a 55%, #1e293b);
+}
+.period-hero::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, rgb(0 0 0/0.62), rgb(0 0 0/0.2) 55%, transparent);
+  pointer-events: none;
+}
+.period-hero-text {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  min-height: 260px;
+  max-width: 560px;
+  padding: 28px 30px;
+}
+.period-kicker {
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  opacity: 0.8;
+}
+.period-hero h2 {
+  margin: 4px 0 6px;
+  font-size: clamp(28px, 4vw, 40px);
+  font-weight: 750;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+}
+.period-hero-text > p:not(.period-credits) {
+  font-size: 15px;
+  opacity: 0.92;
+}
+.period-credits {
+  margin: 10px 0 0;
+  color: rgb(255 255 255/0.62);
+  font-size: 10.5px;
+}
+.period-credits a {
+  color: inherit;
+}
+.period-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text-2);
+  font-size: 13px;
+}
+.period-progress .summary-spinner {
+  width: 16px;
+  height: 16px;
+}
+.period-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+  margin: 0;
+}
+.period-facts > div {
+  padding: 16px 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.period-facts dt {
+  color: var(--text-2);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.period-facts dd {
+  margin: 4px 0 0;
+  font-size: 24px;
+  font-weight: 720;
+  letter-spacing: -0.01em;
+  font-variant-numeric: tabular-nums;
+}
+.period-facts small {
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 650;
+}
+.period-highlights {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+.highlight {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 16px 18px;
+  border: 1px solid var(--border);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+button.highlight {
+  cursor: pointer;
+}
+button.highlight:hover {
+  border-color: var(--accent);
+}
+.highlight span {
+  color: var(--text-3);
+  font-size: 11.5px;
+  font-weight: 650;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.highlight strong {
+  font-size: 15.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.highlight small {
+  color: var(--text-2);
+  font-size: 12.5px;
+}
+.period-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+.period-column {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+.period-card {
+  padding: 18px 20px;
+}
+.period-card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.period-card-head h3 {
+  font-size: 15px;
+  font-weight: 680;
+}
+.period-card-head small {
+  color: var(--text-3);
+  font-size: 12px;
+}
+.period-pending {
+  color: var(--accent) !important;
+}
+
+/* The calendar: each day tinted by how far you went. */
+.cal-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--text-3);
+  font-size: 11.5px;
+}
+.cal-key i {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--accent) var(--level), var(--surface-2));
+}
+.cal-weekdays,
+.cal-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 5px;
+}
+.cal-weekdays {
+  margin-bottom: 6px;
+  color: var(--text-3);
+  font-size: 11px;
+  font-weight: 650;
+  text-align: center;
+}
+.cal-cell {
+  --level: 0%;
+  aspect-ratio: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  min-width: 0;
+  padding: 5px 6px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--text-3);
+  font: inherit;
+  text-align: left;
+}
+.cal-cell.has {
+  background: color-mix(in srgb, var(--accent) var(--level), var(--surface-2));
+  color: var(--text);
+  cursor: pointer;
+}
+.cal-cell.has:hover {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.cal-cell span {
+  font-size: 12px;
+  font-weight: 650;
+}
+.cal-cell small {
+  overflow: hidden;
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.cal-cell.future {
+  opacity: 0.35;
+}
+.cal-blank {
+  aspect-ratio: 1;
+}
+.year-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px 12px;
+}
+.year-month {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.year-month:hover:not(:disabled) {
+  background: var(--surface-2);
+}
+.year-month:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+.year-month-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 12.5px;
+}
+.year-month-head small {
+  color: var(--text-3);
+  font-size: 11px;
+}
+.cal-grid.mini {
+  gap: 2px;
+}
+.cal-grid.mini .cal-cell,
+.cal-grid.mini .cal-blank {
+  padding: 0;
+  border-radius: 2px;
+}
+
+/* Towns, with their photo. */
+.town-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.town {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.town-photo {
+  flex: none;
+  width: 64px;
+  height: 46px;
+  border-radius: 9px;
+  background: var(--surface-3) center / cover no-repeat;
+}
+.town-photo.none {
+  background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 40%, var(--surface-2)), var(--surface-3));
+}
+.town-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+.town-text small,
+.town-time small {
+  color: var(--text-3);
+  font-size: 12px;
+}
+.town-time {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  font-size: 13px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+.period-places {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.period-places li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.period-rank {
+  width: 18px;
+  flex: none;
+  color: var(--text-3);
+  font-size: 12px;
+  font-weight: 650;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.period-place-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.period-place-text strong {
+  overflow: hidden;
+  font-size: 13.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.period-place-text small {
+  color: var(--text-3);
+  font-size: 12px;
+}
+.new-places {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.new-place {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 100%;
+  padding: 3px 11px 3px 3px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.new-place .place-icon {
+  flex-basis: 24px;
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+}
+.new-place .place-icon svg {
+  width: 13px;
+  height: 13px;
+}
+.new-place > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* How you got around, and the week's rhythm. */
+.period-travel {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+  gap: 24px;
+}
+.mode-share {
+  display: flex;
+  height: 10px;
+  margin-bottom: 14px;
+  overflow: hidden;
+  border-radius: 5px;
+  gap: 2px;
+}
+.mode-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.mode-list li {
+  display: grid;
+  grid-template-columns: auto auto 1fr auto;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+.mode-list span {
+  color: var(--text-2);
+  font-size: 12px;
+}
+.mode-list b {
+  font-variant-numeric: tabular-nums;
+}
+.weekday-bars {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  align-items: end;
+  gap: 6px;
+  height: 120px;
+}
+.weekday-bars span {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 5px;
+  height: 100%;
+}
+.weekday-bars i {
+  width: 100%;
+  max-width: 22px;
+  border-radius: 5px 5px 2px 2px;
+  background: color-mix(in srgb, var(--accent) 75%, var(--surface));
+}
+.weekday-bars small {
+  color: var(--text-3);
+  font-size: 11px;
+  font-weight: 650;
+}
+@media (max-width: 1080px) {
+  .period-grid,
+  .period-travel {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+@media (max-width: 640px) {
+  .period-hero,
+  .period-hero-text {
+    min-height: 220px;
+  }
+  .period-hero-text {
+    padding: 20px;
+  }
+  .period-mosaic figcaption {
+    display: none;
+  }
+  .period-hero::after {
+    background: linear-gradient(0deg, rgb(0 0 0/0.72), rgb(0 0 0/0.25) 70%, transparent);
+  }
+  .year-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .cal-cell small {
+    display: none;
+  }
+  .summary-controls {
+    width: 100%;
+  }
+}

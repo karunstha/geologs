@@ -19,6 +19,7 @@ import { state } from "../core/state.js";
 import { actionIcon } from "../ui/actions.js";
 import { modeIcon, modeInfo, modeName, placeIcon, summaryIcons, zoneText } from "../ui/icons.js";
 import { refreshExplore } from "./history.js";
+import { initPeriods, refreshPeriod } from "./periods.js";
 import { showView } from "./shell.js";
 
 export function summaryLine(item) {
@@ -74,6 +75,7 @@ async function renderFuelSpend() {
 }
 
 export async function refreshSummaries() {
+  refreshPeriod();
   renderFuelSpend();
   state.summaryCatalog = await api("/api/daily-summaries?limit=1000");
   $("summary-count").textContent = state.summaryCatalog.length
@@ -83,7 +85,7 @@ export async function refreshSummaries() {
   const index = $("summary-index");
   index.innerHTML =
     catalogMarkup(state.summaryCatalog) ||
-    '<div class="empty-block"><strong>No saved days yet</strong><span>Open any day above and its summary is saved.</span></div>';
+    '<div class="empty-block"><strong>No saved days yet</strong><span>Open any day and it is saved here.</span></div>';
   index.querySelectorAll("[data-summary]").forEach((button) => {
     button.onclick = () => openSummary(button.dataset.summary, true);
   });
@@ -139,7 +141,7 @@ export async function openSummary(date, reveal = false, fallback = false) {
 function renderNothingRecorded(date) {
   const box = $("summary-detail");
   box.removeAttribute("aria-busy");
-  box.innerHTML = `<div class="summary-empty-state"><span class="empty-icon" aria-hidden="true">${summaryIcons.places}</span><h2>Nothing recorded on ${safe(dayTitle(date))}</h2><p>No device sent a location that day, so there is nothing to summarize.</p>${state.summaryCatalog?.length ? '<button type="button" class="button secondary" id="summary-latest">Open the latest saved day</button>' : ""}</div>`;
+  box.innerHTML = `<div class="summary-empty-state"><span class="empty-icon" aria-hidden="true">${summaryIcons.places}</span><h2>Nothing recorded on ${safe(dayTitle(date))}</h2><p>No device sent a location that day.</p>${state.summaryCatalog?.length ? '<button type="button" class="button secondary" id="summary-latest">Open the latest saved day</button>' : ""}</div>`;
   if (state.summaryCatalog?.length)
     $("summary-latest").onclick = () => openSummary(state.summaryCatalog[0].date);
 }
@@ -280,7 +282,7 @@ function coverageMarkup(value) {
   const gaps = value.coverage_gaps || [];
   if (!gaps.length) return ""; // full coverage is the normal case; only gaps are worth a word
   const missing = gaps.reduce((sum, gap) => sum + gap.minutes, 0);
-  return `<section class="summary-coverage has-gaps"><span class="summary-coverage-icon" aria-hidden="true">!</span><div><strong>${safe(durationText(missing))} without location, in ${plural(gaps.length, "gap")}</strong><p>${gaps.map((gap) => `${safe(clock(gap.start))} – ${safe(clock(gap.end))}`).join(" · ")}. Where no samples arrived, GeoLogs can't say where you were.</p></div></section>`;
+  return `<section class="summary-coverage has-gaps"><span class="summary-coverage-icon" aria-hidden="true">!</span><div><strong>${safe(durationText(missing))} without location, in ${plural(gaps.length, "gap")}</strong><p>${gaps.map((gap) => `${safe(clock(gap.start))} – ${safe(clock(gap.end))}`).join(" · ")}.</p></div></section>`;
 }
 
 function neighbours(date) {
@@ -320,7 +322,7 @@ export function renderSummaryDetail(record) {
   // Rough token estimate (about 4 characters each) to show what the brief saves an AI tool.
   const tokens = (text) => "≈" + Math.round(text.length / 4).toLocaleString() + " tokens";
   const brief = record.brief;
-  const briefBlock = `<section class="summary-block summary-brief"><div class="brief-head"><div><h3>Brief for AI tools</h3><p>The same day in a few plain lines, for MCP tools and language models.</p></div>${brief ? `<small>${tokens(JSON.stringify(brief))} · full record ${tokens(JSON.stringify(value))}</small><button type="button" class="button secondary small" id="copy-brief">Copy brief</button>` : ""}</div>
+  const briefBlock = `<section class="summary-block summary-brief"><div class="brief-head"><div><h3>Brief for AI tools</h3><p>This day in a few lines, for MCP tools.</p></div>${brief ? `<small>${tokens(JSON.stringify(brief))} · full record ${tokens(JSON.stringify(value))}</small><button type="button" class="button secondary small" id="copy-brief">Copy brief</button>` : ""}</div>
     ${brief ? `<pre>${safe(JSON.stringify(brief, null, 2))}</pre>` : '<p class="empty">No brief is stored with this record yet. Refresh to build it.</p>'}</section>`;
   const { older, newer } = neighbours(record.date);
   const box = $("summary-detail");
@@ -358,6 +360,7 @@ export function renderSummaryDetail(record) {
 }
 
 export function initSummaries() {
+  initPeriods(openSummary);
   $("summary-open-form").onsubmit = (event) => {
     event.preventDefault();
     const date = $("summary-date").value;
