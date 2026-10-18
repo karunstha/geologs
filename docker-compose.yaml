@@ -23,6 +23,7 @@ services:
 
   app:
     build: .
+    container_name: geologs
     depends_on:
       db:
         condition: service_healthy
