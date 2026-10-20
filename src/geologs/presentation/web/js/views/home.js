@@ -492,11 +492,16 @@ export function initHome() {
     const button = event.target.closest("[data-item]");
     if (button) openBriefItem(button);
   };
+  // The map's height follows the window (home.css fills it), so whenever the hero changes size the map is
+  // measured again and the day fitted again, unless a chosen stay or trip is being shown.
   let resizeTimer = 0;
-  window.addEventListener("resize", () => {
+  new ResizeObserver(() => {
+    map?.invalidateSize();
     clearTimeout(resizeTimer);
-    resizeTimer = setTimeout(restFit, 200);
-  });
+    resizeTimer = setTimeout(() => {
+      if (!(exploring && state.selected)) restFit();
+    }, 200);
+  }).observe($("home-hero"));
   document.addEventListener("geologs:day-drawn", renderHome);
   // The classic Home's keys: ← and → step through days, Esc closes the map.
   document.addEventListener("keydown", (event) => {

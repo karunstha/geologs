@@ -697,7 +697,6 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
   grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
   gap: 12px;
   margin-top: 12px;
-  align-items: start;
 }
 .home-side,
 .home-main {
@@ -761,6 +760,38 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
   color: var(--text-3);
   font-size: 11.5px;
 }
+/* Where the day went and Movement by hour are one height: their charts take what is left of it. */
+#home-view .home-panel {
+  display: flex;
+  flex-direction: column;
+}
+#home-view .home-panel .home-bars,
+#home-view .home-panel .home-hours {
+  flex: 1;
+  height: auto;
+  min-height: 110px;
+}
+
+/* A wide screen: Home fills the window. The head sits at the top, the two day cards at the bottom, and
+   the map takes the height between them (at least 440px; on a short window the page scrolls instead). */
+@media (min-width: 901px) {
+  body:has(#home-view.active) main {
+    padding-bottom: 24px;
+  }
+  #home-view.active {
+    display: flex;
+    flex-direction: column;
+    min-height: calc(100dvh - var(--topbar-h) - 1px - 28px - 24px);
+  }
+  #home-view .home-hero {
+    flex: 1 0 440px;
+    height: auto;
+  }
+  #home-view .home-hero.map-only {
+    flex-basis: 480px;
+  }
+}
+
 /* Narrower screens: the map on top, the glance cards below it, one column. */
 @media (max-width: 900px) {
   .home-hero,
