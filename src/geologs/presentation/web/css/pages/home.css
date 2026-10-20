@@ -316,16 +316,36 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
   z-index: 2;
   left: 0;
   bottom: 0;
-  width: min(470px, 40%);
+  width: min(400px, 34%);
   display: grid;
   gap: 10px;
 }
-.home-share {
+/* The timeline, on glass beside the map, below the Explore button. It stays while exploring (choosing a
+   stay or trip in it opens the map), moving inside the map's frame and clear of its bars. */
+.home-timeline {
   position: absolute;
-  z-index: 2;
+  z-index: 3;
+  top: 52px;
   right: 0;
   bottom: 0;
-  width: min(360px, 30%);
+  width: min(380px, 32%);
+  transition:
+    top 0.4s cubic-bezier(0.4, 0, 0.2, 1),
+    right 0.4s cubic-bezier(0.4, 0, 0.2, 1),
+    bottom 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.home-hero.exploring .home-timeline {
+  top: 60px;
+  right: 10px;
+  bottom: 50px;
+}
+#home-view #home-timeline #inspector {
+  height: 100%;
+  border-color: var(--home-glass-line);
+  background: var(--home-glass);
+  backdrop-filter: blur(22px) saturate(1.2);
+  -webkit-backdrop-filter: blur(22px) saturate(1.2);
+  box-shadow: 0 10px 30px rgb(0 0 0/0.08);
 }
 .home-card {
   border-radius: var(--home-radius);
@@ -348,6 +368,13 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
   margin-top: 2px;
   color: var(--home-on-glass-2);
   font-size: 13px;
+}
+/* Where the day went, below the map on a dark card. */
+#home-view .home-share .home-card-note {
+  color: var(--text-2);
+}
+#home-view .home-share .home-bar span {
+  color: var(--text-2);
 }
 .home-stats {
   display: flex;
@@ -535,9 +562,6 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
   color: var(--text);
   color-scheme: dark;
 }
-#home-view #inspector {
-  max-height: none;
-}
 #home-view .timeline-section {
   padding: 18px 14px 10px;
 }
@@ -549,9 +573,6 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
 #home-view .timeline-section > .card-head h2,
 #home-view .home-dark h2 {
   font-size: 19px;
-}
-#home-view .day-timeline {
-  overflow: visible;
 }
 #home-view .map-detail {
   max-height: 320px;
@@ -595,52 +616,6 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
   color: var(--text-3);
   font-size: 11.5px;
 }
-.home-notes {
-  display: grid;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-.home-notes li {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 10px 0;
-  border-top: 1px solid var(--border);
-}
-.home-notes li:first-child {
-  border-top: 0;
-  padding-top: 2px;
-}
-.home-notes strong {
-  display: block;
-  font-weight: 500;
-}
-.home-notes small {
-  display: block;
-  color: var(--text-2);
-  font-size: 12.5px;
-}
-.home-note-icon {
-  flex: none;
-  width: 32px;
-  height: 32px;
-  display: grid;
-  place-items: center;
-  border-radius: 10px;
-  background: var(--surface-3);
-  color: var(--accent-text);
-}
-.home-note-icon svg {
-  width: 16px;
-  height: 16px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.8;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-
 /* Narrower screens: the map on top, the glance cards below it, one column. */
 @media (max-width: 900px) {
   .home-hero,
@@ -680,15 +655,19 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
     grid-template-columns: 1fr;
   }
   .home-stack,
-  .home-share {
+  .home-timeline,
+  .home-hero.exploring .home-timeline {
     position: static;
     width: auto;
   }
   .home-stack {
     margin-top: 10px;
   }
-  .home-share {
+  .home-timeline {
     margin-top: 10px;
+  }
+  #home-view .day-timeline {
+    overflow: visible;
   }
 }
 @media (max-width: 760px) {

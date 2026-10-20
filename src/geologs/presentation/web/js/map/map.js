@@ -126,10 +126,26 @@ export function dayBounds() {
   return bounds;
 }
 
+// Pixels along the map's right edge that something drawn over it covers (the new Home's timeline), so
+// zooming to a day, a stay or a trip lands in the part still in view.
+let coveredRight = 0;
+export function setCoveredRight(pixels) {
+  coveredRight = Math.max(0, pixels || 0);
+}
+function clear(options = {}) {
+  return { ...options, paddingTopLeft: [0, 0], paddingBottomRight: [coveredRight, 0] };
+}
+
+// setView, with the point centred in the part of the map left in view.
+export function centerOn(latlng, zoom) {
+  map.setView(latlng, zoom, { animate: false });
+  if (coveredRight) map.panBy([coveredRight / 2, 0], { animate: false });
+}
+
 export function fitDay() {
   if (!map) return;
   const bounds = dayBounds();
-  if (bounds.length) map.fitBounds(L.latLngBounds(bounds).pad(0.12), { maxZoom: 15 });
+  if (bounds.length) map.fitBounds(L.latLngBounds(bounds).pad(0.12), clear({ maxZoom: 15 }));
   else if (state.places.length)
     map.fitBounds(L.latLngBounds(state.places.map((p) => [p.lat, p.lon])).pad(0.2), { maxZoom: 13 });
 }
@@ -401,12 +417,13 @@ export function drawSelection(zoom) {
       .addTo(highlightLayer);
   if (!zoom) return;
   if (item.type === "stay" && item.stay.kind === "area" && !item.stay.internal_moves?.length)
-    map.fitBounds(L.latLng(item.stay.lat, item.stay.lon).toBounds((item.stay.radius_m || 100) * 2.4), {
-      maxZoom: 16,
-    });
+    map.fitBounds(
+      L.latLng(item.stay.lat, item.stay.lon).toBounds((item.stay.radius_m || 100) * 2.4),
+      clear({ maxZoom: 16 }),
+    );
   else if ([...lines, ...fills, ...gaps].flat().length > 1)
-    map.fitBounds(L.latLngBounds([...lines, ...fills, ...gaps].flat()).pad(0.5), { maxZoom: 15 });
-  else map.setView([subject.lat ?? subject.from_lat, subject.lon ?? subject.from_lon], 16);
+    map.fitBounds(L.latLngBounds([...lines, ...fills, ...gaps].flat()).pad(0.5), clear({ maxZoom: 15 }));
+  else centerOn([subject.lat ?? subject.from_lat, subject.lon ?? subject.from_lon], 16);
 }
 
 export function selectItem(type, key) {

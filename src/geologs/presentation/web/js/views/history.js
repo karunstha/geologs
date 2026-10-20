@@ -16,7 +16,7 @@ import {
   zonedMidnight,
 } from "../core/format.js";
 import { state } from "../core/state.js";
-import { drawMap, drawSelection, fitDay, map, revealMap, selectedItem } from "../map/map.js";
+import { centerOn, drawMap, drawSelection, fitDay, map, revealMap, selectedItem } from "../map/map.js";
 import { modeIcon, modeInfo, placeIcon } from "../ui/icons.js";
 import { initAmbient, refreshAmbient } from "./ambient.js";
 import { initDayDetails, renderDayDetails } from "./day-details.js";
@@ -299,7 +299,7 @@ export function initHistory() {
   $("today").onclick = () => goToDate(localDateKey());
   $("locate").onclick = () => {
     const point = state.current || state.day?.last_location;
-    if (point && map) map.setView([point.lat, point.lon], 15);
+    if (point && map) centerOn([point.lat, point.lon], 15);
   };
   $("current-coordinates").onclick = () => {
     if (state.current) copyText(coordinateText(state.current.lat, state.current.lon), "Coordinates copied");

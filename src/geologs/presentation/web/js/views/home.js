@@ -15,7 +15,7 @@ import {
   zonedMidnight,
 } from "../core/format.js";
 import { state } from "../core/state.js";
-import { dayBounds, drawSelection, map } from "../map/map.js";
+import { dayBounds, drawSelection, map, setCoveredRight } from "../map/map.js";
 import { modeIcon, modeInfo, visitNumbers } from "../ui/icons.js";
 import { moveDay } from "./history.js";
 import { showView } from "./shell.js";
@@ -241,20 +241,29 @@ function renderGlance(day) {
       : "");
 }
 
-// Fit the day to the part of the map the cards leave clear: the whole of it while exploring.
+// How much of the map's right edge the timeline covers: on a wide screen it sits over the map, still
+// or exploring; on a narrow one it is below it.
+function timelineCover() {
+  const timeline = $("home-timeline");
+  if ($("home-hero").hidden || timeline.hidden || !matchMedia("(min-width: 901px)").matches) return 0;
+  return Math.max(0, $("map").getBoundingClientRect().right - timeline.getBoundingClientRect().left);
+}
+
+// Fit the day to the part of the map the cards and the timeline leave clear.
 function restFit() {
   if (!map || $("home-hero").hidden) return;
+  const cover = timelineCover();
+  setCoveredRight(cover && cover + 16);
   const bounds = dayBounds();
   if (!bounds.length) return;
   let left = 40,
-    right = 40,
+    right = cover ? cover + 28 : 40,
     top = exploring ? 70 : 56,
     bottom = exploring ? 70 : 36;
   const box = $("map").getBoundingClientRect();
   if (!exploring && matchMedia("(min-width: 901px)").matches && !$("home-glance").hidden) {
     left = document.querySelector(".home-stack").getBoundingClientRect().right - box.left + 28;
-    right = box.right - document.querySelector(".home-share").getBoundingClientRect().left + 28;
-    if (box.width - left - right < 160) left = right = 40;
+    if (box.width - left - right < 160) left = 40;
   }
   map.fitBounds(L.latLngBounds(bounds), { paddingTopLeft: [left, top], paddingBottomRight: [right, bottom], maxZoom: 15, duration: 0.7 });
 }
@@ -343,6 +352,7 @@ function renderHome() {
   $("home-glance").hidden = !hasHistory;
   $("home-explore").hidden = !hasHistory;
   $("home-lower").hidden = !hasHistory;
+  $("home-timeline").hidden = !hasHistory;
   if (hasHistory) renderGlance(day);
   if (!showMap) return;
   map?.invalidateSize();
