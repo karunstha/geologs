@@ -9,12 +9,14 @@
   --home-on-glass-2: rgb(255 255 255/0.74);
   --home-chip: rgb(255 255 255/0.13);
   --home-ink: #141414;
+  --home-halo: #e8e8e6;
   position: relative;
 }
 :root[data-theme="dark"] #home-view {
   --home-glass: rgb(22 26 29/0.6);
   --home-glass-line: rgb(255 255 255/0.1);
   --home-ink: #000;
+  --home-halo: var(--bg);
 }
 /* A grey page, as the map's land is grey, and the photo across its top. */
 :root:not([data-theme="dark"]) body:has(#home-view.active) {
@@ -353,14 +355,19 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
   color: var(--text);
   font: inherit;
   text-align: left;
+  text-shadow:
+    0 0 2px var(--home-halo),
+    0 0 6px var(--home-halo),
+    0 0 12px var(--home-halo);
   cursor: pointer;
 }
 .home-brief button:hover {
   background: color-mix(in srgb, var(--text) 6%, transparent);
 }
 .home-brief time {
-  color: var(--text-3);
-  font-size: 12px;
+  color: var(--text-2);
+  font-size: 12.5px;
+  font-weight: 500;
   font-variant-numeric: tabular-nums;
 }
 .home-brief button > span {
@@ -371,15 +378,16 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
 }
 .home-brief strong {
   overflow: hidden;
-  font-size: 14.5px;
-  font-weight: 500;
+  font-size: 15px;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .home-brief small {
   flex: none;
   color: var(--text-2);
-  font-size: 12.5px;
+  font-size: 13px;
+  font-weight: 500;
 }
 .home-brief-trip {
   padding-block: 3px !important;
@@ -409,6 +417,20 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
   opacity: 0;
   pointer-events: none;
   visibility: hidden;
+}
+/* No stay/trip count over it, and a quiet, neutral highlight for what is chosen. */
+#home-view #timeline-count {
+  display: none;
+}
+#home-view #home-timeline :is(.tl-stay, .tl-trip):hover {
+  background: rgb(255 255 255/0.07);
+}
+#home-view #home-timeline :is(.tl-stay, .tl-trip).selected {
+  background: rgb(255 255 255/0.14);
+  box-shadow: none;
+}
+#home-view #home-timeline .tl-trip.selected .tl-body strong {
+  color: var(--text);
 }
 #home-view #home-timeline #inspector {
   height: 100%;
