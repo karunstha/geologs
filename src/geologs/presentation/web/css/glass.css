@@ -163,3 +163,19 @@
 #explore-view .day-navigation :is(.icon-button.bordered, .input, .button) {
   border-radius: 999px;
 }
+
+/* A Settings page's heading sits on the photo on a wide screen, so it is white there like the page title.
+   On a narrow screen it falls below the photo, on the grey page, and keeps the page's own colours. */
+@media (min-width: 901px) {
+  /* A tight shadow edges the letters and a wide one darkens behind them, so they read where the photo
+     has faded to pale as well as on the sky. */
+  .view:not(#home-view) .section-intro :is(h2, p, .section-eyebrow) {
+    color: #fff;
+    text-shadow:
+      0 1px 2px rgb(0 0 0/0.45),
+      0 0 14px rgb(0 0 0/0.4);
+  }
+  .view:not(#home-view) .section-intro :is(p, .section-eyebrow) {
+    font-weight: 500;
+  }
+}
