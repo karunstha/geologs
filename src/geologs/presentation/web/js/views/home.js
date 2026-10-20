@@ -154,17 +154,16 @@ function renderMonth(day) {
   distance[lit] = day.movement_km ?? day.stats.distance_km ?? 0;
   fuel[lit] = day.fuel?.cost || 0;
   const sum = (values) => values.reduce((a, b) => a + b, 0);
-  const when = day.date === localDateKey() ? " · today" : "";
   const label = year === Number(localDateKey().slice(0, 4)) && month === Number(localDateKey().slice(5, 7)) ? "this month" : new Date(year, month - 1, 1).toLocaleDateString(undefined, { month: "long" });
   // The numbers are the shown day's; only the bars are the month.
-  $("home-distance-title").textContent = `Distance${when}`;
+  $("home-distance-title").textContent = "Distance";
   $("home-distance").innerHTML = smallUnits(distanceText(distance[lit]));
   $("home-distance-note").textContent = `${distanceText(sum(distance))} ${label}`;
   bars($("home-distance-chart"), distance, lit);
-  $("home-fuel-title").textContent = `Fuel${when}`;
+  $("home-fuel-title").textContent = "Fuel";
   const spent = sum(fuel);
-  $("home-fuel").innerHTML = fuel[lit] > 0 ? smallUnits(moneyText(fuel[lit], day.fuel?.currency)) : "—";
-  $("home-fuel-note").textContent = spent > 0 ? `${moneyText(spent, day.fuel?.currency)} ${label}` : "No fuel costs yet";
+  $("home-fuel").innerHTML = smallUnits(moneyText(fuel[lit], day.fuel?.currency));
+  $("home-fuel-note").textContent = `${moneyText(spent, day.fuel?.currency)} ${label}`;
   bars($("home-fuel-chart"), fuel, lit);
 }
 

@@ -10,6 +10,8 @@
   --home-chip: rgb(255 255 255/0.13);
   /* The day buttons and the timeline's glass, in the page's theme. */
   --home-control: rgb(255 255 255/0.86);
+  --home-control-hover: #fff;
+  --home-control-line: rgb(0 0 0/0.06);
   --home-control-text: #141414;
   --home-pane: rgb(255 255 255/0.84);
   --home-pane-line: rgb(0 0 0/0.06);
@@ -20,6 +22,11 @@
   --home-glass-line: rgb(255 255 255/0.1);
   --home-pane: rgb(22 26 29/0.78);
   --home-pane-line: rgb(255 255 255/0.1);
+  /* Dark theme: frosted white over the photo and map, light enough to read as a button, not a block. */
+  --home-control: rgb(255 255 255/0.16);
+  --home-control-hover: rgb(255 255 255/0.24);
+  --home-control-line: rgb(255 255 255/0.2);
+  --home-control-text: #fff;
 }
 /* A grey page, as the map's land is grey, and the photo across its top. */
 :root:not([data-theme="dark"]) body:has(#home-view.active) {
@@ -138,6 +145,18 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
 }
 #home-view #day-date {
   color-scheme: light;
+}
+:root[data-theme="dark"] #home-view #day-date {
+  color-scheme: dark;
+}
+#home-view .day-navigation .icon-button.bordered,
+#home-view #day-date,
+#home-view #today {
+  border-color: var(--home-control-line);
+}
+#home-view .day-navigation .icon-button.bordered:not(:disabled):hover,
+#home-view #today:not(:disabled):hover {
+  background: var(--home-control-hover);
 }
 #home-view #today {
   border-color: transparent;
@@ -284,16 +303,16 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
   top: 6px;
   right: 6px;
   height: 36px;
-  border: 1px solid rgb(0 0 0/0.06);
+  border: 1px solid var(--home-control-line);
   border-radius: 999px;
-  background: rgb(255 255 255/0.78);
-  color: #141414;
+  background: var(--home-control);
+  color: var(--home-control-text);
   backdrop-filter: blur(14px);
   -webkit-backdrop-filter: blur(14px);
   box-shadow: var(--shadow-sm);
 }
 .home-explore:hover {
-  background: #fff;
+  background: var(--home-control-hover);
 }
 .home-explore svg {
   width: 15px;
