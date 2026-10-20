@@ -4,8 +4,9 @@
    left out. */
 :root {
   --page-grey: #e8e8e6;
-  --glass-card: rgb(38 38 38/0.5);
-  --glass-card-line: rgb(255 255 255/0.16);
+  --glass-card: rgb(255 255 255/0.72);
+  --glass-card-line: rgb(255 255 255/0.7);
+  --glass-inner: rgb(255 255 255/0.6);
   --glass-radius: 24px;
   /* Controls on the photo: white pills with dark text. */
   --page-control: rgb(255 255 255/0.86);
@@ -19,6 +20,7 @@
   --page-grey: var(--bg);
   --glass-card: rgb(22 26 29/0.6);
   --glass-card-line: rgb(255 255 255/0.1);
+  --glass-inner: rgb(255 255 255/0.05);
   /* Frosted white with white text. */
   --page-control: rgb(255 255 255/0.16);
   --page-control-hover: rgb(255 255 255/0.24);
@@ -99,9 +101,17 @@
   text-shadow: 0 1px 8px rgb(0 0 0/0.45);
 }
 
-/* Cards: glass, with white text. Everything inside draws from these colours, so lists, tabs, fields and
-   badges turn light-on-glass with them. */
+/* Cards: glass. Light glass with the page's own colours in the light theme; dark glass with white text in
+   the dark, where everything inside draws from the colours below (lists, tabs, fields, badges). */
 .view:not(#home-view) :is(.card:not(.map-shell), .day-bar) {
+  border-color: var(--glass-card-line);
+  border-radius: var(--glass-radius);
+  background: var(--glass-card);
+  box-shadow: 0 10px 30px rgb(0 0 0/0.06);
+  backdrop-filter: blur(22px) saturate(1.2);
+  -webkit-backdrop-filter: blur(22px) saturate(1.2);
+}
+:root[data-theme="dark"] .view:not(#home-view) :is(.card:not(.map-shell), .day-bar, .settings-nav) {
   --surface: rgb(255 255 255/0.07);
   --surface-2: rgb(255 255 255/0.05);
   --surface-3: rgb(255 255 255/0.12);
@@ -110,32 +120,18 @@
   --text: #fff;
   --text-2: rgb(255 255 255/0.76);
   --text-3: rgb(255 255 255/0.56);
-  --accent: #27a99a;
-  --accent-hover: #36bcac;
   --accent-soft: rgb(94 209 194/0.18);
   --accent-text: #6fe0d1;
-  --on-accent: #04201c;
-  --success: #5ee08f;
   --success-soft: rgb(76 207 127/0.18);
-  --warning: #f3b65c;
   --warning-soft: rgb(237 169 75/0.18);
-  --danger: #ff8f84;
   --danger-soft: rgb(241 123 112/0.18);
-  --neutral: #b7c0c8;
   --neutral-soft: rgb(255 255 255/0.1);
   --shadow-sm: none;
-  border-color: var(--glass-card-line);
-  border-radius: var(--glass-radius);
-  background: var(--glass-card);
   color: var(--text);
-  box-shadow: 0 10px 30px rgb(0 0 0/0.08);
-  backdrop-filter: blur(22px) saturate(1.2);
-  -webkit-backdrop-filter: blur(22px) saturate(1.2);
-  color-scheme: dark;
 }
 /* A card in a card is a quieter panel, not a second pane of glass. */
 .view:not(#home-view) .card .card {
-  background: rgb(255 255 255/0.05);
+  background: var(--glass-inner);
   box-shadow: none;
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
@@ -146,30 +142,20 @@
   overflow: hidden;
 }
 /* Mode names in activity chips: their colour lightened, so they read on glass. */
-.view:not(#home-view) :is(.card, .day-bar) .chip strong {
+:root[data-theme="dark"] .view:not(#home-view) :is(.card, .day-bar) .chip strong {
   color: color-mix(in srgb, var(--mode) 35%, #fff);
 }
 
 /* Settings' side menu: a glass card like the page's own (on a narrow screen it is a row of pills). */
 @media (min-width: 901px) {
 .view:not(#home-view) .settings-nav {
-  --surface: rgb(255 255 255/0.07);
-  --surface-3: rgb(255 255 255/0.12);
-  --border: rgb(255 255 255/0.14);
-  --text: #fff;
-  --text-2: rgb(255 255 255/0.76);
-  --text-3: rgb(255 255 255/0.56);
-  --accent-soft: rgb(94 209 194/0.18);
-  --accent-text: #6fe0d1;
   padding: 14px 10px;
   border: 1px solid var(--glass-card-line);
   border-radius: var(--glass-radius);
   background: var(--glass-card);
-  color: var(--text);
-  box-shadow: 0 10px 30px rgb(0 0 0/0.08);
+  box-shadow: 0 10px 30px rgb(0 0 0/0.06);
   backdrop-filter: blur(22px) saturate(1.2);
   -webkit-backdrop-filter: blur(22px) saturate(1.2);
-  color-scheme: dark;
 }
 }
 

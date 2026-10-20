@@ -1,6 +1,6 @@
 // Stops you add on a trip and stays you remove, each undoable; kept by source and time window.
 import { post } from "../core/api.js";
-import { $, safe, toast } from "../core/dom.js";
+import { $, closeOnBackdrop, safe, toast } from "../core/dom.js";
 import { clock, clockPrecise, durationText, speedText } from "../core/format.js";
 import { state } from "../core/state.js";
 import { sourceName } from "../ui/icons.js";
@@ -217,7 +217,5 @@ export function initStayEdits() {
   $("add-stay").onclick = openDayStayDialog;
   const close = () => $("stop-dialog").close();
   $("close-stop-dialog").onclick = $("cancel-stop").onclick = close;
-  $("stop-dialog").onclick = (event) => {
-    if (event.target === $("stop-dialog")) close();
-  };
+  closeOnBackdrop($("stop-dialog"), close);
 }

@@ -1,6 +1,6 @@
 // The detail tabs under the History map: the day's places, speed, samples, and recorded data.
 import { api, post } from "../core/api.js";
-import { $, safe, toast } from "../core/dom.js";
+import { $, closeOnBackdrop, safe, toast } from "../core/dom.js";
 import { clock, clockPrecise, durationText, formatTime, kmh, lengthText, longDate, plural, speedUnit, toSpeedUnit } from "../core/format.js";
 import { state } from "../core/state.js";
 import { onEach, rowActions } from "../ui/actions.js";
@@ -406,7 +406,5 @@ export function initDayDetails() {
   };
   const closeDelete = () => $("delete-samples-dialog").close();
   $("close-delete-samples").onclick = $("cancel-delete-samples").onclick = closeDelete;
-  $("delete-samples-dialog").onclick = (event) => {
-    if (event.target === $("delete-samples-dialog")) closeDelete();
-  };
+  closeOnBackdrop($("delete-samples-dialog"), closeDelete);
 }

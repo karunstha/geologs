@@ -1,7 +1,7 @@
 // Dialogs for adding a saved place and correcting a visited place's name.
 import { refreshMeta } from "../app/refresh.js";
 import { api, post } from "../core/api.js";
-import { $, safe, toast } from "../core/dom.js";
+import { $, closeOnBackdrop, safe, toast } from "../core/dom.js";
 import { clock, coordinateText, distanceText, fromLengthUnit, lengthText, metresBetween, radiusText, toLengthUnit } from "../core/format.js";
 import { state } from "../core/state.js";
 import { map, searchLayer } from "../map/map.js";
@@ -283,11 +283,7 @@ export function initPlaceDialogs() {
     }
   };
   $("close-label-dialog").onclick = $("cancel-label").onclick = () => $("label-dialog").close();
-  $("label-dialog").addEventListener("click", (event) => {
-    if (event.target === $("label-dialog")) $("label-dialog").close();
-  });
+  closeOnBackdrop($("label-dialog"));
   $("close-place-dialog").onclick = $("cancel-place").onclick = () => $("place-dialog").close();
-  $("place-dialog").addEventListener("click", (event) => {
-    if (event.target === $("place-dialog")) $("place-dialog").close();
-  });
+  closeOnBackdrop($("place-dialog"));
 }

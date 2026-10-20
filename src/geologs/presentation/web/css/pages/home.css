@@ -5,9 +5,17 @@
   --home-radius: 24px;
   --home-glass: rgb(38 38 38/0.5);
   --home-glass-line: rgb(255 255 255/0.16);
-  --home-on-glass: #fff;
-  --home-on-glass-2: rgb(255 255 255/0.74);
-  --home-chip: rgb(255 255 255/0.13);
+  /* The cards: light glass with dark text in the light theme, dark glass with white text in the dark. */
+  --home-card: rgb(255 255 255/0.72);
+  --home-card-line: rgb(255 255 255/0.7);
+  --home-on-glass: #141414;
+  --home-on-glass-2: rgb(20 24 29/0.62);
+  --home-on-glass-3: rgb(20 24 29/0.45);
+  --home-chip: rgb(0 0 0/0.05);
+  --home-hair: rgb(0 0 0/0.08);
+  --home-bar: rgb(20 24 29/0.22);
+  --home-bar-none: rgb(20 24 29/0.08);
+  --home-lit: #1a9d8e;
   /* The day buttons and the timeline's glass, in the page's theme. */
   --home-control: rgb(255 255 255/0.86);
   --home-control-hover: #fff;
@@ -21,6 +29,16 @@
   position: relative;
 }
 :root[data-theme="dark"] #home-view {
+  --home-card: rgb(22 26 29/0.6);
+  --home-card-line: rgb(255 255 255/0.1);
+  --home-on-glass: #fff;
+  --home-on-glass-2: rgb(255 255 255/0.74);
+  --home-on-glass-3: rgb(255 255 255/0.55);
+  --home-chip: rgb(255 255 255/0.13);
+  --home-hair: rgb(255 255 255/0.14);
+  --home-bar: rgb(255 255 255/0.38);
+  --home-bar-none: rgb(255 255 255/0.14);
+  --home-lit: #5ed1c2;
   --home-glass: rgb(22 26 29/0.6);
   --home-glass-line: rgb(255 255 255/0.1);
   --home-pane: rgb(22 26 29/0.78);
@@ -529,8 +547,8 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
   padding: 20px 22px;
 }
 .home-glass {
-  border: 1px solid var(--home-glass-line);
-  background: var(--home-glass);
+  border: 1px solid var(--home-card-line);
+  background: var(--home-card);
   backdrop-filter: blur(22px) saturate(1.2);
   -webkit-backdrop-filter: blur(22px) saturate(1.2);
   color: var(--home-on-glass);
@@ -551,13 +569,13 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
 #home-view .home-panel {
   --text: var(--home-on-glass);
   --text-2: var(--home-on-glass-2);
-  --text-3: rgb(255 255 255/0.55);
-  --border: rgb(255 255 255/0.14);
-  --surface-3: rgb(255 255 255/0.1);
-  --accent: #5ed1c2;
+  --text-3: var(--home-on-glass-3);
+  --border: var(--home-hair);
+  --surface-3: var(--home-chip);
+  --accent: var(--home-lit);
 }
 #home-view .home-panel .badge {
-  border-color: var(--home-glass-line);
+  border-color: var(--home-card-line);
   background: var(--home-chip);
   color: var(--home-on-glass);
 }
@@ -601,7 +619,7 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
   align-items: center;
   gap: 6px;
   padding: 3px 11px 3px 4px;
-  border: 1px solid rgb(255 255 255/0.12);
+  border: 1px solid var(--home-hair);
   border-radius: 999px;
   background: var(--home-chip);
   font-size: 12.5px;
@@ -651,13 +669,13 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
   overflow: visible;
 }
 .home-month-bar {
-  fill: rgb(255 255 255/0.38);
+  fill: var(--home-bar);
 }
 .home-month-bar.none {
-  fill: rgb(255 255 255/0.14);
+  fill: var(--home-bar-none);
 }
 .home-month-bar.lit {
-  fill: #5ed1c2;
+  fill: var(--home-lit);
 }
 .home-bars {
   display: flex;

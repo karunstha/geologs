@@ -21,6 +21,23 @@ export function toast(message, action) {
   toast.timer = setTimeout(() => box.classList.remove("show"), action ? 8000 : 3800);
 }
 
+// Close a modal dialog when a press both starts and ends on the backdrop around it. Looking at the click
+// alone closes it when a press that began inside (selecting text, dragging) is let go outside.
+export function closeOnBackdrop(dialog, close = () => dialog.close()) {
+  const outside = (event) => {
+    const box = dialog.getBoundingClientRect();
+    return event.clientX < box.left || event.clientX > box.right || event.clientY < box.top || event.clientY > box.bottom;
+  };
+  let pressedOutside = false;
+  dialog.addEventListener("pointerdown", (event) => {
+    pressedOutside = event.target === dialog && outside(event);
+  });
+  dialog.addEventListener("click", (event) => {
+    if (pressedOutside && event.target === dialog && outside(event)) close();
+    pressedOutside = false;
+  });
+}
+
 export function safe(text) {
   return String(text ?? "").replace(
     /[&<>"']/g,
