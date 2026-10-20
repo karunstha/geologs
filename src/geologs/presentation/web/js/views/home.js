@@ -2,7 +2,8 @@
 // classic Home's own timeline and details. Those are not copies: the classic Home's head, day controls,
 // map, timeline and details are moved in here once at start, so every edit and tool works as before.
 // Setting localStorage "geologs-home" to "classic" leaves the classic Home untouched and shows it instead.
-import { $, safe } from "../core/dom.js";
+import { api } from "../core/api.js";
+import { $, safe, toast } from "../core/dom.js";
 import {
   clock,
   distanceText,
@@ -12,7 +13,6 @@ import {
   moneyText,
   plural,
   shiftDateKey,
-  volumeText,
   zonedMidnight,
 } from "../core/format.js";
 import { state } from "../core/state.js";
@@ -29,7 +29,6 @@ export function newHomeEnabled() {
   }
 }
 
-const KM_PER_MILE = 1.609344;
 const FREE_MAP = "https://tiles.openfreemap.org/styles/";
 const FREE_MAP_CREDIT =
   '&copy; <a href="https://openfreemap.org" target="_blank" rel="noopener">OpenFreeMap</a> &copy; <a href="https://www.openmaptiles.org/" target="_blank" rel="noopener">OpenMapTiles</a> &copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors';
@@ -56,19 +55,14 @@ const ICONS = {
 let glMap = null;
 // Whether the vector style's layers can be changed yet (isStyleLoaded waits for every tile too).
 let styleReady = false;
-let exploring = false;
+// null until the first setExploring, so that call always sets everything up.
+let exploring = null;
 let fittedKey = null;
-let settleTimer = 0;
 
 // "1h 05m" rather than "1 h 5 min": the glance cards' numbers are large.
 function shortDuration(minutes) {
   const total = Math.round(minutes || 0);
   return total < 60 ? `${total}m` : `${Math.floor(total / 60)}h ${String(total % 60).padStart(2, "0")}m`;
-}
-
-// The day's distance to one decimal, with its unit apart, for the Overview's large number.
-function distanceParts(km) {
-  return imperial() ? [(km / KM_PER_MILE).toFixed(1), "mi"] : [km.toFixed(1), "km"];
 }
 
 // The day's span in the configured timezone (today's ends now), and how many minutes of it a stay covers.
@@ -108,16 +102,68 @@ function byHour(day, amount) {
   return hours;
 }
 
-function spark(svg, values) {
+// The shown day's month, day by day, for the Distance and Fuel cards: the saved summaries of its
+// days (the catalog), with the shown day's own live numbers in place of its saved ones.
+const months = new Map();
+const MONTH_REFRESH_MS = 60 * 1000;
+
+function monthRows(day) {
+  const key = day.date.slice(0, 7);
+  const cached = months.get(key);
+  const current = key === localDateKey().slice(0, 7);
+  if ((!cached || (current && Date.now() - cached.at > MONTH_REFRESH_MS)) && !cached?.loading) {
+    const next = { ...cached, at: Date.now(), loading: true };
+    months.set(key, next);
+    const query = new URLSearchParams({ start: key + "-01", end: key + "-31", limit: 40 });
+    api("/api/daily-summaries?" + query)
+      .then((rows) => months.set(key, { at: Date.now(), rows }))
+      .catch(() => months.set(key, { at: Date.now(), rows: cached?.rows || [] }))
+      .then(() => state.day?.date.startsWith(key) && renderMonth(state.day));
+  }
+  return months.get(key)?.rows || [];
+}
+
+// A month's bars, one a day, the shown day lit.
+function bars(svg, values, lit) {
   const max = Math.max(...values);
-  // An SVG element has no hidden property, only the attribute.
   svg.toggleAttribute("hidden", !(max > 0));
   if (!(max > 0)) return;
-  const line =
-    "M" +
-    values.map((value, i) => `${((i / (values.length - 1)) * 200).toFixed(1)},${(52 - (value / max) * 46).toFixed(1)}`).join("L");
-  const ticks = values.map((_, i) => `<circle cx="${((i / (values.length - 1)) * 200).toFixed(1)}" cy="55" r="0.9"/>`).join("");
-  svg.innerHTML = `<g class="home-spark-ticks">${ticks}</g><path class="home-spark-area" d="${line}L200,56L0,56Z"/><path class="home-spark-line" d="${line}"/>`;
+  const width = 200 / values.length;
+  svg.innerHTML = values
+    .map((value, i) => {
+      const height = value > 0 ? Math.max(2, (value / max) * 50) : 0;
+      return `<rect class="home-month-bar${i === lit ? " lit" : ""}${value > 0 ? "" : " none"}" x="${(i * width + width * 0.15).toFixed(2)}" y="${(54 - (height || 1.5)).toFixed(2)}" width="${(width * 0.7).toFixed(2)}" height="${height || 1.5}" rx="1.2"/>`;
+    })
+    .join("");
+}
+
+function renderMonth(day) {
+  const [year, month] = day.date.split("-").map(Number);
+  const days = new Date(year, month, 0).getDate();
+  const lit = Number(day.date.slice(8)) - 1;
+  const distance = Array(days).fill(0),
+    fuel = Array(days).fill(0);
+  for (const row of monthRows(day)) {
+    const i = Number(row.date.slice(8)) - 1;
+    if (i >= 0 && i < days) {
+      distance[i] = row.distance_km || 0;
+      fuel[i] = row.fuel_cost || 0;
+    }
+  }
+  distance[lit] = day.movement_km ?? day.stats.distance_km ?? 0;
+  fuel[lit] = day.fuel?.cost || 0;
+  const sum = (values) => values.reduce((a, b) => a + b, 0);
+  const label = year === Number(localDateKey().slice(0, 4)) && month === Number(localDateKey().slice(5, 7)) ? "This month" : new Date(year, month - 1, 1).toLocaleDateString(undefined, { month: "long" });
+  const active = (values) => values.filter((value) => value > 0).length;
+  $("home-distance-title").textContent = `Distance · ${label.toLowerCase()}`;
+  $("home-distance").textContent = distanceText(sum(distance));
+  $("home-distance-note").textContent = `${distanceText(distance[lit])} on this day`;
+  bars($("home-distance-chart"), distance, lit);
+  $("home-fuel-title").textContent = `Fuel · ${label.toLowerCase()}`;
+  const spent = sum(fuel);
+  $("home-fuel").textContent = spent > 0 ? moneyText(spent, day.fuel?.currency) : "—";
+  $("home-fuel-note").textContent = spent > 0 ? `${moneyText(fuel[lit], day.fuel?.currency)} on this day · ${active(fuel)} days` : "No fuel costs yet";
+  bars($("home-fuel-chart"), fuel, lit);
 }
 
 function renderGlance(day) {
@@ -140,12 +186,11 @@ function renderGlance(day) {
   const homeKnown =
     stays.some((item) => item.home) ||
     (state.places || []).some((place) => /^(my )?home$/i.test(String(place.name || "").trim()));
-  const [distance, unit] = distanceParts(day.movement_km ?? day.stats.distance_km ?? 0);
   $("home-stats").innerHTML = [
-    ["Distance", distance, unit],
     ["In motion", shortDuration(moving)],
     homeKnown ? ["Away from home", shortDuration(away)] : [stays.length === 1 ? "Stay" : "Stays", stays.length.toLocaleString()],
     [day.visited_places.length === 1 ? "Place" : "Places", day.visited_places.length.toLocaleString()],
+    [day.trips.length === 1 ? "Trip" : "Trips", day.trips.length.toLocaleString()],
   ]
     .map(([label, value, small]) => `<div><dt>${label}</dt><dd>${safe(value)}${small ? `<small>${small}</small>` : ""}</dd></div>`)
     .join("");
@@ -158,26 +203,7 @@ function renderGlance(day) {
     .join("");
   $("home-modes").hidden = !modes.length;
 
-  $("home-trips").textContent = day.trips.length.toLocaleString();
-  $("home-trips-note").textContent =
-    modes.map(([mode, totals]) => `${totals.count} ${modeInfo[mode].label.toLowerCase()}${totals.count === 1 ? "" : "s"}`).join(" · ") ||
-    "No trips";
-  spark($("home-trips-spark"), byHour(day, (trip) => trip.distance_km));
-
-  // Fuel when a drive was costed; otherwise the longest stay away from home.
-  if (day.fuel) {
-    $("home-second-title").textContent = "Fuel";
-    $("home-second").textContent = moneyText(day.fuel.cost, day.fuel.currency);
-    $("home-second-note").textContent = `${volumeText(day.fuel.litres)} · ${plural(day.fuel.drives, "drive")}`;
-    let spent = 0;
-    spark($("home-second-spark"), byHour(day, (trip) => trip.fuel?.cost).map((cost) => (spent += cost)));
-  } else {
-    const longest = stays.filter((item) => !item.home).sort((a, b) => b.minutes - a.minutes)[0];
-    $("home-second-title").textContent = "Longest stay";
-    $("home-second").textContent = longest ? shortDuration(longest.minutes) : "—";
-    $("home-second-note").textContent = longest ? longest.name : "Nowhere but home";
-    spark($("home-second-spark"), []);
-  }
+  renderMonth(day);
 
   // Where the day went: the two places held longest, any others together, and time on the move.
   const places = new Map();
@@ -262,20 +288,22 @@ function renderGlance(day) {
     .join("");
 }
 
-// Fit the day to the part of the map the glance cards leave clear.
+// Fit the day to the part of the map the cards leave clear: the whole of it while exploring.
 function restFit() {
-  if (!map || exploring || $("home-hero").hidden) return;
+  if (!map || $("home-hero").hidden) return;
   const bounds = dayBounds();
   if (!bounds.length) return;
-  let left = 28,
-    right = 28;
+  let left = 40,
+    right = 40,
+    top = exploring ? 70 : 56,
+    bottom = exploring ? 70 : 36;
   const box = $("map").getBoundingClientRect();
-  if (matchMedia("(min-width: 901px)").matches && !$("home-glance").hidden) {
+  if (!exploring && matchMedia("(min-width: 901px)").matches && !$("home-glance").hidden) {
     left = document.querySelector(".home-stack").getBoundingClientRect().right - box.left + 28;
     right = box.right - document.querySelector(".home-share").getBoundingClientRect().left + 28;
-    if (box.width - left - right < 160) left = right = 28;
+    if (box.width - left - right < 160) left = right = 40;
   }
-  map.fitBounds(L.latLngBounds(bounds), { paddingTopLeft: [left, 56], paddingBottomRight: [right, 36], maxZoom: 15 });
+  map.fitBounds(L.latLngBounds(bounds), { paddingTopLeft: [left, top], paddingBottomRight: [right, bottom], maxZoom: 15, duration: 0.7 });
 }
 
 function setInteractive(on) {
@@ -299,26 +327,27 @@ function styleMap() {
   showLabels();
 }
 
-// Exploring makes the map whole and interactive: the glance cards step aside, labels and zoom return.
+// Exploring makes the map whole and interactive: the glance cards step aside and labels and zoom return.
+// The map never changes size (only what is drawn over it does), so the view eases from one fit to the
+// other instead of jumping.
 function setExploring(on, keepView = false) {
+  if (on === exploring && !keepView) return;
   exploring = on;
   $("home-hero").classList.toggle("exploring", on);
   $("home-explore").innerHTML = on ? `${ICONS.done}<span>Done</span>` : `${ICONS.explore}<span>Explore map</span>`;
   $("home-explore").setAttribute("aria-pressed", String(on));
+  // On a phone the map also changes height; Leaflet is told before it fits.
+  if (matchMedia("(max-width: 900px)").matches) map?.invalidateSize();
   setInteractive(on);
   showLabels();
+  if (!keepView) map?.closePopup();
   if (!on && state.selected) {
     state.selected = null;
     drawSelection(false);
   }
-  // Refit once the hero has its new size.
-  clearTimeout(settleTimer);
-  settleTimer = setTimeout(() => {
-    map?.invalidateSize();
-    if (keepView) return;
-    if (on && state.selected) drawSelection(true);
-    else if (!on) restFit();
-  }, 260);
+  // A selected stay or trip has been zoomed to already; a popup keeps the view it opened on.
+  if (keepView || (on && state.selected)) return;
+  restFit();
 }
 
 // The map in OpenFreeMap's vector style (grey Positron, or its dark style), through Leaflet so every
@@ -393,6 +422,8 @@ function initHomeChoice(enabled) {
         if (input.value === "classic") localStorage.setItem("geologs-home", "classic");
         else localStorage.removeItem("geologs-home");
       } catch (_error) {
+        toast("This browser won't save the choice (private window or blocked site data).");
+        input.checked = false;
         return;
       }
       location.reload();
@@ -427,7 +458,14 @@ export function initHome() {
     if (state.selected && !exploring && $("home-view").classList.contains("active")) setExploring(true);
   }).observe($("day-timeline"), { subtree: true, attributes: true, attributeFilter: ["class"] });
   useGreyMap();
+  // Popups keep clear of the map's faded edge and the bar over its top while exploring.
+  L.Popup.prototype.options.autoPanPaddingTopLeft = L.point(30, 100);
+  L.Popup.prototype.options.autoPanPaddingBottomRight = L.point(30, 56);
   setExploring(false);
+  // A place or stop pressed on the still map opens its popup on the whole map, clear of the cards.
+  map?.on("popupopen", () => {
+    if (!exploring && $("home-view").classList.contains("active")) setExploring(true, true);
+  });
   $("home-explore").onclick = () => setExploring(!exploring);
   let resizeTimer = 0;
   window.addEventListener("resize", () => {

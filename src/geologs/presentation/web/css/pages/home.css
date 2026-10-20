@@ -46,16 +46,15 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
   transition: opacity 0.15s;
 }
 
-/* Head: the day's title on the photo, with the day controls beside it. */
+/* Head, as on the classic Home: the title on the photo with when and where you were last seen at its
+   right, and below, in one row, where you are now on the left and the day buttons on the right. */
 .home-head {
   display: flex;
-  align-items: flex-end;
-  flex-wrap: wrap;
-  gap: 12px 24px;
+  flex-direction: column;
+  gap: 14px;
   margin-bottom: 26px;
 }
 #home-view .history-head {
-  flex: 1 1 420px;
   min-height: 0;
   margin: 0;
   padding-top: 44px;
@@ -65,8 +64,19 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
   font-weight: 450;
   letter-spacing: -0.04em;
 }
+#home-view .history-head .head-side {
+  gap: 8px;
+}
+#home-view .history-head .coordinate-copy {
+  border-color: var(--home-glass-line);
+  background: rgb(255 255 255/0.14);
+}
 #home-view .day-bar {
-  flex: 0 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px 16px;
   margin: 0;
   padding: 0;
   border: 0;
@@ -74,15 +84,20 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
   box-shadow: none;
   color-scheme: dark;
 }
+#home-view .day-bar .history-controls {
+  margin: 0 0 0 auto;
+}
 #home-view .day-bar .current-location {
   flex: none;
-  padding: 6px 14px 6px 12px;
+  margin: 0;
+  padding: 5px 14px 5px 12px;
   border: 1px solid var(--home-glass-line);
   border-radius: 999px;
   background: rgb(255 255 255/0.14);
   backdrop-filter: blur(14px);
   -webkit-backdrop-filter: blur(14px);
   color: #fff;
+  box-shadow: none;
 }
 #home-view .day-bar .current-label {
   color: rgb(255 255 255/0.7);
@@ -133,47 +148,110 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
 .home-hero.map-only {
   height: 560px;
 }
+/* The map is one size in both modes. Still, its tiles fade out at the edges and the cards float over it;
+   exploring, the fade opens up, a frame is drawn around it, and its bars come in. Only those change,
+   and they ease, so nothing jumps. */
 .home-map {
   position: absolute;
   inset: -28px 0 -8px;
+  clip-path: inset(0 round 0);
+  transition: clip-path 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.home-hero.exploring .home-map {
+  clip-path: inset(28px 0 8px round var(--home-radius));
 }
 #home-view .map-shell {
+  position: relative;
   height: 100%;
   border: 0;
   border-radius: 0;
   background: none;
   box-shadow: none;
+  overflow: visible;
 }
 #home-view .map-stage,
 #home-view #map {
   background: transparent;
 }
-.home-hero:not(.exploring) .map-stage {
+/* Still, the map fades into the page. A popup opens the whole map (home.js), so none is ever cut off. */
+.home-map .map-stage {
   -webkit-mask-image: radial-gradient(ellipse 52% 52% at 50% 50%, #000 58%, transparent 100%);
   mask-image: radial-gradient(ellipse 52% 52% at 50% 50%, #000 58%, transparent 100%);
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-size: 100% 100%;
+  mask-size: 100% 100%;
+  transition:
+    -webkit-mask-size 0.5s cubic-bezier(0.4, 0, 0.2, 1),
+    mask-size 0.5s cubic-bezier(0.4, 0, 0.2, 1);
 }
-.home-hero:not(.exploring) .map-topline,
-.home-hero:not(.exploring) .map-footer,
+.home-hero.exploring .map-stage {
+  -webkit-mask-size: 420% 420%;
+  mask-size: 420% 420%;
+}
+/* The frame, over the exploring map's edge. */
+.home-map::after {
+  content: "";
+  position: absolute;
+  z-index: 800;
+  inset: 28px 0 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--home-radius);
+  box-shadow: var(--shadow-md);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.4s ease;
+}
+.home-hero.exploring .home-map::after {
+  opacity: 1;
+}
+/* Its bars: laid over the map, hidden until exploring. */
+.home-map .map-topline,
+.home-map .map-footer {
+  position: absolute;
+  z-index: 700;
+  left: 0;
+  right: 0;
+  border: 0;
+  background: color-mix(in srgb, var(--surface) 84%, transparent);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  opacity: 0;
+  visibility: hidden;
+  transition:
+    opacity 0.3s ease,
+    visibility 0.3s;
+}
+.home-map .map-topline {
+  top: 28px;
+  border-radius: var(--home-radius) var(--home-radius) 0 0;
+  padding-right: 150px;
+}
+.home-map .map-footer {
+  bottom: 8px;
+  border-radius: 0 0 var(--home-radius) var(--home-radius);
+}
+.home-hero.exploring .map-topline,
+.home-hero.exploring .map-footer {
+  opacity: 1;
+  visibility: visible;
+}
 .home-hero:not(.exploring) .leaflet-control-zoom {
   display: none;
 }
 .home-hero:not(.exploring) .leaflet-control-attribution {
   background: none;
-  color: var(--text-3);
+  color: var(--text-2);
 }
-/* Exploring: the map whole, framed, with its tools. */
-.home-hero.exploring .home-map {
-  inset: 0;
+.home-hero.exploring .leaflet-bottom {
+  bottom: 44px;
 }
-.home-hero.exploring .map-shell {
-  overflow: hidden;
-  border: 1px solid var(--border) !important;
-  border-radius: var(--home-radius) !important;
-  background: var(--surface) !important;
-  box-shadow: var(--shadow-md) !important;
-}
-.home-hero.exploring .map-topline {
-  padding-right: 150px;
+/* The credit stays on the page: centred under the cards while still. */
+.home-hero:not(.exploring) .leaflet-bottom.leaflet-right {
+  right: 50%;
+  transform: translateX(50%);
 }
 /* The vector map has its own dark style, so it skips the classic tiles' dark-theme inversion (map.css);
    the classic tiles, should the vector map not load, are greyed to match. */
@@ -212,13 +290,18 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
   stroke-linecap: round;
   stroke-linejoin: round;
 }
+.home-explore {
+  transition: top 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+}
 .home-hero.exploring .home-explore {
-  top: 8px;
+  top: 36px;
   right: 10px;
 }
 
 .home-glance {
-  transition: opacity 0.2s ease;
+  transition:
+    opacity 0.3s ease,
+    visibility 0.3s;
 }
 .home-hero.exploring .home-glance {
   opacity: 0;
@@ -344,30 +427,21 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.home-spark {
+.home-month {
   display: block;
   width: 100%;
   height: 52px;
   margin-top: 10px;
   overflow: visible;
-  color: #fff;
 }
-.home-mini + .home-mini .home-spark {
-  color: #5ed1c2;
+.home-month-bar {
+  fill: rgb(255 255 255/0.38);
 }
-.home-spark-line {
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.6;
-  stroke-linejoin: round;
-  vector-effect: non-scaling-stroke;
+.home-month-bar.none {
+  fill: rgb(255 255 255/0.14);
 }
-.home-spark-area {
-  fill: currentColor;
-  opacity: 0.13;
-}
-.home-spark-ticks {
-  fill: rgb(255 255 255/0.35);
+.home-month-bar.lit {
+  fill: #5ed1c2;
 }
 .home-bars {
   display: flex;
@@ -417,9 +491,11 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
   margin-top: 12px;
   align-items: start;
 }
-.home-side {
+.home-side,
+.home-main {
   display: grid;
   gap: 12px;
+  min-width: 0;
 }
 #home-view #inspector,
 #home-view #history-details,
@@ -478,7 +554,7 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
   max-height: 320px;
 }
 #home-view #history-details {
-  margin-top: 12px;
+  margin-top: 0;
 }
 .home-dark {
   padding: 20px 22px;
@@ -577,9 +653,28 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
   .home-hero.exploring .home-map {
     height: 62vh;
     min-height: 380px;
+    clip-path: inset(0 round var(--home-radius));
+  }
+  .home-map::after {
+    inset: 0;
+  }
+  .home-map .map-topline {
+    top: 0;
+  }
+  .home-map .map-footer {
+    bottom: 0;
+  }
+  .home-hero.exploring .home-explore {
+    top: 8px;
+  }
+  .home-hero.exploring .leaflet-bottom {
+    bottom: 36px;
   }
   .home-hero.exploring .home-glance {
     display: none;
+  }
+  .home-lower {
+    grid-template-columns: 1fr;
   }
   .home-stack,
   .home-share {
@@ -591,9 +686,6 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
   }
   .home-share {
     margin-top: 10px;
-  }
-  .home-lower {
-    grid-template-columns: 1fr;
   }
 }
 @media (max-width: 760px) {
@@ -614,7 +706,7 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
   .home-pair {
     grid-template-columns: 1fr;
   }
-  .home-hero.exploring .map-topline {
+  .home-map .map-topline {
     padding-right: 120px;
   }
 }

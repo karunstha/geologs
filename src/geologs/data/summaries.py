@@ -47,7 +47,8 @@ class SummariesRepository(Repository):
         where = " WHERE " + " AND ".join(clauses)
         args.append(min(max(int(limit), 1), 1000))
         return self.rows("""SELECT summary_date AS date,timezone,NULLIF(source,'') AS source,
-            points,distance_km,trip_count,place_count,reminder_count,created_at,updated_at
+            points,distance_km,trip_count,place_count,reminder_count,created_at,updated_at,
+            (summary::jsonb->'totals'->>'fuel_cost')::float AS fuel_cost
             FROM daily_summaries""" + where + " ORDER BY summary_date DESC,source LIMIT ?", args)
 
     def keep_canonical(self, timezone_name):
