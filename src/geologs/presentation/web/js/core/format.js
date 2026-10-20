@@ -158,10 +158,10 @@ export function fuelText(cost, litres, currency) {
 
 export function moneyText(amount, currency = state.settings?.currency || "USD") {
   if (amount == null) return "—";
-  // An ISO code is formatted the way this browser writes that currency ($12.40, €12.40, CA$12.40, NPR 12.40).
+  // An ISO code is formatted the way this browser writes that currency, with its plain symbol ($12.40, €12.40).
   if (/^[A-Z]{3}$/.test(currency)) {
     try {
-      return new Intl.NumberFormat(undefined, { style: "currency", currency }).format(amount);
+      return new Intl.NumberFormat(undefined, { style: "currency", currency, currencyDisplay: "narrowSymbol" }).format(amount);
     } catch (_error) {}
   }
   const value = Number(amount).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });

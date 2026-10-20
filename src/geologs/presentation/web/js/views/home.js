@@ -257,9 +257,9 @@ function renderBrief(day, stays) {
   $("home-brief").innerHTML = items
     .map(({ at, item, trip }) => {
       if (item)
-        return `<li><button type="button" class="home-brief-stay" data-item="stay:${item.stay.id}"><time>${safe(clock(at))}</time><span>${placeIcon(item.home ? { name: "Home" } : { ...item.stay, name: item.stay.display_name })}<strong>${safe(item.name)}</strong><small>${safe(durationText(item.stay.observed_minutes))}</small></span></button></li>`;
+        return `<li><button type="button" class="home-brief-stay" data-item="stay:${item.stay.id}">${placeIcon(item.home ? { name: "Home" } : { ...item.stay, name: item.stay.display_name })}<span><strong>${safe(item.name)}</strong><small>${safe(clock(at))} · ${safe(shortDuration(item.stay.observed_minutes))}</small></span></button></li>`;
       const info = modeInfo[trip.mode] || { label: "Moved", color: "#6f7b76" };
-      return `<li><button type="button" class="home-brief-trip" data-item="trip:${safe(tripKey(trip))}" style="--mode:${info.color}"><time>${safe(clock(at))}</time><span>${modeIcon(trip.mode)}<small>${safe(`${info.label} · ${distanceText(trip.distance_km)}`)}</small></span></button></li>`;
+      return `<li><button type="button" class="home-brief-trip" data-item="trip:${safe(tripKey(trip))}" style="--mode:${info.color}" title="${safe(`${info.label} · ${clock(at)}`)}">${modeIcon(trip.mode)}<small>${safe(`${distanceText(trip.distance_km)} · ${shortDuration(trip.duration_minutes)}`)}</small></button></li>`;
     })
     .join("");
 }

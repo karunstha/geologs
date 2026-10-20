@@ -18,8 +18,6 @@
 :root[data-theme="dark"] #home-view {
   --home-glass: rgb(22 26 29/0.6);
   --home-glass-line: rgb(255 255 255/0.1);
-  --home-control: rgb(22 26 29/0.72);
-  --home-control-text: #fff;
   --home-pane: rgb(22 26 29/0.78);
   --home-pane-line: rgb(255 255 255/0.1);
 }
@@ -138,10 +136,7 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
   backdrop-filter: blur(14px);
   -webkit-backdrop-filter: blur(14px);
 }
-:root[data-theme="dark"] #home-view #day-date {
-  color-scheme: dark;
-}
-:root:not([data-theme="dark"]) #home-view #day-date {
+#home-view #day-date {
   color-scheme: light;
 }
 #home-view #today {
@@ -336,99 +331,130 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
   display: grid;
   gap: 10px;
 }
-/* The still map's timeline: no card, just the day's stays and trips over the map's faded edge, fading
-   out at the top and bottom as it scrolls. */
+/* The still map's timeline: place pills joined by a line, with each trip as a small pill on it. It
+   scrolls on its own and fades out at the top and bottom. */
 .home-brief {
   position: absolute;
   z-index: 2;
   top: 48px;
   right: 0;
   bottom: 0;
-  width: min(290px, 25%);
+  width: min(320px, 28%);
   margin: 0;
-  padding: 18px 0 44px;
+  padding: 18px 6px 48px;
   list-style: none;
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-width: none;
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
-  -webkit-mask-image: linear-gradient(transparent, #000 24px, #000 calc(100% - 52px), transparent);
-  mask-image: linear-gradient(transparent, #000 24px, #000 calc(100% - 52px), transparent);
+  -webkit-mask-image: linear-gradient(transparent, #000 24px, #000 calc(100% - 56px), transparent);
+  mask-image: linear-gradient(transparent, #000 24px, #000 calc(100% - 56px), transparent);
 }
 .home-brief::-webkit-scrollbar {
   display: none;
 }
+.home-brief li {
+  position: relative;
+  display: flex;
+  justify-content: center;
+}
+/* The line through the day, behind the pills. */
+.home-brief li + li::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  left: 50%;
+  top: -10px;
+  bottom: 50%;
+  width: 2px;
+  margin-left: -1px;
+  background: color-mix(in srgb, var(--text) 22%, transparent);
+}
+.home-brief li:not(:last-child)::after {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  left: 50%;
+  top: 50%;
+  bottom: -10px;
+  width: 2px;
+  margin-left: -1px;
+  background: color-mix(in srgb, var(--text) 22%, transparent);
+}
+.home-brief li + li {
+  margin-top: 10px;
+}
 .home-brief button {
-  display: grid;
-  grid-template-columns: 64px minmax(0, 1fr);
+  display: flex;
   align-items: center;
-  width: 100%;
-  padding: 7px 10px;
-  border: 0;
-  border-radius: 12px;
-  background: none;
+  min-width: 0;
+  border: 1px solid var(--home-pane-line);
+  border-radius: 999px;
+  background: var(--home-pane);
   color: var(--text);
   font: inherit;
   text-align: left;
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  box-shadow: 0 4px 14px rgb(0 0 0/0.07);
   cursor: pointer;
+  transition:
+    transform 0.15s ease,
+    box-shadow 0.15s ease;
 }
 .home-brief button:hover {
-  background: color-mix(in srgb, var(--text) 6%, transparent);
+  transform: translateY(-1px);
+  box-shadow: 0 6px 18px rgb(0 0 0/0.12);
 }
-.home-brief time {
-  color: var(--text-2);
-  font-size: 12.5px;
-  font-weight: 500;
-  font-variant-numeric: tabular-nums;
+.home-brief-stay {
+  gap: 10px;
+  width: 100%;
+  padding: 6px 18px 6px 6px;
 }
-.home-brief button > span {
+.home-brief-stay .place-icon {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+}
+.home-brief-stay .place-icon svg {
+  width: 17px;
+  height: 17px;
+}
+.home-brief-stay > span:last-child {
   display: flex;
-  align-items: baseline;
-  gap: 8px;
+  flex-direction: column;
   min-width: 0;
 }
 .home-brief strong {
   overflow: hidden;
-  font-size: 15px;
+  font-size: 15.5px;
   font-weight: 600;
+  line-height: 1.25;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .home-brief small {
-  flex: none;
   color: var(--text-2);
-  font-size: 13px;
+  font-size: 12.5px;
   font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 .home-brief-trip {
-  padding-block: 3px !important;
+  gap: 6px;
+  padding: 3px 11px 3px 3px;
 }
-.home-brief-trip > span {
-  align-items: center !important;
-}
-.home-brief .place-icon,
 .home-brief-trip .mode-icon {
   flex: none;
-  align-self: center;
-}
-.home-brief .place-icon {
-  width: 26px;
-  height: 26px;
-  border-radius: 8px;
-}
-.home-brief .place-icon svg {
-  width: 15px;
-  height: 15px;
-}
-.home-brief-trip .mode-icon {
-  width: 20px;
-  height: 20px;
-  margin: 0 3px;
+  width: 22px;
+  height: 22px;
 }
 .home-brief-trip .mode-icon svg {
-  width: 12px;
-  height: 12px;
+  width: 13px;
+  height: 13px;
+}
+.home-brief-trip small {
+  color: var(--text);
 }
 
 /* The full timeline, on glass beside the map while exploring, inside its frame and clear of its bars. */
@@ -492,12 +518,20 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
   color: var(--home-on-glass-2);
   font-size: 13px;
 }
-/* Where the day went, below the map on a dark card. */
-#home-view .home-share .home-card-note {
-  color: var(--text-2);
+/* Where the day went and Movement by hour, below the map: glass cards like the ones over it, with the
+   page's colours turned to white on glass for what they draw. */
+#home-view .home-panel {
+  --text: var(--home-on-glass);
+  --text-2: var(--home-on-glass-2);
+  --text-3: rgb(255 255 255/0.55);
+  --border: rgb(255 255 255/0.14);
+  --surface-3: rgb(255 255 255/0.1);
+  --accent: #5ed1c2;
 }
-#home-view .home-share .home-bar span {
-  color: var(--text-2);
+#home-view .home-panel .badge {
+  border-color: var(--home-glass-line);
+  background: var(--home-chip);
+  color: var(--home-on-glass);
 }
 .home-stats {
   display: flex;
@@ -652,19 +686,19 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
 }
 #home-view #inspector,
 #home-view #history-details,
-#home-view .home-dark {
+#home-view .home-panel {
   border-radius: var(--home-radius);
 }
 #home-view .timeline-section {
   padding: 18px 14px 10px;
 }
 #home-view .timeline-section > .card-head h2,
-#home-view .home-dark h2,
+#home-view .home-panel h2,
 #home-view #history-details .detail-tab {
   font-weight: 450;
 }
 #home-view .timeline-section > .card-head h2,
-#home-view .home-dark h2 {
+#home-view .home-panel h2 {
   font-size: 19px;
 }
 #home-view .map-detail {
@@ -672,9 +706,6 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
 }
 #home-view #history-details {
   margin-top: 0;
-}
-.home-dark {
-  padding: 20px 22px;
 }
 .home-hours {
   position: relative;
