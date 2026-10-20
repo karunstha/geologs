@@ -316,28 +316,99 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
   z-index: 2;
   left: 0;
   bottom: 0;
-  width: min(400px, 34%);
+  width: min(350px, 30%);
   display: grid;
   gap: 10px;
 }
-/* The timeline, on glass beside the map, below the Explore button. It stays while exploring (choosing a
-   stay or trip in it opens the map), moving inside the map's frame and clear of its bars. */
+/* The still map's timeline: no card, just the day's stays and trips over the map's faded edge, fading
+   out at the top and bottom as it scrolls. */
+.home-brief {
+  position: absolute;
+  z-index: 2;
+  top: 48px;
+  right: 0;
+  bottom: 0;
+  width: min(290px, 25%);
+  margin: 0;
+  padding: 18px 0 44px;
+  list-style: none;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+  -webkit-mask-image: linear-gradient(transparent, #000 24px, #000 calc(100% - 52px), transparent);
+  mask-image: linear-gradient(transparent, #000 24px, #000 calc(100% - 52px), transparent);
+}
+.home-brief::-webkit-scrollbar {
+  display: none;
+}
+.home-brief button {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  align-items: center;
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 12px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.home-brief button:hover {
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+}
+.home-brief time {
+  color: var(--text-3);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.home-brief button > span {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.home-brief strong {
+  overflow: hidden;
+  font-size: 14.5px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.home-brief small {
+  flex: none;
+  color: var(--text-2);
+  font-size: 12.5px;
+}
+.home-brief-trip {
+  padding-block: 3px !important;
+}
+.home-brief-trip > span {
+  align-items: center !important;
+}
+.home-brief-trip .mode-icon {
+  flex-basis: 20px;
+  width: 20px;
+  height: 20px;
+}
+
+/* The full timeline, on glass beside the map while exploring, inside its frame and clear of its bars. */
 .home-timeline {
   position: absolute;
   z-index: 3;
-  top: 52px;
-  right: 0;
-  bottom: 0;
-  width: min(380px, 32%);
-  transition:
-    top 0.4s cubic-bezier(0.4, 0, 0.2, 1),
-    right 0.4s cubic-bezier(0.4, 0, 0.2, 1),
-    bottom 0.4s cubic-bezier(0.4, 0, 0.2, 1);
-}
-.home-hero.exploring .home-timeline {
   top: 60px;
   right: 10px;
   bottom: 50px;
+  width: min(380px, 32%);
+  transition:
+    opacity 0.3s ease,
+    visibility 0.3s;
+}
+.home-hero:not(.exploring) .home-timeline {
+  opacity: 0;
+  pointer-events: none;
+  visibility: hidden;
 }
 #home-view #home-timeline #inspector {
   height: 100%;
@@ -398,8 +469,9 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
   line-height: 1.1;
   font-variant-numeric: tabular-nums;
 }
-.home-stats dd small {
-  margin-left: 3px;
+.home-stats dd small,
+.home-mini > strong small {
+  margin-left: 1px;
   color: var(--home-on-glass-2);
   font-size: 15px;
   letter-spacing: 0;
@@ -655,10 +727,17 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
     grid-template-columns: 1fr;
   }
   .home-stack,
-  .home-timeline,
-  .home-hero.exploring .home-timeline {
+  .home-brief,
+  .home-timeline {
     position: static;
     width: auto;
+  }
+  .home-brief {
+    max-height: 260px;
+    margin-top: 10px;
+  }
+  .home-hero:not(.exploring) .home-timeline {
+    display: none;
   }
   .home-stack {
     margin-top: 10px;

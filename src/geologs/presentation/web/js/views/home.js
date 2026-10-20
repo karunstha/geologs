@@ -5,6 +5,7 @@
 import { api } from "../core/api.js";
 import { $, safe, toast } from "../core/dom.js";
 import {
+  clock,
   distanceText,
   durationText,
   imperial,
@@ -15,7 +16,7 @@ import {
   zonedMidnight,
 } from "../core/format.js";
 import { state } from "../core/state.js";
-import { dayBounds, drawSelection, map, setCoveredRight } from "../map/map.js";
+import { dayBounds, drawSelection, map, selectItem, setCoveredRight, tripKey } from "../map/map.js";
 import { modeIcon, modeInfo, visitNumbers } from "../ui/icons.js";
 import { moveDay } from "./history.js";
 import { showView } from "./shell.js";
@@ -58,6 +59,11 @@ let fittedKey = null;
 function shortDuration(minutes) {
   const total = Math.round(minutes || 0);
   return total < 60 ? `${total}m` : `${Math.floor(total / 60)}h ${String(total % 60).padStart(2, "0")}m`;
+}
+
+// A big number with its units ("h", "m", "mi", "$") in small type.
+function smallUnits(text) {
+  return safe(text).replace(/[^\d\s.,:\-–]+/g, (unit) => `<small>${unit}</small>`);
 }
 
 // The day's span in the configured timezone (today's ends now), and how many minutes of it a stay covers.
@@ -152,12 +158,12 @@ function renderMonth(day) {
   const label = year === Number(localDateKey().slice(0, 4)) && month === Number(localDateKey().slice(5, 7)) ? "this month" : new Date(year, month - 1, 1).toLocaleDateString(undefined, { month: "long" });
   // The numbers are the shown day's; only the bars are the month.
   $("home-distance-title").textContent = `Distance · ${when}`;
-  $("home-distance").textContent = distanceText(distance[lit]);
+  $("home-distance").innerHTML = smallUnits(distanceText(distance[lit]));
   $("home-distance-note").textContent = `${distanceText(sum(distance))} ${label}`;
   bars($("home-distance-chart"), distance, lit);
   $("home-fuel-title").textContent = `Fuel · ${when}`;
   const spent = sum(fuel);
-  $("home-fuel").textContent = fuel[lit] > 0 ? moneyText(fuel[lit], day.fuel?.currency) : "—";
+  $("home-fuel").innerHTML = fuel[lit] > 0 ? smallUnits(moneyText(fuel[lit], day.fuel?.currency)) : "—";
   $("home-fuel-note").textContent = spent > 0 ? `${moneyText(spent, day.fuel?.currency)} ${label}` : "No fuel costs yet";
   bars($("home-fuel-chart"), fuel, lit);
 }
@@ -186,9 +192,8 @@ function renderGlance(day) {
     ["In motion", shortDuration(moving)],
     homeKnown ? ["Away from home", shortDuration(away)] : [stays.length === 1 ? "Stay" : "Stays", stays.length.toLocaleString()],
     [day.visited_places.length === 1 ? "Place" : "Places", day.visited_places.length.toLocaleString()],
-    [day.trips.length === 1 ? "Trip" : "Trips", day.trips.length.toLocaleString()],
   ]
-    .map(([label, value, small]) => `<div><dt>${label}</dt><dd>${safe(value)}${small ? `<small>${small}</small>` : ""}</dd></div>`)
+    .map(([label, value]) => `<div><dt>${label}</dt><dd>${smallUnits(value)}</dd></div>`)
     .join("");
   const modes = Object.entries(day.activity_totals).filter(([mode, totals]) => totals.count && modeInfo[mode]);
   $("home-modes").innerHTML = modes
@@ -200,6 +205,7 @@ function renderGlance(day) {
   $("home-modes").hidden = !modes.length;
 
   renderMonth(day);
+  renderBrief(day, stays);
 
   // Where the day went: the two places held longest, any others together, and time on the move.
   const places = new Map();
@@ -241,19 +247,50 @@ function renderGlance(day) {
       : "");
 }
 
+// The still Home's timeline: just when, where and how, over the map. Pressing one opens the map on it,
+// with the full timeline beside it.
+function renderBrief(day, stays) {
+  const items = [
+    ...stays.map((item) => ({ at: item.stay.started_at, item })),
+    ...day.trips.map((trip) => ({ at: trip.start, trip })),
+  ].sort((a, b) => a.at.localeCompare(b.at) || (a.item ? -1 : 1));
+  $("home-brief").innerHTML = items
+    .map(({ at, item, trip }) => {
+      if (item)
+        return `<li><button type="button" class="home-brief-stay" data-item="stay:${item.stay.id}"><time>${safe(clock(at))}</time><span><strong>${safe(item.name)}</strong><small>${safe(durationText(item.stay.observed_minutes))}</small></span></button></li>`;
+      const info = modeInfo[trip.mode] || { label: "Moved", color: "#6f7b76" };
+      return `<li><button type="button" class="home-brief-trip" data-item="trip:${safe(tripKey(trip))}" style="--mode:${info.color}"><time>${safe(clock(at))}</time><span>${modeIcon(trip.mode)}<small>${safe(`${info.label} · ${distanceText(trip.distance_km)}`)}</small></span></button></li>`;
+    })
+    .join("");
+}
+
+function openBriefItem(button) {
+  const [type, ...rest] = button.dataset.item.split(":");
+  const key = rest.join(":");
+  setExploring(true);
+  // The full timeline is in place now, so the zoom keeps clear of it.
+  if (!(state.selected?.type === type && String(state.selected.key) === key))
+    selectItem(type, type === "stay" ? +key : key);
+}
+
 // How much of the map's right edge the timeline covers: on a wide screen it sits over the map, still
 // or exploring; on a narrow one it is below it.
 function timelineCover() {
   const timeline = $("home-timeline");
-  if ($("home-hero").hidden || timeline.hidden || !matchMedia("(min-width: 901px)").matches) return 0;
+  if (!exploring || $("home-hero").hidden || timeline.hidden || !matchMedia("(min-width: 901px)").matches) return 0;
   return Math.max(0, $("map").getBoundingClientRect().right - timeline.getBoundingClientRect().left);
+}
+
+function updateCover() {
+  const cover = timelineCover();
+  setCoveredRight(cover && cover + 16);
+  return cover;
 }
 
 // Fit the day to the part of the map the cards and the timeline leave clear.
 function restFit() {
   if (!map || $("home-hero").hidden) return;
-  const cover = timelineCover();
-  setCoveredRight(cover && cover + 16);
+  const cover = updateCover();
   const bounds = dayBounds();
   if (!bounds.length) return;
   let left = 40,
@@ -263,7 +300,8 @@ function restFit() {
   const box = $("map").getBoundingClientRect();
   if (!exploring && matchMedia("(min-width: 901px)").matches && !$("home-glance").hidden) {
     left = document.querySelector(".home-stack").getBoundingClientRect().right - box.left + 28;
-    if (box.width - left - right < 160) left = 40;
+    right = box.right - $("home-brief").getBoundingClientRect().left + 28;
+    if (box.width - left - right < 160) left = right = 40;
   }
   map.fitBounds(L.latLngBounds(bounds), { paddingTopLeft: [left, top], paddingBottomRight: [right, bottom], maxZoom: 15, duration: 0.7 });
 }
@@ -302,6 +340,7 @@ function setExploring(on, keepView = false) {
   if (matchMedia("(max-width: 900px)").matches) map?.invalidateSize();
   setInteractive(on);
   showLabels();
+  updateCover();
   if (!keepView) map?.closePopup();
   if (!on && state.selected) {
     state.selected = null;
@@ -429,6 +468,10 @@ export function initHome() {
     if (!exploring && $("home-view").classList.contains("active")) setExploring(true, true);
   });
   $("home-explore").onclick = () => setExploring(!exploring);
+  $("home-brief").onclick = (event) => {
+    const button = event.target.closest("[data-item]");
+    if (button) openBriefItem(button);
+  };
   let resizeTimer = 0;
   window.addEventListener("resize", () => {
     clearTimeout(resizeTimer);
