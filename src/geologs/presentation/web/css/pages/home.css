@@ -15,6 +15,9 @@
   --home-control-text: #141414;
   --home-pane: rgb(255 255 255/0.84);
   --home-pane-line: rgb(0 0 0/0.06);
+  /* The still timeline's pills: nearly solid, not blurred. Every blur over the WebGL map is another
+     copy of it for the GPU, and Safari drops the map's context when it runs short. */
+  --home-pill: rgb(255 255 255/0.93);
   position: relative;
 }
 :root[data-theme="dark"] #home-view {
@@ -22,6 +25,7 @@
   --home-glass-line: rgb(255 255 255/0.1);
   --home-pane: rgb(22 26 29/0.78);
   --home-pane-line: rgb(255 255 255/0.1);
+  --home-pill: rgb(30 34 37/0.92);
   /* Dark theme: frosted white over the photo and map, light enough to read as a button, not a block. */
   --home-control: rgb(255 255 255/0.16);
   --home-control-hover: rgb(255 255 255/0.24);
@@ -408,12 +412,10 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
   min-width: 0;
   border: 1px solid var(--home-pane-line);
   border-radius: 999px;
-  background: var(--home-pane);
+  background: var(--home-pill);
   color: var(--text);
   font: inherit;
   text-align: left;
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
   box-shadow: 0 4px 14px rgb(0 0 0/0.07);
   cursor: pointer;
   transition:

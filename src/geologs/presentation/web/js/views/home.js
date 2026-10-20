@@ -359,20 +359,41 @@ function useGreyMap() {
     if (layer instanceof L.TileLayer) tiles = layer;
   });
   const styleFor = () => FREE_MAP + (document.documentElement.dataset.theme === "dark" ? "dark" : "positron");
-  let style = styleFor();
-  const layer = L.maplibreGL({ style, attribution: FREE_MAP_CREDIT }).addTo(map);
-  glMap = layer.getMaplibreMap();
-  if (tiles) map.removeLayer(tiles);
-  $("home-view").classList.add("vector-map");
-  const fallback = setTimeout(() => {
-    map.removeLayer(layer);
-    glMap = null;
+  let style = styleFor(),
+    layer = null,
+    losses = 0;
+  const unmount = () => {
+    if (layer) map.removeLayer(layer);
+    layer = glMap = null;
     styleReady = false;
+  };
+  const useTiles = () => {
+    unmount();
     tiles?.addTo(map);
     $("home-view").classList.remove("vector-map");
-  }, 15000);
-  glMap.once("load", () => clearTimeout(fallback));
-  glMap.on("style.load", styleMap);
+  };
+  const mount = () => {
+    style = styleFor();
+    const current = (layer = L.maplibreGL({ style, attribution: FREE_MAP_CREDIT }).addTo(map));
+    glMap = layer.getMaplibreMap();
+    const fallback = setTimeout(useTiles, 15000);
+    glMap.once("load", () => clearTimeout(fallback));
+    glMap.on("style.load", styleMap);
+    // Safari drops a WebGL context when the GPU is short of memory, and MapLibre does not draw again
+    // after it: start a fresh map instead, and after a few losses settle for the plain tiles.
+    glMap.on("webglcontextlost", () => {
+      clearTimeout(fallback);
+      setTimeout(() => {
+        if (layer !== current) return;
+        unmount();
+        if (++losses > 3) useTiles();
+        else mount();
+      }, 250);
+    });
+  };
+  mount();
+  if (tiles) map.removeLayer(tiles);
+  $("home-view").classList.add("vector-map");
   new MutationObserver(() => {
     if (!glMap || styleFor() === style) return;
     styleReady = false;
