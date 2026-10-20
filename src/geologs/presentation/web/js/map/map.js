@@ -405,7 +405,7 @@ export function drawSelection(zoom) {
       maxZoom: 16,
     });
   else if ([...lines, ...fills, ...gaps].flat().length > 1)
-    map.fitBounds(L.latLngBounds([...lines, ...fills, ...gaps].flat()).pad(0.2), { maxZoom: 16 });
+    map.fitBounds(L.latLngBounds([...lines, ...fills, ...gaps].flat()).pad(0.5), { maxZoom: 15 });
   else map.setView([subject.lat ?? subject.from_lat, subject.lon ?? subject.from_lon], 16);
 }
 

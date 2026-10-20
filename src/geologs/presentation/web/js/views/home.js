@@ -5,7 +5,6 @@
 import { api } from "../core/api.js";
 import { $, safe, toast } from "../core/dom.js";
 import {
-  clock,
   distanceText,
   durationText,
   imperial,
@@ -46,10 +45,6 @@ const MAP_HANDLERS = ["dragging", "touchZoom", "doubleClickZoom", "scrollWheelZo
 const ICONS = {
   explore: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>',
   done: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 3H3v6M15 21h6v-6M3 3l7 7M21 21l-7-7"/></svg>',
-  home: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 11 12 4l8 7v9h-5v-6H9v6H4Z"/></svg>',
-  pin: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 10c0 4.6-7 10-7 10S5 14.6 5 10a7 7 0 0 1 14 0Z"/><circle cx="12" cy="10" r="2.4"/></svg>',
-  signal: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12a10 10 0 0 1 14 0M8.5 15.5a5 5 0 0 1 7 0"/><circle cx="12" cy="19" r="1"/></svg>',
-  bell: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 16.5h12l-1.6-2.6V10a4.4 4.4 0 0 0-8.8 0v3.9Z"/><path d="M10 19.5h4"/></svg>',
 };
 
 let glMap = null;
@@ -153,16 +148,17 @@ function renderMonth(day) {
   distance[lit] = day.movement_km ?? day.stats.distance_km ?? 0;
   fuel[lit] = day.fuel?.cost || 0;
   const sum = (values) => values.reduce((a, b) => a + b, 0);
-  const label = year === Number(localDateKey().slice(0, 4)) && month === Number(localDateKey().slice(5, 7)) ? "This month" : new Date(year, month - 1, 1).toLocaleDateString(undefined, { month: "long" });
-  const active = (values) => values.filter((value) => value > 0).length;
-  $("home-distance-title").textContent = `Distance · ${label.toLowerCase()}`;
-  $("home-distance").textContent = distanceText(sum(distance));
-  $("home-distance-note").textContent = `${distanceText(distance[lit])} on this day`;
+  const when = day.date === localDateKey() ? "today" : "this day";
+  const label = year === Number(localDateKey().slice(0, 4)) && month === Number(localDateKey().slice(5, 7)) ? "this month" : new Date(year, month - 1, 1).toLocaleDateString(undefined, { month: "long" });
+  // The numbers are the shown day's; only the bars are the month.
+  $("home-distance-title").textContent = `Distance · ${when}`;
+  $("home-distance").textContent = distanceText(distance[lit]);
+  $("home-distance-note").textContent = `${distanceText(sum(distance))} ${label}`;
   bars($("home-distance-chart"), distance, lit);
-  $("home-fuel-title").textContent = `Fuel · ${label.toLowerCase()}`;
+  $("home-fuel-title").textContent = `Fuel · ${when}`;
   const spent = sum(fuel);
-  $("home-fuel").textContent = spent > 0 ? moneyText(spent, day.fuel?.currency) : "—";
-  $("home-fuel-note").textContent = spent > 0 ? `${moneyText(fuel[lit], day.fuel?.currency)} on this day · ${active(fuel)} days` : "No fuel costs yet";
+  $("home-fuel").textContent = fuel[lit] > 0 ? moneyText(fuel[lit], day.fuel?.currency) : "—";
+  $("home-fuel-note").textContent = spent > 0 ? `${moneyText(spent, day.fuel?.currency)} ${label}` : "No fuel costs yet";
   bars($("home-fuel-chart"), fuel, lit);
 }
 
@@ -243,49 +239,6 @@ function renderGlance(day) {
     (peak > 0
       ? `<span class="home-peak" style="left:${((hours.indexOf(peak) + 0.5) / 24) * 100}%">${safe(distanceText(peak))}</span>`
       : "");
-
-  // Day notes: getting home, coverage, and reminders.
-  const notes = [];
-  const last = stays.at(-1);
-  if (!last) notes.push([ICONS.pin, "No stays recorded", ""]);
-  else if (!day.trips.length)
-    notes.push([last.home ? ICONS.home : ICONS.pin, last.home ? "Home all day" : `At ${last.name} all day`, "No trips"]);
-  else if (last.home) notes.push([ICONS.home, `Back home at ${clock(last.stay.started_at)}`, `After ${durationText(away)} away`]);
-  else
-    notes.push([
-      ICONS.pin,
-      today && !last.stay.ended_at ? `Now at ${last.name}` : `Ended the day at ${last.name}`,
-      `Since ${clock(last.stay.started_at)}`,
-    ]);
-  const gaps = day.coverage_gaps || [];
-  const missing = gaps.reduce((sum, gap) => sum + (gap.minutes || 0), 0);
-  notes.push([
-    ICONS.signal,
-    gaps.length ? `${durationText(missing)} without location` : "Full coverage",
-    gaps.length
-      ? gaps
-          .slice(0, 3)
-          .map((gap) => `${clock(gap.start)} – ${clock(gap.end)}`)
-          .join(" · ") + (gaps.length > 3 ? ` · ${gaps.length - 3} more` : "")
-      : `${plural(day.points, "fix", "fixes")} recorded, no gaps`,
-  ]);
-  const fired = (state.reminderHistory || []).filter(
-    (item) => item.status === "triggered" && span.holds(item.triggered_at || item.last_triggered_at),
-  );
-  notes.push([
-    ICONS.bell,
-    fired.length ? `${plural(fired.length, "reminder")} fired` : "No reminders fired",
-    fired
-      .slice(0, 2)
-      .map((item) => item.text)
-      .join(" · "),
-  ]);
-  $("home-notes").innerHTML = notes
-    .map(
-      ([icon, title, detail]) =>
-        `<li><span class="home-note-icon">${icon}</span><span><strong>${safe(title)}</strong>${detail ? `<small>${safe(detail)}</small>` : ""}</span></li>`,
-    )
-    .join("");
 }
 
 // Fit the day to the part of the map the cards leave clear: the whole of it while exploring.
@@ -445,7 +398,6 @@ export function initHome() {
     ["home-empty", $("day-empty")],
     ["home-map", classic.querySelector(".map-shell")],
     ["home-timeline", $("inspector")],
-    ["home-details", $("history-details")],
   ])
     if (node) $(slot).append(node);
   // The classic Home dims itself while a day loads; this page follows it.

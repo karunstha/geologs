@@ -17,7 +17,7 @@ import {
 } from "../core/format.js";
 import { state } from "../core/state.js";
 import { drawMap, drawSelection, fitDay, map, revealMap, selectedItem } from "../map/map.js";
-import { modeIcon, modeInfo, placeIcon, sourceName } from "../ui/icons.js";
+import { modeIcon, modeInfo, placeIcon } from "../ui/icons.js";
 import { initAmbient, refreshAmbient } from "./ambient.js";
 import { initDayDetails, renderDayDetails } from "./day-details.js";
 import { showSettingsPage } from "./settings.js";
@@ -201,10 +201,8 @@ export function renderCurrent() {
   $("current-place").innerHTML =
     placeIcon({ ...point, name: point.place_name }) +
     `<span>${safe(point.place_name || point.address || "Unknown place")}</span>`;
-  const source = sourceName(point.source);
   $("current-updated").textContent = [
     `Updated ${ago(point.timestamp)}`,
-    source.device || source.kind,
     point.stale ? "may be out of date" : "",
   ]
     .filter(Boolean)

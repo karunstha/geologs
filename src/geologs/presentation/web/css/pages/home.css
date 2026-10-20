@@ -40,6 +40,9 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
 #home-view.loading #history-details {
   opacity: 0.55;
 }
+#home-view #day-context {
+  display: none;
+}
 #home-view .home-hero,
 #home-view .home-lower,
 #home-view #history-details {
@@ -294,7 +297,7 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
   transition: top 0.4s cubic-bezier(0.4, 0, 0.2, 1);
 }
 .home-hero.exploring .home-explore {
-  top: 36px;
+  top: 7px;
   right: 10px;
 }
 
