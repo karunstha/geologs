@@ -406,6 +406,13 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
 .home-brief li + li {
   margin-top: 10px;
 }
+/* A place pill is nearly solid, so the line stops at its edges rather than showing through it. */
+.home-brief li:has(.home-brief-stay)::before {
+  bottom: 100%;
+}
+.home-brief li:has(.home-brief-stay)::after {
+  top: 100%;
+}
 .home-brief button {
   display: flex;
   align-items: center;
@@ -836,9 +843,14 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
     position: static;
     width: auto;
   }
+  /* Below the map the timeline is the page's: all of it shown, no scrolling of its own and no fade. */
   .home-brief {
-    max-height: 260px;
-    margin-top: 10px;
+    max-height: none;
+    margin-top: 14px;
+    padding: 0;
+    overflow: visible;
+    -webkit-mask-image: none;
+    mask-image: none;
   }
   .home-hero:not(.exploring) .home-timeline {
     display: none;
@@ -860,13 +872,24 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
   .home-map {
     height: 300px;
   }
+  /* In motion, Away from home and Places stay on one line. */
   .home-stats {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
+    flex-wrap: nowrap;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .home-stats > div {
+    min-width: 0;
   }
   .home-stats dd,
   .home-mini > strong {
     font-size: 26px;
+  }
+  .home-stats dd {
+    white-space: nowrap;
+  }
+  .home-stats dd small {
+    font-size: 13px;
   }
   .home-pair {
     grid-template-columns: 1fr;
