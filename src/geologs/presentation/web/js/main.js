@@ -9,6 +9,7 @@ import { initAccount } from "./views/account.js";
 import { initAdmin } from "./views/admin.js";
 import { initAuth } from "./views/auth.js";
 import { initHistory, refreshCurrent, refreshExplore } from "./views/history.js";
+import { initHome } from "./views/home.js";
 import { refreshInsights } from "./views/patterns.js";
 import { initPlaceDialogs } from "./views/place-dialogs.js";
 import { initPlaces } from "./views/places.js";
@@ -32,6 +33,8 @@ initSummaries();
 initSettings();
 initStayEdits();
 initMap();
+// After the map: the new Home borrows it, with the classic Home's timeline and details.
+initHome();
 
 refreshAll().then(() => {
   state.lastEventId = state.events.reduce((max, e) => Math.max(max, e.id), 0);

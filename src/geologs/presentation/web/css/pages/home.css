@@ -1,0 +1,625 @@
+/* The new Home (js/views/home.js): glass cards over the day's photo and a grey, still map, then the classic
+   Home's timeline and details on dark cards. Everything here is scoped to #home-view, so the classic Home
+   keeps its own look. */
+#home-view {
+  --home-radius: 24px;
+  --home-glass: rgb(38 38 38/0.5);
+  --home-glass-line: rgb(255 255 255/0.16);
+  --home-on-glass: #fff;
+  --home-on-glass-2: rgb(255 255 255/0.74);
+  --home-chip: rgb(255 255 255/0.13);
+  --home-ink: #141414;
+  position: relative;
+}
+:root[data-theme="dark"] #home-view {
+  --home-glass: rgb(22 26 29/0.6);
+  --home-glass-line: rgb(255 255 255/0.1);
+  --home-ink: #000;
+}
+/* A grey page, as the map's land is grey, and the photo across its top. */
+:root:not([data-theme="dark"]) body:has(#home-view.active) {
+  background: #e8e8e6;
+}
+body:has(#home-view.active) .backdrop {
+  display: block;
+}
+body:has(#home-view.active) .topbar:not(.scrolled) {
+  --text: #fff;
+  --text-2: rgb(255 255 255/0.88);
+  --surface: rgb(255 255 255/0.16);
+  --surface-3: rgb(255 255 255/0.2);
+  --border: rgb(255 255 255/0.32);
+  --border-strong: rgb(255 255 255/0.42);
+  --accent-soft: rgb(255 255 255/0.24);
+  --accent-text: #fff;
+  color: #fff;
+  text-shadow: 0 1px 8px rgb(0 0 0/0.35);
+}
+#home-view.loading .home-hero,
+#home-view.loading .home-lower,
+#home-view.loading #history-details {
+  opacity: 0.55;
+}
+#home-view .home-hero,
+#home-view .home-lower,
+#home-view #history-details {
+  transition: opacity 0.15s;
+}
+
+/* Head: the day's title on the photo, with the day controls beside it. */
+.home-head {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 12px 24px;
+  margin-bottom: 26px;
+}
+#home-view .history-head {
+  flex: 1 1 420px;
+  min-height: 0;
+  margin: 0;
+  padding-top: 44px;
+}
+#home-view .history-head h1 {
+  font-size: clamp(36px, 5vw, 56px);
+  font-weight: 450;
+  letter-spacing: -0.04em;
+}
+#home-view .day-bar {
+  flex: 0 1 auto;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  box-shadow: none;
+  color-scheme: dark;
+}
+#home-view .day-bar .current-location {
+  flex: none;
+  padding: 6px 14px 6px 12px;
+  border: 1px solid var(--home-glass-line);
+  border-radius: 999px;
+  background: rgb(255 255 255/0.14);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  color: #fff;
+}
+#home-view .day-bar .current-label {
+  color: rgb(255 255 255/0.7);
+}
+#home-view .day-bar #current-place {
+  color: #fff;
+}
+#home-view .day-navigation {
+  gap: 8px;
+}
+#home-view .day-navigation .icon-button.bordered {
+  border-color: transparent;
+  border-radius: 50%;
+  background: var(--home-ink);
+  color: #fff;
+}
+#home-view .day-navigation .icon-button.bordered:disabled {
+  opacity: 0.45;
+}
+#home-view #day-date {
+  height: 36px;
+  border-color: transparent;
+  border-radius: 999px;
+  background: var(--home-ink);
+  color: #fff;
+  color-scheme: dark;
+}
+#home-view #today {
+  border-color: rgb(255 255 255/0.32);
+  border-radius: 999px;
+  background: rgb(255 255 255/0.16);
+  color: #fff;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+#home-view .photo-credit {
+  top: -14px;
+}
+#home-view .day-empty {
+  margin-top: 8px;
+}
+
+/* Hero: the map fills it, fading out at its edges; the glance cards float over its sides. */
+.home-hero {
+  position: relative;
+  height: 500px;
+}
+.home-hero.map-only {
+  height: 560px;
+}
+.home-map {
+  position: absolute;
+  inset: -28px 0 -8px;
+}
+#home-view .map-shell {
+  height: 100%;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+}
+#home-view .map-stage,
+#home-view #map {
+  background: transparent;
+}
+.home-hero:not(.exploring) .map-stage {
+  -webkit-mask-image: radial-gradient(ellipse 52% 52% at 50% 50%, #000 58%, transparent 100%);
+  mask-image: radial-gradient(ellipse 52% 52% at 50% 50%, #000 58%, transparent 100%);
+}
+.home-hero:not(.exploring) .map-topline,
+.home-hero:not(.exploring) .map-footer,
+.home-hero:not(.exploring) .leaflet-control-zoom {
+  display: none;
+}
+.home-hero:not(.exploring) .leaflet-control-attribution {
+  background: none;
+  color: var(--text-3);
+}
+/* Exploring: the map whole, framed, with its tools. */
+.home-hero.exploring .home-map {
+  inset: 0;
+}
+.home-hero.exploring .map-shell {
+  overflow: hidden;
+  border: 1px solid var(--border) !important;
+  border-radius: var(--home-radius) !important;
+  background: var(--surface) !important;
+  box-shadow: var(--shadow-md) !important;
+}
+.home-hero.exploring .map-topline {
+  padding-right: 150px;
+}
+/* The vector map has its own dark style, so it skips the classic tiles' dark-theme inversion (map.css);
+   the classic tiles, should the vector map not load, are greyed to match. */
+#home-view.vector-map .leaflet-tile-pane {
+  filter: none;
+}
+#home-view:not(.vector-map) .leaflet-tile-pane {
+  filter: grayscale(1) contrast(0.9) brightness(1.04);
+}
+:root[data-theme="dark"] #home-view:not(.vector-map) .leaflet-tile-pane {
+  filter: invert(1) grayscale(1) brightness(0.9) contrast(0.9);
+}
+.home-explore {
+  position: absolute;
+  z-index: 3;
+  top: 6px;
+  right: 6px;
+  height: 36px;
+  border: 1px solid rgb(0 0 0/0.06);
+  border-radius: 999px;
+  background: rgb(255 255 255/0.78);
+  color: #141414;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  box-shadow: var(--shadow-sm);
+}
+.home-explore:hover {
+  background: #fff;
+}
+.home-explore svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.9;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.home-hero.exploring .home-explore {
+  top: 8px;
+  right: 10px;
+}
+
+.home-glance {
+  transition: opacity 0.2s ease;
+}
+.home-hero.exploring .home-glance {
+  opacity: 0;
+  pointer-events: none;
+  visibility: hidden;
+}
+.home-stack {
+  position: absolute;
+  z-index: 2;
+  left: 0;
+  bottom: 0;
+  width: min(470px, 40%);
+  display: grid;
+  gap: 10px;
+}
+.home-share {
+  position: absolute;
+  z-index: 2;
+  right: 0;
+  bottom: 0;
+  width: min(360px, 30%);
+}
+.home-card {
+  border-radius: var(--home-radius);
+  padding: 20px 22px;
+}
+.home-glass {
+  border: 1px solid var(--home-glass-line);
+  background: var(--home-glass);
+  backdrop-filter: blur(22px) saturate(1.2);
+  -webkit-backdrop-filter: blur(22px) saturate(1.2);
+  color: var(--home-on-glass);
+  box-shadow: 0 10px 30px rgb(0 0 0/0.08);
+}
+.home-card h2 {
+  font-size: 18px;
+  font-weight: 450;
+  letter-spacing: -0.01em;
+}
+.home-card-note {
+  margin-top: 2px;
+  color: var(--home-on-glass-2);
+  font-size: 13px;
+}
+.home-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 28px;
+  margin: 16px 0 0;
+}
+.home-stats > div {
+  display: flex;
+  flex-direction: column-reverse;
+}
+.home-stats dt {
+  color: var(--home-on-glass-2);
+  font-size: 12.5px;
+}
+.home-stats dd {
+  margin: 0;
+  font-size: 32px;
+  font-weight: 400;
+  letter-spacing: -0.035em;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+.home-stats dd small {
+  margin-left: 3px;
+  color: var(--home-on-glass-2);
+  font-size: 15px;
+  letter-spacing: 0;
+}
+.home-modes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 14px;
+}
+.home-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 11px 3px 4px;
+  border: 1px solid rgb(255 255 255/0.12);
+  border-radius: 999px;
+  background: var(--home-chip);
+  font-size: 12.5px;
+}
+.home-mode strong {
+  font-weight: 560;
+}
+.home-mode > span:last-child {
+  color: var(--home-on-glass-2);
+}
+.home-mode .mode-icon {
+  flex-basis: 20px;
+  width: 20px;
+  height: 20px;
+  background: #fff;
+  color: var(--mode);
+}
+.home-pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.home-mini {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.home-mini > strong {
+  margin-top: 10px;
+  font-size: 32px;
+  font-weight: 400;
+  letter-spacing: -0.035em;
+  line-height: 1.1;
+}
+.home-mini small {
+  overflow: hidden;
+  color: var(--home-on-glass-2);
+  font-size: 12.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.home-spark {
+  display: block;
+  width: 100%;
+  height: 52px;
+  margin-top: 10px;
+  overflow: visible;
+  color: #fff;
+}
+.home-mini + .home-mini .home-spark {
+  color: #5ed1c2;
+}
+.home-spark-line {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
+.home-spark-area {
+  fill: currentColor;
+  opacity: 0.13;
+}
+.home-spark-ticks {
+  fill: rgb(255 255 255/0.35);
+}
+.home-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  height: 150px;
+  margin-top: 14px;
+}
+.home-bar {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  height: 100%;
+}
+.home-bar strong {
+  margin-bottom: 6px;
+  font-size: 24px;
+  font-weight: 400;
+  letter-spacing: -0.03em;
+}
+.home-bar i {
+  display: block;
+  border-top: 2px solid #27a99a;
+  border-radius: 10px 10px 4px 4px;
+  background: linear-gradient(180deg, rgb(255 255 255/0.55), rgb(255 255 255/0.12));
+}
+.home-bar.top i {
+  background: linear-gradient(180deg, rgb(39 169 154/0.4), #27a99a);
+}
+.home-bar span {
+  margin-top: 6px;
+  overflow: hidden;
+  color: var(--home-on-glass-2);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Below the hero: dark cards. In the light theme they take the dark theme's colours, so the classic
+   timeline and details inside them draw themselves dark too. */
+.home-lower {
+  display: grid;
+  grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
+  gap: 12px;
+  margin-top: 12px;
+  align-items: start;
+}
+.home-side {
+  display: grid;
+  gap: 12px;
+}
+#home-view #inspector,
+#home-view #history-details,
+#home-view .home-dark {
+  border-radius: var(--home-radius);
+}
+:root:not([data-theme="dark"]) #home-view #inspector,
+:root:not([data-theme="dark"]) #home-view #history-details,
+:root:not([data-theme="dark"]) #home-view .home-dark {
+  --surface: #1b1b1b;
+  --surface-2: #222324;
+  --surface-3: #2a2b2c;
+  --border: #303132;
+  --border-strong: #3d3e40;
+  --text: #ececec;
+  --text-2: #a9adb1;
+  --text-3: #7e8388;
+  --accent: #27a99a;
+  --accent-hover: #36bcac;
+  --accent-soft: #11302c;
+  --accent-text: #5ed1c2;
+  --on-accent: #04201c;
+  --success: #4ccf7f;
+  --success-soft: #12301e;
+  --warning: #eda94b;
+  --warning-soft: #33260f;
+  --danger: #f17b70;
+  --danger-soft: #3a1916;
+  --neutral: #8f99a3;
+  --neutral-soft: #242b30;
+  --shadow-sm: none;
+  border-color: #1b1b1b;
+  background: var(--surface);
+  color: var(--text);
+  color-scheme: dark;
+}
+#home-view #inspector {
+  max-height: none;
+}
+#home-view .timeline-section {
+  padding: 18px 14px 10px;
+}
+#home-view .timeline-section > .card-head h2,
+#home-view .home-dark h2,
+#home-view #history-details .detail-tab {
+  font-weight: 450;
+}
+#home-view .timeline-section > .card-head h2,
+#home-view .home-dark h2 {
+  font-size: 19px;
+}
+#home-view .day-timeline {
+  overflow: visible;
+}
+#home-view .map-detail {
+  max-height: 320px;
+}
+#home-view #history-details {
+  margin-top: 12px;
+}
+.home-dark {
+  padding: 20px 22px;
+}
+.home-hours {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  height: 150px;
+  margin-top: 30px;
+}
+.home-hours i {
+  flex: 1;
+  min-height: 2px;
+  border-top: 2px solid var(--accent);
+  border-radius: 5px 5px 2px 2px;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--text) 38%, transparent), color-mix(in srgb, var(--text) 8%, transparent));
+}
+.home-hours i.none {
+  border-top-color: var(--border);
+  background: var(--surface-3);
+}
+.home-peak {
+  position: absolute;
+  bottom: 100%;
+  transform: translate(-50%, -8px);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+.home-axis {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 8px;
+  color: var(--text-3);
+  font-size: 11.5px;
+}
+.home-notes {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.home-notes li {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+}
+.home-notes li:first-child {
+  border-top: 0;
+  padding-top: 2px;
+}
+.home-notes strong {
+  display: block;
+  font-weight: 500;
+}
+.home-notes small {
+  display: block;
+  color: var(--text-2);
+  font-size: 12.5px;
+}
+.home-note-icon {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  background: var(--surface-3);
+  color: var(--accent-text);
+}
+.home-note-icon svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* Narrower screens: the map on top, the glance cards below it, one column. */
+@media (max-width: 900px) {
+  .home-hero,
+  .home-hero.map-only {
+    height: auto;
+  }
+  .home-map {
+    position: relative;
+    inset: auto;
+    height: 340px;
+    margin: -12px 0 0;
+  }
+  .home-hero.exploring .home-map {
+    height: 62vh;
+    min-height: 380px;
+  }
+  .home-hero.exploring .home-glance {
+    display: none;
+  }
+  .home-stack,
+  .home-share {
+    position: static;
+    width: auto;
+  }
+  .home-stack {
+    margin-top: 10px;
+  }
+  .home-share {
+    margin-top: 10px;
+  }
+  .home-lower {
+    grid-template-columns: 1fr;
+  }
+}
+@media (max-width: 760px) {
+  #home-view .history-head {
+    padding-top: 12px;
+  }
+  .home-map {
+    height: 300px;
+  }
+  .home-stats {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+  .home-stats dd,
+  .home-mini > strong {
+    font-size: 26px;
+  }
+  .home-pair {
+    grid-template-columns: 1fr;
+  }
+  .home-hero.exploring .map-topline {
+    padding-right: 120px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .home-glance {
+    transition: none;
+  }
+}

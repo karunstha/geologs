@@ -181,6 +181,8 @@ export function renderExplore(day, coverage) {
       drawSelection(true);
       document.querySelector("#day-timeline .selected")?.scrollIntoView({ block: "nearest" });
     }
+    // The new Home (js/views/home.js) lays out its own cards around the day just drawn.
+    document.dispatchEvent(new CustomEvent("geologs:day-drawn"));
   };
   if (map && (newView || zoomToSelection))
     setTimeout(() => {
