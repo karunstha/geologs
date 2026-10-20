@@ -58,7 +58,6 @@
         <button class="nav" data-view="reminders"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 16.5h12l-1.6-2.6V10a4.4 4.4 0 0 0-8.8 0v3.9Z"/><path d="M10 19.5h4"/></svg><span>Reminders</span></button>
         <button class="nav" data-view="summaries"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="15" rx="2"/><path d="M8 3v4M16 3v4M4 10h16M8 14h5M8 17h8"/></svg><span>Summaries</span></button>
         <button class="nav" data-view="settings"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 13.5a7.6 7.6 0 0 0 0-3l2-1.5-2-3.5-2.4 1a7.6 7.6 0 0 0-2.6-1.5L14 2.5h-4l-.4 2.5A7.6 7.6 0 0 0 7 6.5l-2.4-1-2 3.5 2 1.5a7.6 7.6 0 0 0 0 3l-2 1.5 2 3.5 2.4-1a7.6 7.6 0 0 0 2.6 1.5l.4 2.5h4l.4-2.5a7.6 7.6 0 0 0 2.6-1.5l2.4 1 2-3.5Z"/></svg><span>Settings</span></button>
-        <button class="nav" data-view="admin" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 5 6v5c0 4.5 3 8.2 7 10 4-1.8 7-5.5 7-10V6Z"/><path d="m9 12 2 2 4-4"/></svg><span>Admin</span></button>
       </nav>
       <div class="top-actions">
         <button id="connection" class="connection" type="button" data-state="pending" title="Connection status">Connecting…</button>
@@ -248,7 +247,7 @@
       <div class="page-head"><div class="page-title"><h1 id="settings-title">Settings</h1><p class="page-subtitle">Units, devices, and how your history is read.</p></div></div>
       <div class="settings-layout">
         <nav class="settings-nav" aria-label="Settings">
-          <div class="settings-cats segmented" role="group" aria-label="Settings categories"><button type="button" data-settings-group="general">General</button><button type="button" data-settings-group="timeline">Timeline</button><button type="button" data-settings-group="tracking">Tracking</button></div>
+          <div class="settings-cats segmented" role="group" aria-label="Settings categories"><button type="button" data-settings-group="general">General</button><button type="button" data-settings-group="timeline">Timeline</button><button type="button" data-settings-group="tracking">Tracking</button><button type="button" data-settings-group="admin" hidden>Admin</button></div>
           <div class="settings-group" data-group="general" role="group" aria-labelledby="settings-group-general"><p id="settings-group-general" class="settings-group-label">General</p>
             <button type="button" class="settings-tab" data-settings-page="settings-appearance"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 3.5v17a8.5 8.5 0 0 0 0-17Z" fill="currentColor"/></svg><span>Units &amp; theme</span></button>
             <button type="button" class="settings-tab" data-settings-page="settings-summaries"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="15.5" rx="2"/><path d="M3.5 9.5h17M8 3v4M16 3v4M8 13.5h4M8 16.5h7"/></svg><span>Days &amp; summaries</span></button>
@@ -264,6 +263,12 @@
             <button type="button" class="settings-tab" data-settings-page="settings-sources"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="2.5" width="10" height="19" rx="2.5"/><path d="M11 18.5h2"/></svg><span>Devices</span></button>
             <button type="button" class="settings-tab" data-settings-page="settings-access"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/></svg><span>Access</span></button>
           </div>
+          <div class="settings-group" data-group="admin" role="group" aria-labelledby="settings-group-admin" hidden><p id="settings-group-admin" class="settings-group-label">Admin</p>
+            <button type="button" class="settings-tab" data-settings-page="settings-admin-users"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8.5" r="3.5"/><path d="M2.5 20c.7-3.4 3.3-5.5 6.5-5.5s5.8 2.1 6.5 5.5"/><path d="M16 5.2a3.5 3.5 0 0 1 0 6.6M18.5 14.8c1.6.8 2.7 2.6 3 5.2"/></svg><span>Users</span><span id="admin-user-count" class="tab-count"></span></button>
+            <button type="button" class="settings-tab" data-settings-page="settings-admin-invites"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5.5" width="18" height="13" rx="2"/><path d="m3.5 7 8.5 6 8.5-6"/></svg><span>Invites</span><span id="admin-invite-count" class="tab-count"></span></button>
+            <button type="button" class="settings-tab" data-settings-page="settings-admin-activity"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 12h4l2.5-6 4 12 2.5-6h4"/></svg><span>Activity</span></button>
+            <button type="button" class="settings-tab" data-settings-page="settings-admin-server"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="13" width="16" height="7" rx="1.5"/><path d="M8 7.5h.01M8 16.5h.01"/></svg><span>Server</span></button>
+          </div>
         </nav>
         <div class="settings-sections">
           <section id="settings-appearance" class="settings-section" aria-labelledby="appearance-title">
@@ -275,6 +280,7 @@
                   <label class="choice-card"><input type="radio" name="units" value="imperial"><span class="choice-body"><strong>Imperial (US)</strong><small>Miles, mph, feet, gallons.</small></span></label>
                 </div>
               </fieldset>
+              <label class="setting-row"><span class="setting-label"><strong>Currency</strong><small>What fuel costs are shown in. Type a currency's name to jump to it.</small></span><select id="currency" class="input" required></select></label>
               <fieldset class="setting-group"><legend class="setting-label"><strong>Theme</strong><small>The moon at the top switches it too.</small></legend>
                 <div class="choice-cards theme-choices">
                   <label class="choice-card"><input type="radio" name="theme" value="system"><span class="choice-body"><strong>System</strong><small>Follows your device.</small></span></label>
@@ -319,7 +325,6 @@
                 </div>
               </fieldset>
               <label id="fuel-area-row" class="setting-row"><span class="setting-label"><strong>Price region</strong><small id="fuel-area-note">Found from your Home place, else your latest location.</small></span><select id="fuel-area" class="input"></select></label>
-              <label class="setting-row"><span class="setting-label"><strong>Currency</strong><small>What fuel costs are shown in. Type a currency's name to jump to it.</small></span><select id="fuel-currency" class="input" required></select></label>
               <p id="fuel-error" class="field-error" role="alert" hidden></p>
               <div class="card-foot"><button class="button primary">Save changes</button></div>
             </form>
@@ -329,7 +334,6 @@
             <div class="section-intro"><h2 id="place-names-title">Place names</h2><p>The service that turns coordinates into names for stays, places, and search.</p></div>
             <form id="places-form" class="card settings-form">
               <fieldset class="setting-group"><legend class="setting-label"><strong>Provider</strong><small id="places-provider-help"></small></legend><div id="places-provider-options" class="choice-cards"></div></fieldset>
-              <p id="mapbox-terms" class="callout warning" hidden>Mapbox allows Search Box results for temporary use only. GeoLogs keeps place names in its lookup cache, saved places, and daily summaries, which goes beyond those terms.</p>
               <p class="help setting-note">Names are looked up again as you browse. Your own names always win.</p>
               <div class="card-foot"><button class="button primary">Save changes</button></div>
             </form>
@@ -406,6 +410,30 @@
               <form id="token-form" class="token-form"><label class="field"><span>Name</span><input id="token-name" class="input" maxlength="60" placeholder="My iPhone" required autocomplete="off"></label><label class="field"><span>Can send as</span><select id="token-source" class="input"></select></label><button class="button primary">Create token</button></form>
             </div>
           </section>
+          <section id="settings-admin-users" class="settings-section" aria-labelledby="admin-users-title" hidden>
+            <div class="section-intro"><h2 id="admin-users-title">Users</h2><p>Accounts on this server. You see how much each person recorded, never where they went.</p></div>
+            <div class="card flush admin-card"><div class="admin-panel">
+          <div id="admin-2fa-hint" class="callout warning" hidden><strong>Turn on two-factor sign-in</strong><span>Your account can change everyone's: give it a second factor on your <button type="button" class="link-button" data-open-account>account page</button>.</span></div>
+          <div id="admin-reveal" class="callout success token-reveal" role="status" hidden></div>
+          <ul id="admin-users" class="list rows admin-users"></ul>
+        </div></div>
+          </section>
+          <section id="settings-admin-invites" class="settings-section" aria-labelledby="admin-invites-title" hidden>
+            <div class="section-intro"><h2 id="admin-invites-title">Invites</h2><p>Ask someone to make an account here.</p></div>
+            <div class="card flush admin-card"><div class="admin-panel">
+          <form id="admin-invite-form" class="admin-invite-form"><label class="field"><span>Email</span><input id="admin-invite-email" class="input" type="email" required autocomplete="off" placeholder="friend@example.com"></label><label class="field"><span>Role</span><select id="admin-invite-role" class="input"><option value="user">User</option><option value="admin">Admin</option></select></label><button class="button primary">Invite</button></form>
+          <div id="admin-invite-reveal" class="callout success token-reveal" role="status" hidden></div>
+          <ul id="admin-invites" class="list rows"></ul>
+        </div></div>
+          </section>
+          <section id="settings-admin-activity" class="settings-section" aria-labelledby="admin-activity-title" hidden>
+            <div class="section-intro"><h2 id="admin-activity-title">Activity</h2><p>What admins and the server did, newest first.</p></div>
+            <div class="card flush admin-card"><div class="admin-panel"><ol id="admin-audit" class="list rows admin-audit"></ol></div></div>
+          </section>
+          <section id="settings-admin-server" class="settings-section" aria-labelledby="admin-server-title" hidden>
+            <div class="section-intro"><h2 id="admin-server-title">Server</h2><p>Sign-up, email, trackers with a wrong token, background work, and storage.</p></div>
+            <div class="card flush admin-card"><div class="admin-panel"><div id="admin-server" class="admin-server"></div></div></div>
+          </section>
         </div>
       </div>
     </section>
@@ -463,28 +491,6 @@
         </section>
       </div>
     </section>
-    <section id="admin-view" class="view" aria-labelledby="admin-title">
-      <div class="page-head"><div class="page-title"><h1 id="admin-title">Admin</h1><p class="page-subtitle">Accounts, invites and the server. You see how much each person recorded, never where they went.</p></div></div>
-      <section class="card flush admin-card" aria-label="Admin">
-        <div class="tabs" role="tablist" aria-label="Admin">
-          <button class="detail-tab active" data-admin-tab="users" role="tab" aria-selected="true">Users <span id="admin-user-count" class="tab-count"></span></button>
-          <button class="detail-tab" data-admin-tab="invites" role="tab" aria-selected="false">Invites <span id="admin-invite-count" class="tab-count"></span></button>
-          <button class="detail-tab" data-admin-tab="activity" role="tab" aria-selected="false">Activity</button>
-          <button class="detail-tab" data-admin-tab="server" role="tab" aria-selected="false">Server</button>
-        </div>
-        <div class="admin-panel active" data-admin-panel="users" role="tabpanel">
-          <div id="admin-2fa-hint" class="callout warning" hidden><strong>Turn on two-factor sign-in</strong><span>Your account can change everyone's: give it a second factor on your <button type="button" class="link-button" data-open-account>account page</button>.</span></div>
-          <div id="admin-reveal" class="callout success token-reveal" role="status" hidden></div>
-          <ul id="admin-users" class="list rows admin-users"></ul>
-        </div>
-        <div class="admin-panel" data-admin-panel="invites" role="tabpanel" hidden>
-          <form id="admin-invite-form" class="admin-invite-form"><label class="field"><span>Email</span><input id="admin-invite-email" class="input" type="email" required autocomplete="off" placeholder="friend@example.com"></label><label class="field"><span>Role</span><select id="admin-invite-role" class="input"><option value="user">User</option><option value="admin">Admin</option></select></label><button class="button primary">Invite</button></form>
-          <div id="admin-invite-reveal" class="callout success token-reveal" role="status" hidden></div>
-          <ul id="admin-invites" class="list rows"></ul>
-        </div>
-        <div class="admin-panel" data-admin-panel="activity" role="tabpanel" hidden><ol id="admin-audit" class="list rows admin-audit"></ol></div>
-        <div class="admin-panel" data-admin-panel="server" role="tabpanel" hidden><div id="admin-server" class="admin-server"></div></div>
-      </section>
     </section>
   </main>
 

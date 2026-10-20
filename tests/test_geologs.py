@@ -841,6 +841,35 @@ class StoreTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "MAPBOX_ACCESS_TOKEN"):
                 reverse_geocode(self.db, 41, -87.9)
 
+    def test_other_configured_providers_answer_when_the_preferred_one_is_down(self):
+        import urllib.error
+        origin = (34.852116, -92.412809)
+        lat, lon = shifted(origin, 40, 0)
+        park = {"type": "Feature", "geometry": {"type": "Point", "coordinates": [lon, lat]},
+                "properties": {"name": "Lake Willastein Park", "feature_type": "poi", "mapbox_id": "id-park",
+                               "full_address": "Lake Willastein Park, Maumelle, Arkansas",
+                               "coordinates": {"latitude": lat, "longitude": lon},
+                               "poi_category_ids": ["park"], "poi_category": ["park"]}}
+        asked = []
+        def respond(url):
+            asked.append(url.split("/")[2])
+            if "geoapify" in url:
+                raise urllib.error.URLError("quota spent")
+            return {"features": [park]}
+        env = {"GEOAPIFY_API_KEY": "key", "MAPBOX_ACCESS_TOKEN": "token", "GEOLOGS_PHOTON_URL": ""}
+        with patch.dict(os.environ, env), patch("geologs.integrations.places.json_get", side_effect=respond):
+            save_settings(self.db, {"places_provider": "geoapify"})
+            self.assertEqual(places_provider(self.db), "geoapify")
+            found = reverse_geocode(self.db, *origin)
+        self.assertEqual((found["name"], found["source"]), ("Lake Willastein Park", "mapbox_searchbox"))
+        self.assertEqual(asked[0], "api.geoapify.com")
+        self.assertIn("api.mapbox.com", asked)
+        # With nothing else configured, the preferred provider's failure is the answer.
+        with patch.dict(os.environ, {**env, "MAPBOX_ACCESS_TOKEN": ""}), \
+                patch("geologs.integrations.places.json_get", side_effect=respond):
+            with self.assertRaises(OSError):
+                reverse_geocode(self.db, *shifted(origin, 0, 3000))
+
     def test_mapbox_names_a_position_after_the_nearest_poi_within_the_radius(self):
         origin = (34.852116, -92.412809)
         def poi(name, east_m, categories, feature_type="poi"):

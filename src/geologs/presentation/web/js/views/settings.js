@@ -33,6 +33,7 @@ import { refreshCurrent, refreshExplore } from "./history.js";
 import { refreshInsights } from "./patterns.js";
 import { showAccount } from "./account.js";
 import { showView } from "./shell.js";
+import { refreshAdmin } from "./admin.js";
 
 export function populateTimezones(selected) {
   const select = $("summary-timezone");
@@ -202,9 +203,12 @@ const SETTINGS_PAGE_KEY = "geologs-settings-page";
 
 // Settings is a set of pages; the one last opened comes back for this browser.
 export function showSettingsPage(id) {
-  const pages = [...document.querySelectorAll(".settings-section")];
+  // A page whose group is hidden (Admin, for everyone but admins) cannot be opened.
+  const pages = [...document.querySelectorAll(".settings-section")].filter(
+    (page) => !document.querySelector(`.settings-tab[data-settings-page="${page.id}"]`)?.closest(".settings-group")?.hidden,
+  );
   if (!pages.some((page) => page.id === id)) id = pages[0].id;
-  for (const page of pages) page.hidden = page.id !== id;
+  for (const page of document.querySelectorAll(".settings-section")) page.hidden = page.id !== id;
   // The page's category: its sidebar group, and on narrow screens the category switch and its row of pages.
   const group = document.querySelector(`.settings-tab[data-settings-page="${id}"]`)?.closest(".settings-group");
   document.querySelectorAll(".settings-group").forEach((item) => item.classList.toggle("active", item === group));
@@ -224,6 +228,7 @@ export function showSettingsPage(id) {
   } catch (_error) {}
   if (id === "settings-car" && state.settings) refreshFuel(true).catch((error) => toast(error.message));
   if (id === "settings-paths") refreshPaths().catch((error) => toast(error.message));
+  if (id.startsWith("settings-admin-")) refreshAdmin().catch((error) => toast(error.message));
   document.querySelector(".settings-tab.active")?.scrollIntoView({ block: "nearest", inline: "nearest" });
 }
 
@@ -245,53 +250,49 @@ function configState(ready, text, title = "") {
 
 const PROVIDER_NOTES = {
   geoapify: "Free plan with 3,000 lookups a day.",
-  mapbox: "Generous free tier. Its terms allow names for temporary use only.",
+  mapbox: "Generous free tier.",
   photon: "Your own OpenStreetMap server: private and unlimited.",
 };
 
+// The provider asked first; the others that are set up answer when it can't (an outage, a spent quota).
 export function renderPlacesProvider() {
   const providers = state.status?.places_providers || [];
-  const chosen = state.settings?.places_provider || "";
-  const active = providers.find((provider) => provider.id === state.status?.geocoder);
-  const options = [
-    {
-      id: "",
-      label: "Automatic",
-      note: active
-        ? `Uses the first one that's set up: ${active.label} right now.`
-        : "Uses the first provider that's set up.",
-      configured: true,
-    },
-    ...providers.map((provider) => ({ ...provider, note: PROVIDER_NOTES[provider.id] || "" })),
-  ];
-  $("places-provider-options").innerHTML = options
-    .map((option) => {
-      const available = option.configured || option.id === chosen;
-      const pill = option.id
-        ? option.configured
-          ? configState(true, "Key added")
-          : configState(false, `Needs ${option.env}`, `Add ${option.env} to .env and restart`)
-        : "";
-      return `<label class="choice-card${available ? "" : " unavailable"}"><input type="radio" name="places-provider" value="${safe(option.id)}"${option.id === chosen ? " checked" : ""}${available ? "" : " disabled"}><span class="choice-body"><strong>${safe(option.label)}</strong><small>${safe(option.note)}</small></span>${pill}</label>`;
+  const configured = providers.filter((provider) => provider.configured);
+  // Before one was ever chosen, the server asks the first one set up: show that one as chosen.
+  const chosen = configured.some((provider) => provider.id === state.settings?.places_provider)
+    ? state.settings.places_provider
+    : state.status?.geocoder || "";
+  // In the server's order (PLACES_PROVIDER_ORDER): a self-hosted Photon first.
+  const fallbacks = ["photon", "geoapify", "mapbox"]
+    .map((id) => configured.find((provider) => provider.id === id && id !== chosen)?.label)
+    .filter(Boolean);
+  $("places-provider-options").innerHTML = providers
+    .map((provider) => {
+      const pill = provider.configured
+        ? configState(true, provider.id === chosen ? "Preferred" : "Fallback")
+        : configState(false, `Needs ${provider.env}`, `Add ${provider.env} to .env and restart`);
+      return `<label class="choice-card${provider.configured ? "" : " unavailable"}"><input type="radio" name="places-provider" value="${safe(provider.id)}"${provider.id === chosen ? " checked" : ""}${provider.configured ? "" : " disabled"}><span class="choice-body"><strong>${safe(provider.label)}</strong><small>${safe(PROVIDER_NOTES[provider.id] || "")}</small></span>${pill}</label>`;
     })
     .join("");
-  $("places-provider-help").textContent = providers.some((provider) => provider.configured)
-    ? "Turns coordinates into place names for stays, places, and search."
-    : "No provider set up. Add an API key to .env and restart; until then places are named by address.";
-  document
-    .querySelectorAll('input[name="places-provider"]')
-    .forEach((input) => (input.onchange = updateProviderNotice));
-  updateProviderNotice();
+  $("places-provider-help").textContent = !configured.length
+    ? "No provider set up. Add an API key to .env and restart; until then places are named by address."
+    : fallbacks.length
+      ? `Choose the one to ask first. If it can't answer, ${fallbacks.join(" and then ")} ${fallbacks.length === 1 ? "is" : "are"} asked instead.`
+      : "Turns coordinates into place names for stays, places, and search. Set up another provider to have a fallback.";
+  document.querySelectorAll('input[name="places-provider"]').forEach((input) => (input.onchange = renderProviderPills));
+}
+
+// The pills follow the choice before it is saved.
+function renderProviderPills() {
+  const chosen = chosenProvider();
+  document.querySelectorAll('input[name="places-provider"]:not(:disabled)').forEach((input) => {
+    const pill = input.closest(".choice-card").querySelector(".config-state");
+    if (pill) pill.lastChild.textContent = input.value === chosen ? "Preferred" : "Fallback";
+  });
 }
 
 function chosenProvider() {
   return document.querySelector('input[name="places-provider"]:checked')?.value ?? "";
-}
-
-export function updateProviderNotice() {
-  // Automatic resolves to whatever the server chose, so check that too.
-  const value = chosenProvider() || state.status?.geocoder;
-  $("mapbox-terms").hidden = value !== "mapbox";
 }
 
 // Where each kind of tracker app sends locations, how it signs in, and how to set it up.
@@ -928,7 +929,25 @@ function applyUnitLabels() {
 }
 
 function renderUnitsChoice() {
+  // Saved as soon as it is chosen, like the units.
+  $("currency").onchange = async () => {
+    try {
+      state.settings = await post("/api/settings", { currency: $("currency").value });
+      await refreshAll();
+      await refreshFuel(true);
+      toast("Money is shown in " + $("currency").selectedOptions[0].textContent);
+    } catch (error) {
+      toast(error.message);
+    }
+  };
   document.querySelectorAll('input[name="units"]').forEach((input) => (input.checked = input.value === (state.settings.units || "metric")));
+  const select = $("currency");
+  if (!select.options.length || select.dataset.saved !== state.settings.currency) {
+    select.innerHTML = currencyOptions(state.settings.currency);
+    select.dataset.saved = state.settings.currency;
+  }
+  select.value = currencyCode(state.settings.currency);
+  if (!select.value) select.value = state.settings.currency;
 }
 
 const GRADE_LABELS = { regular: "regular", midgrade: "midgrade", premium: "premium", diesel: "diesel" };
@@ -942,12 +961,6 @@ function fillFuelForm() {
   const economy = toEconomyUnit(settings.fuel_economy_l100km);
   $("fuel-economy").value = economy ? round1(economy) : "";
   $("fuel-grade").value = settings.fuel_grade;
-  if (!$("fuel-currency").options.length || $("fuel-currency").dataset.saved !== settings.currency) {
-    $("fuel-currency").innerHTML = currencyOptions(settings.currency);
-    $("fuel-currency").dataset.saved = settings.currency;
-  }
-  $("fuel-currency").value = currencyCode(settings.currency);
-  if (!$("fuel-currency").value) $("fuel-currency").value = settings.currency;
   document.querySelectorAll('input[name="fuel-price-source"]').forEach((input) => (input.checked = input.value === settings.fuel_price_source));
 }
 
@@ -1015,12 +1028,10 @@ function readFuelForm() {
     fuel_grade: $("fuel-grade").value,
     fuel_price_source: source,
     fuel_area: $("fuel-area").value,
-    currency: $("fuel-currency").value.trim(),
   };
   let error = "";
   if (economy && !(+economy > 0)) error = "Enter your car's fuel economy as a number.";
   else if (source === "manual" && !(+price > 0)) error = `Enter what you pay per ${volumeUnit() === "gal" ? "gallon" : "litre"}.`;
-  else if (!payload.currency) error = "Choose a currency.";
   if (source === "manual" && +price > 0) payload.price_per_l = Math.round(fromPerVolume(+price) * 10000) / 10000;
   $("fuel-error").textContent = error;
   $("fuel-error").hidden = !error;

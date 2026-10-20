@@ -109,7 +109,7 @@ In the browser:
 2.  Home shows today, with its map, timeline and photo. Open a day from a few weeks ago: its stays and trips are as you remember them.
 3.  Settings → Devices: your phone's latest fix arrives within its usual interval.
 4.  The account button (top right) opens **Account**. Add your email and set a password, so you can sign in without the token; consider turning on **Two-factor sign-in**.
-5.  **Admin** appears in the menu. Users lists one account (you), with your fixes counted within a few minutes.
+5.  **Settings** has an **Admin** group. Its Users page lists one account (you), with your fixes counted within a few minutes.
 
 Also check what talks to GeoLogs from outside: an MCP client answers a question about today, and a reminder still reaches the webhook. Both use `GEOLOGS_TOKEN`, so they act as the owner, as before.
 
@@ -118,8 +118,8 @@ One thing may be slow, once: the first fix that arrives out of order (a phone se
 ## 5. Afterwards
 
 -   Keep the backup until you are happy with the new version, a week or two.
--   Invite people from **Admin → Invites**, or with `docker compose exec app geologs invite friend@example.com`.
--   The browser shows a few other changes from this release: Home no longer has the source selector or GeoJSON export, and a phone sending with a wrong token now appears in **Admin → Server** instead of Settings → Devices.
+-   Invite people from **Settings → Admin → Invites**, or with `docker compose exec app geologs invite friend@example.com`.
+-   The browser shows a few other changes from this release: Home no longer has the source selector or GeoJSON export, and a phone sending with a wrong token now appears in **Settings → Admin → Server** instead of Settings → Devices.
 
 ## Rolling back
 

@@ -35,7 +35,10 @@ function showUser() {
   const label = user ? `${user.name || user.email || "Owner"}${user.role === "admin" ? " (admin)" : ""}` : "Account";
   $("auth-button").title = user ? `Account: ${label}` : "Sign in";
   $("auth-button").setAttribute("aria-label", $("auth-button").title);
-  document.querySelector('.nav[data-view="admin"]').hidden = !(user && user.role === "admin");
+  // Admin is a group of Settings pages, there only for admins.
+  const admin = !!(user && user.role === "admin");
+  document.querySelector('.settings-group[data-group="admin"]').hidden = !admin;
+  document.querySelector('[data-settings-group="admin"]').hidden = !admin;
   $("access-browser").textContent = user
     ? `Signed in as ${user.email || user.name || "the owner"}.`
     : "Not signed in.";

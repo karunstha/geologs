@@ -31,7 +31,7 @@ The sign-in screen takes an email and password, offers **Forgot password?** when
 
 ## Admin portal
 
-Admins get an **Admin** page:
+Admins get an **Admin** group in **Settings**, with four pages:
 
 -   **Users**: everyone's account, role, whether they confirmed their email or use two-factor sign-in, when they last signed in, and how much they recorded (fixes, trackers, the latest fix's time), never where. **Manage** makes someone an admin or a user (there is always at least one admin), makes a password-reset link (emailed when the server can, and shown to pass on), disables an account (signing it out everywhere), or deletes it with everything it recorded, after you type its email. The owner's account cannot be disabled or deleted, and nor can your own.
 -   **Invites**: invite someone as a user or an admin, copy the link, and withdraw invites not yet used.

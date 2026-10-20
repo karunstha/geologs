@@ -246,19 +246,6 @@ export async function refreshAdmin() {
 }
 
 export function initAdmin() {
-  document.querySelectorAll("[data-admin-tab]").forEach((tab) => {
-    tab.onclick = () => {
-      document.querySelectorAll("[data-admin-tab]").forEach((item) => {
-        const active = item === tab;
-        item.classList.toggle("active", active);
-        item.setAttribute("aria-selected", active);
-      });
-      document.querySelectorAll("[data-admin-panel]").forEach((panel) => {
-        panel.hidden = panel.dataset.adminPanel !== tab.dataset.adminTab;
-        panel.classList.toggle("active", !panel.hidden);
-      });
-    };
-  });
   document.querySelectorAll("[data-open-account]").forEach((button) => (button.onclick = () => showAccount()));
   $("admin-invite-form").onsubmit = async (event) => {
     event.preventDefault();

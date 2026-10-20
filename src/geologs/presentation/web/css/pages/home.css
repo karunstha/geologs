@@ -6,8 +6,8 @@
   --home-glass: rgb(38 38 38/0.5);
   --home-glass-line: rgb(255 255 255/0.16);
   /* The cards: light glass with dark text in the light theme, dark glass with white text in the dark. */
-  --home-card: rgb(255 255 255/0.72);
-  --home-card-line: rgb(255 255 255/0.7);
+  --home-card: rgb(255 255 255/0.48);
+  --home-card-line: rgb(255 255 255/0.6);
   --home-on-glass: #141414;
   --home-on-glass-2: rgb(20 24 29/0.62);
   --home-on-glass-3: rgb(20 24 29/0.45);
@@ -29,7 +29,7 @@
   position: relative;
 }
 :root[data-theme="dark"] #home-view {
-  --home-card: rgb(22 26 29/0.6);
+  --home-card: rgb(22 26 29/0.5);
   --home-card-line: rgb(255 255 255/0.1);
   --home-on-glass: #fff;
   --home-on-glass-2: rgb(255 255 255/0.74);

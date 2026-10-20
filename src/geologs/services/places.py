@@ -18,13 +18,34 @@ _provider_turn = threading.Lock()
 
 
 @use_case
-def places_provider(db):
-    """The provider chosen in Settings when it is configured, else the first configured one."""
-    configured = configured_places_providers()
+def places_providers_in_order(db):
+    """The configured providers in the order they are asked: the one preferred in Settings, then the others.
+
+    A later one is asked only when an earlier one cannot be reached or refuses (an outage, a spent quota).
+    """
+    configured = [name for name in PLACES_PROVIDER_ORDER if configured_places_providers()[name]]
     chosen = db.settings.get().get("places_provider")
-    if chosen and configured.get(chosen):
-        return chosen
-    return next((name for name in PLACES_PROVIDER_ORDER if configured[name]), None)
+    return ([chosen] if chosen in configured else []) + [name for name in configured if name != chosen]
+
+
+@use_case
+def places_provider(db):
+    """The provider asked first: the one preferred in Settings when it is configured, else the first configured."""
+    return next(iter(places_providers_in_order(db)), None)
+
+
+def _each_provider(db, ask):
+    """`ask(name)` with each configured provider in turn until one answers; only network failures move on."""
+    names = places_providers_in_order(db)
+    if not names:
+        _require_provider(db)
+    failure = None
+    for name in names:
+        try:
+            return ask(name)
+        except OSError as error:
+            failure = error
+    raise failure
 
 
 @use_case
@@ -45,7 +66,8 @@ def _require_provider(db):
 @use_case
 def place_details(db, provider_place_id, session=None):
     """Coordinates for a search result that arrived without them (Mapbox suggestions)."""
-    if _require_provider(db) != "mapbox":
+    # Mapbox may have answered the search as a fallback, so it need only be configured, not preferred.
+    if "mapbox" not in places_providers_in_order(db):
         raise ValueError("place details are only needed for Mapbox search results")
     provider_place_id = str(provider_place_id or "").strip()
     if not provider_place_id or len(provider_place_id) > 300:
@@ -81,14 +103,17 @@ def geocode(db, query, lat=None, lon=None, resolve=5):
     else:
         position = latest(db)
         bias = (float(position["lat"]), float(position["lon"])) if position else None
-    name = _require_provider(db)
     # Cache by nearby search area; a result from another city must not win later.
     key = "search-v2:" + query.casefold() + (f":{bias[0]:.2f}:{bias[1]:.2f}" if bias else ":unbiased")
-    provider = providers.search_cache_name(name)
-    results = db.caches.lookup(key, provider)
-    if results is None:
-        results = providers.search(name, query, bias)
-        db.caches.save_lookup(key, provider, results)
+
+    def ask(name):
+        provider = providers.search_cache_name(name)
+        found = db.caches.lookup(key, provider)
+        if found is None:
+            found = providers.search(name, query, bias)
+            db.caches.save_lookup(key, provider, found)
+        return found
+    results = _each_provider(db, ask)
     unique, seen = [], set()
     for place in results:
         identity = place.get("provider_place_id") or (place["name"], round(place["lat"] or 0, 4), round(place["lon"] or 0, 4))
@@ -126,14 +151,16 @@ def nearby_places(db, lat, lon, radius_m=None, limit=15):
     if not (-90 <= lat <= 90 and -180 <= lon <= 180):
         raise ValueError("invalid coordinates")
     radius = nearest_place_radius(radius_m)
-    name = _require_provider(db)
-    provider = providers.nearby_cache_key(name)
-    key = provider + f":candidates:r{radius}"
-    candidates = db.caches.reverse_region(key, lat, lon)
-    if candidates is None:
-        with _provider_turn:
-            candidates = providers.nearby(name, lat, lon, radius)
-        db.caches.save_reverse_region(key, lat, lon, 15, candidates)
+
+    def ask(name):
+        key = providers.nearby_cache_key(name) + f":candidates:r{radius}"
+        found = db.caches.reverse_region(key, lat, lon)
+        if found is None:
+            with _provider_turn:
+                found = providers.nearby(name, lat, lon, radius)
+            db.caches.save_reverse_region(key, lat, lon, 15, found)
+        return found
+    candidates = _each_provider(db, ask)
     places = []
     for place in candidates:
         if place.get("place_lat") is not None and place.get("place_lon") is not None:
@@ -158,16 +185,18 @@ def reverse_geocode(db, lat, lon, radius_m=None):
     if not (-90 <= lat <= 90 and -180 <= lon <= 180):
         raise ValueError("invalid coordinates")
     radius = nearest_place_radius(radius_m)
-    name = _require_provider(db)
-    provider = providers.lookup_cache_key(name) + f":r{radius}"
-    cached = db.caches.reverse_region(provider, lat, lon)
-    if cached is not None:
-        approximate = metres(lat, lon, cached["lat"], cached["lon"]) > 0.5
-        return {**cached, "lat": lat, "lon": lon, "cache": "region", "approximate": approximate}
-    with _provider_turn:
-        result, kind = providers.lookup(name, lat, lon, radius)
-    db.caches.save_reverse_region(provider, lat, lon, reverse_cache_radius(kind), result)
-    return {**result, "cache": "provider", "approximate": False}
+
+    def ask(name):
+        provider = providers.lookup_cache_key(name) + f":r{radius}"
+        cached = db.caches.reverse_region(provider, lat, lon)
+        if cached is not None:
+            approximate = metres(lat, lon, cached["lat"], cached["lon"]) > 0.5
+            return {**cached, "lat": lat, "lon": lon, "cache": "region", "approximate": approximate}
+        with _provider_turn:
+            result, kind = providers.lookup(name, lat, lon, radius)
+        db.caches.save_reverse_region(provider, lat, lon, reverse_cache_radius(kind), result)
+        return {**result, "cache": "provider", "approximate": False}
+    return _each_provider(db, ask)
 
 
 @use_case

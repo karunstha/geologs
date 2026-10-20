@@ -5,15 +5,20 @@ import { map } from "../map/map.js";
 import { showPlacesMap } from "../map/places-map.js";
 import { renderExplore } from "./history.js";
 import { homeShown, newHomeEnabled } from "./home.js";
-import { refreshSources } from "./settings.js";
 import { refreshAdmin } from "./admin.js";
+import { refreshSources } from "./settings.js";
 import { refreshSummaries } from "./summaries.js";
 
 export function showView(view) {
   // The new Home stands in for the classic one wherever the app opens Home (see js/views/home.js).
   if (view === "explore" && newHomeEnabled()) view = "home";
   document.querySelectorAll(".view").forEach((el) => el.classList.toggle("active", el.id === view + "-view"));
-  if (view === "settings") refreshSources().catch(() => {});
+  if (view === "settings") {
+    refreshSources().catch(() => {});
+    // An Admin page left open shows what changed since.
+    if (document.querySelector(".settings-tab.active")?.dataset.settingsPage.startsWith("settings-admin-"))
+      refreshAdmin().catch((error) => toast(error.message));
+  }
   document.querySelectorAll(".nav").forEach((el) => {
     const active = el.dataset.view === view;
     el.classList.toggle("active", active);
@@ -24,7 +29,6 @@ export function showView(view) {
   if (view === "home") homeShown();
   if (view === "places") showPlacesMap();
   if (view === "summaries") refreshSummaries().catch((error) => toast(error.message));
-  if (view === "admin") refreshAdmin().catch((error) => toast(error.message));
 }
 
 // The top bar is clear at the top of the page and frosted once the page scrolls under it.
