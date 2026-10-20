@@ -383,8 +383,26 @@ export function homeShown() {
   }, 30);
 }
 
+// Settings → Units & theme → Home screen. The new Home moves the classic one's pieces at start, so
+// switching reloads the page rather than moving them back.
+function initHomeChoice(enabled) {
+  document.querySelectorAll('input[name="home-style"]').forEach((input) => {
+    input.checked = input.value === (enabled ? "new" : "classic");
+    input.onchange = () => {
+      try {
+        if (input.value === "classic") localStorage.setItem("geologs-home", "classic");
+        else localStorage.removeItem("geologs-home");
+      } catch (_error) {
+        return;
+      }
+      location.reload();
+    };
+  });
+}
+
 export function initHome() {
   const enabled = newHomeEnabled();
+  initHomeChoice(enabled);
   document.querySelector('.nav[data-view="home"]').hidden = !enabled;
   document.querySelector('.nav[data-view="explore"]').hidden = enabled;
   if (!enabled) return;
