@@ -8,15 +8,20 @@
   --home-on-glass: #fff;
   --home-on-glass-2: rgb(255 255 255/0.74);
   --home-chip: rgb(255 255 255/0.13);
-  --home-ink: #141414;
-  --home-halo: #e8e8e6;
+  /* The day buttons and the timeline's glass, in the page's theme. */
+  --home-control: rgb(255 255 255/0.86);
+  --home-control-text: #141414;
+  --home-pane: rgb(255 255 255/0.84);
+  --home-pane-line: rgb(0 0 0/0.06);
   position: relative;
 }
 :root[data-theme="dark"] #home-view {
   --home-glass: rgb(22 26 29/0.6);
   --home-glass-line: rgb(255 255 255/0.1);
-  --home-ink: #000;
-  --home-halo: var(--bg);
+  --home-control: rgb(22 26 29/0.72);
+  --home-control-text: #fff;
+  --home-pane: rgb(22 26 29/0.78);
+  --home-pane-line: rgb(255 255 255/0.1);
 }
 /* A grey page, as the map's land is grey, and the photo across its top. */
 :root:not([data-theme="dark"]) body:has(#home-view.active) {
@@ -116,8 +121,10 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
 #home-view .day-navigation .icon-button.bordered {
   border-color: transparent;
   border-radius: 50%;
-  background: var(--home-ink);
-  color: #fff;
+  background: var(--home-control);
+  color: var(--home-control-text);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
 }
 #home-view .day-navigation .icon-button.bordered:disabled {
   opacity: 0.45;
@@ -126,15 +133,22 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
   height: 36px;
   border-color: transparent;
   border-radius: 999px;
-  background: var(--home-ink);
-  color: #fff;
+  background: var(--home-control);
+  color: var(--home-control-text);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+:root[data-theme="dark"] #home-view #day-date {
   color-scheme: dark;
 }
+:root:not([data-theme="dark"]) #home-view #day-date {
+  color-scheme: light;
+}
 #home-view #today {
-  border-color: rgb(255 255 255/0.32);
+  border-color: transparent;
   border-radius: 999px;
-  background: rgb(255 255 255/0.16);
-  color: #fff;
+  background: var(--home-control);
+  color: var(--home-control-text);
   backdrop-filter: blur(14px);
   -webkit-backdrop-filter: blur(14px);
 }
@@ -337,6 +351,8 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-width: none;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
   -webkit-mask-image: linear-gradient(transparent, #000 24px, #000 calc(100% - 52px), transparent);
   mask-image: linear-gradient(transparent, #000 24px, #000 calc(100% - 52px), transparent);
 }
@@ -355,10 +371,6 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
   color: var(--text);
   font: inherit;
   text-align: left;
-  text-shadow:
-    0 0 2px var(--home-halo),
-    0 0 6px var(--home-halo),
-    0 0 12px var(--home-halo);
   cursor: pointer;
 }
 .home-brief button:hover {
@@ -395,10 +407,28 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
 .home-brief-trip > span {
   align-items: center !important;
 }
+.home-brief .place-icon,
 .home-brief-trip .mode-icon {
-  flex-basis: 20px;
+  flex: none;
+  align-self: center;
+}
+.home-brief .place-icon {
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+}
+.home-brief .place-icon svg {
+  width: 15px;
+  height: 15px;
+}
+.home-brief-trip .mode-icon {
   width: 20px;
   height: 20px;
+  margin: 0 3px;
+}
+.home-brief-trip .mode-icon svg {
+  width: 12px;
+  height: 12px;
 }
 
 /* The full timeline, on glass beside the map while exploring, inside its frame and clear of its bars. */
@@ -423,10 +453,10 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
   display: none;
 }
 #home-view #home-timeline :is(.tl-stay, .tl-trip):hover {
-  background: rgb(255 255 255/0.07);
+  background: color-mix(in srgb, var(--text) 5%, transparent);
 }
 #home-view #home-timeline :is(.tl-stay, .tl-trip).selected {
-  background: rgb(255 255 255/0.14);
+  background: color-mix(in srgb, var(--text) 9%, transparent);
   box-shadow: none;
 }
 #home-view #home-timeline .tl-trip.selected .tl-body strong {
@@ -434,8 +464,8 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
 }
 #home-view #home-timeline #inspector {
   height: 100%;
-  border-color: var(--home-glass-line);
-  background: var(--home-glass);
+  border-color: var(--home-pane-line);
+  background: var(--home-pane);
   backdrop-filter: blur(22px) saturate(1.2);
   -webkit-backdrop-filter: blur(22px) saturate(1.2);
   box-shadow: 0 10px 30px rgb(0 0 0/0.08);
@@ -592,7 +622,7 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
   display: block;
   border-top: 2px solid #27a99a;
   border-radius: 10px 10px 4px 4px;
-  background: linear-gradient(180deg, rgb(255 255 255/0.55), rgb(255 255 255/0.12));
+  background: linear-gradient(180deg, color-mix(in srgb, var(--text) 30%, transparent), color-mix(in srgb, var(--text) 6%, transparent));
 }
 .home-bar.top i {
   background: linear-gradient(180deg, rgb(39 169 154/0.4), #27a99a);
@@ -606,8 +636,7 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
   white-space: nowrap;
 }
 
-/* Below the hero: dark cards. In the light theme they take the dark theme's colours, so the classic
-   timeline and details inside them draw themselves dark too. */
+/* Below the hero: cards in the page's theme. */
 .home-lower {
   display: grid;
   grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
@@ -625,36 +654,6 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
 #home-view #history-details,
 #home-view .home-dark {
   border-radius: var(--home-radius);
-}
-:root:not([data-theme="dark"]) #home-view #inspector,
-:root:not([data-theme="dark"]) #home-view #history-details,
-:root:not([data-theme="dark"]) #home-view .home-dark {
-  --surface: #1b1b1b;
-  --surface-2: #222324;
-  --surface-3: #2a2b2c;
-  --border: #303132;
-  --border-strong: #3d3e40;
-  --text: #ececec;
-  --text-2: #a9adb1;
-  --text-3: #7e8388;
-  --accent: #27a99a;
-  --accent-hover: #36bcac;
-  --accent-soft: #11302c;
-  --accent-text: #5ed1c2;
-  --on-accent: #04201c;
-  --success: #4ccf7f;
-  --success-soft: #12301e;
-  --warning: #eda94b;
-  --warning-soft: #33260f;
-  --danger: #f17b70;
-  --danger-soft: #3a1916;
-  --neutral: #8f99a3;
-  --neutral-soft: #242b30;
-  --shadow-sm: none;
-  border-color: #1b1b1b;
-  background: var(--surface);
-  color: var(--text);
-  color-scheme: dark;
 }
 #home-view .timeline-section {
   padding: 18px 14px 10px;

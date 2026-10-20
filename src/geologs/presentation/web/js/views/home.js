@@ -17,7 +17,7 @@ import {
 } from "../core/format.js";
 import { state } from "../core/state.js";
 import { dayBounds, drawSelection, map, selectItem, setCoveredRight, tripKey } from "../map/map.js";
-import { modeIcon, modeInfo, visitNumbers } from "../ui/icons.js";
+import { modeIcon, modeInfo, placeIcon, visitNumbers } from "../ui/icons.js";
 import { moveDay } from "./history.js";
 import { showView } from "./shell.js";
 
@@ -257,7 +257,7 @@ function renderBrief(day, stays) {
   $("home-brief").innerHTML = items
     .map(({ at, item, trip }) => {
       if (item)
-        return `<li><button type="button" class="home-brief-stay" data-item="stay:${item.stay.id}"><time>${safe(clock(at))}</time><span><strong>${safe(item.name)}</strong><small>${safe(durationText(item.stay.observed_minutes))}</small></span></button></li>`;
+        return `<li><button type="button" class="home-brief-stay" data-item="stay:${item.stay.id}"><time>${safe(clock(at))}</time><span>${placeIcon(item.home ? { name: "Home" } : { ...item.stay, name: item.stay.display_name })}<strong>${safe(item.name)}</strong><small>${safe(durationText(item.stay.observed_minutes))}</small></span></button></li>`;
       const info = modeInfo[trip.mode] || { label: "Moved", color: "#6f7b76" };
       return `<li><button type="button" class="home-brief-trip" data-item="trip:${safe(tripKey(trip))}" style="--mode:${info.color}"><time>${safe(clock(at))}</time><span>${modeIcon(trip.mode)}<small>${safe(`${info.label} · ${distanceText(trip.distance_km)}`)}</small></span></button></li>`;
     })
