@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+from .postgres import USER_TABLES
 from .repository import Repository
 
 
@@ -36,12 +37,12 @@ class AdminRepository(Repository):
     # Each user's counts, written by the background worker while it works as that user.
 
     def save_stats(self, user_id, stats, now):
-        self.execute("""INSERT INTO user_stats(user_id,fixes,sources,first_fix,last_fix,stays,places,updated_at)
-            VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET fixes=excluded.fixes,
+        self.execute("""INSERT INTO user_stats(user_id,fixes,sources,first_fix,last_fix,stays,places,bytes,updated_at)
+            VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET fixes=excluded.fixes,
             sources=excluded.sources,first_fix=excluded.first_fix,last_fix=excluded.last_fix,stays=excluded.stays,
-            places=excluded.places,updated_at=excluded.updated_at""",
+            places=excluded.places,bytes=excluded.bytes,updated_at=excluded.updated_at""",
                      (int(user_id), stats["fixes"], stats["sources"], stats["first_fix"], stats["last_fix"],
-                      stats["stays"], stats["places"], now))
+                      stats["stays"], stats["places"], stats.get("bytes"), now))
 
     def stats(self, user_id):
         return self.one("SELECT fixes,last_fix,updated_at FROM user_stats WHERE user_id=?", (int(user_id),))
@@ -50,11 +51,27 @@ class AdminRepository(Repository):
         """Every account, its sessions and tokens counted, and the counts the worker last wrote."""
         return self.rows("""SELECT u.id,u.email,u.name,u.role,u.created_at,u.email_verified_at,u.last_login_at,
                 u.disabled_at,u.password_hash IS NOT NULL AS has_password,u.totp_enabled_at IS NOT NULL AS two_factor,
-                s.fixes,s.sources,s.first_fix,s.last_fix,s.stays,s.places,s.updated_at AS counted_at,
+                s.fixes,s.sources,s.first_fix,s.last_fix,s.stays,s.places,s.bytes,s.updated_at AS counted_at,
                 (SELECT COUNT(*) FROM sessions x WHERE x.user_id=u.id AND x.expires_at>?) AS sessions,
                 (SELECT COUNT(*) FROM ingest_tokens t WHERE t.user_id=u.id) AS device_tokens,
                 (SELECT COUNT(*) FROM api_tokens a WHERE a.user_id=u.id) AS api_tokens
             FROM users u LEFT JOIN user_stats s ON s.user_id=u.id ORDER BY u.id""", (now,))
+
+    def archive_bytes(self):
+        """About how much of the database the current user's rows take: each user table's size on
+        disk (indexes too), shared out by the user's part of its rows. Rows are counted as the
+        user (row-level security); the table's total is the planner's estimate, so a table not
+        analysed since a large change is only roughly shared out."""
+        total = 0
+        for table in self.rows("""SELECT c.relname AS name,pg_total_relation_size(c.oid) AS size,c.reltuples AS rows
+                FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+                WHERE n.nspname='public' AND c.relkind='r' AND c.relname=ANY(?)""", (list(USER_TABLES),)):
+            if not table["size"]:
+                continue
+            mine = self.execute(f"SELECT COUNT(*) AS n FROM {table['name']}").fetchone()["n"]
+            if mine:
+                total += table["size"] * mine / max(table["rows"], mine)
+        return int(total)
 
     # Tracker requests whose token matched no one: shown to admins, never in a user's device list.
 

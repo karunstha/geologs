@@ -27,7 +27,8 @@ from ..services.accounts import (SESSION_DAYS, CodeNeeded, TooManyAttempts, acce
                                  end_session, end_sessions, forget_expired_sessions, invite_details, owner, public_user,
                                  rename, request_password_reset, reset_password, revoke_api_token, send_verification,
                                  session_user, sign_in, sign_up, start_session, stop_two_factor, verify_email)
-from ..services.admin import (audit as admin_audit, clear_failures as admin_clear_failures, delete_user as admin_delete_user,
+from ..services.admin import (audit as admin_audit, clear_failures as admin_clear_failures, delete_locations as admin_delete_locations,
+                             delete_user as admin_delete_user,
                              health as admin_health, invite as admin_invite, note_failed_attempt, refresh_user_stats,
                              require_admin, reset_link as admin_reset_link, revoke_invite as admin_revoke_invite,
                              set_disabled as admin_set_disabled, set_role as admin_set_role,
@@ -750,6 +751,8 @@ class Handler(BaseHTTPRequestHandler):
                     result = admin_set_disabled(db, actor, payload["id"], payload.get("disabled") is not False, client)
                 elif path == "/api/admin/users/reset": result = admin_reset_link(db, actor, payload["id"], client)
                 elif path == "/api/admin/users/delete": result = admin_delete_user(db, actor, payload["id"], payload.get("email"), client)
+                elif path == "/api/admin/users/delete-locations":
+                    result = admin_delete_locations(db, actor, payload["id"], payload.get("email"), client)
                 elif path == "/api/admin/invites/revoke": result = admin_revoke_invite(db, actor, payload.get("email"), client)
                 elif path == "/api/admin/signup": result = admin_set_signup(db, actor, payload.get("mode"), client)
                 elif path == "/api/admin/failures/clear": result = admin_clear_failures(db, actor, client)

@@ -9,7 +9,7 @@ Everything is in your PostgreSQL database and your `.env` file. Nothing is sent 
 ## Who can see what
 
 -   **Each user** sees only their own archive. This is enforced by the database itself (row-level security), and the test suite checks it on every route and every MCP tool.
--   **Admins** manage accounts and see how much each person recorded (counts and the time of the latest fix), never where. An admin can delete an account, which erases its data, but cannot read it.
+-   **Admins** manage accounts and see how much each person recorded (counts and the time of the latest fix), never where. An admin can delete an account, or only its location data, but cannot read it.
 -   **Whoever runs the server** can read the database, its backups and `.env`, and so everyone's data. If you run GeoLogs for other people, tell them so, and protect backups as you would the database. An account's data is erased by deleting the account.
 
 ## What leaves your server

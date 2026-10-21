@@ -4033,6 +4033,39 @@ class AdminTests(LiveServerCase):
         self.assertEqual(left, 0)
         self.assertEqual(self.send("GET", "/api/me", headers=self.bob_auth)[0], 401)
 
+    def test_admins_see_about_how_much_of_the_database_each_user_takes(self):
+        self.count()
+        users = {row["email"]: row for row in self.send("GET", "/api/admin/users", headers=self.admin)[1]}
+        self.assertGreater(users["bob@example.com"]["bytes"], 0)
+        with psycopg.connect(self.db) as raw:
+            total = raw.execute("SELECT pg_database_size(current_database())").fetchone()[0]
+        self.assertLess(sum(row["bytes"] or 0 for row in users.values()), total)
+
+    def test_deleting_a_users_location_data_keeps_the_account(self):
+        place = self.send("POST", "/api/places", {"name": "Work", "lat": 41.4321, "lon": -87.6543}, self.bob_auth)[1]
+        self.assertEqual(self.send("POST", "/api/admin/users/delete-locations",
+                                   {"id": self.bob["id"], "email": "someone@else"}, self.admin)[0], 400)
+        status, done, _ = self.send("POST", "/api/admin/users/delete-locations",
+                                    {"id": self.bob["id"], "email": "bob@example.com"}, self.admin)
+        self.assertEqual((status, done["fixes"]), (200, 20))
+        with psycopg.connect(self.db) as raw:
+            left = raw.execute("""SELECT (SELECT COUNT(*) FROM point_observations WHERE user_id=%s)
+                + (SELECT COUNT(*) FROM points WHERE user_id=%s) + (SELECT COUNT(*) FROM observed_stays_v2 WHERE user_id=%s)""",
+                               (self.bob["id"],) * 3).fetchone()[0]
+            owner = raw.execute("SELECT COUNT(*) FROM users WHERE id=1").fetchone()[0]
+        self.assertEqual((left, owner), (0, 1))
+        # Bob can still sign in, keeps his place, and his counts say so at once.
+        self.assertEqual(self.send("GET", "/api/me", headers=self.bob_auth)[0], 200)
+        self.assertEqual([p["id"] for p in self.send("GET", "/api/places", headers=self.bob_auth)[1]], [place["id"]])
+        users = {row["email"]: row for row in self.send("GET", "/api/admin/users", headers=self.admin)[1]}
+        self.assertEqual(users["bob@example.com"]["fixes"], 0)
+        entry = self.send("GET", "/api/admin/audit", headers=self.admin)[1][0]
+        self.assertEqual((entry["action"], entry["target_email"], entry["details"]), ("delete locations", "bob@example.com", {"fixes": 20}))
+        # The admin's own requests still work as the admin.
+        self.assertEqual(self.send("GET", "/api/admin/users", headers=self.admin)[0], 200)
+        self.assertEqual(self.send("POST", "/api/admin/users/delete-locations",
+                                   {"id": self.bob["id"], "email": "bob@example.com"}, self.bob_auth)[0], 403)
+
     def test_open_sign_up_is_off_until_an_admin_turns_it_on(self):
         new = {"email": "erin@example.com", "password": "erin's password", "name": "Erin"}
         self.assertEqual(self.send("POST", "/api/signup", new)[0], 403)

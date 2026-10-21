@@ -13,6 +13,7 @@ const ACTIONS = {
   enable: "enabled",
   "reset link": "made a password-reset link for",
   delete: "deleted",
+  "delete locations": "deleted the location data of",
   invite: "invited",
   "revoke invite": "withdrew the invite for",
   "sign-up": "set sign-up",
@@ -80,6 +81,7 @@ function renderUsers(users) {
       const details = [
         user.email || "no email",
         recorded,
+        user.bytes != null ? `about ${bytes(user.bytes)} of the database` : "",
         user.last_login_at ? `signed in ${ago(user.last_login_at)}` : "never signed in with a password",
         `joined ${shortDate(user.created_at)}`,
       ];
@@ -92,10 +94,11 @@ function renderUsers(users) {
         user.id !== me && !owner
           ? `<button type="button" data-admin-disable="${user.id}:${user.disabled_at ? "enable" : "disable"}">${user.disabled_at ? "Enable" : "Disable"}</button>`
           : "",
+        user.fixes ? `<button type="button" class="danger-text" data-admin-erase="${user.id}">Delete location data…</button>` : "",
         user.id !== me && !owner ? `<button type="button" class="danger-text" data-admin-delete="${user.id}">Delete…</button>` : "",
       ].filter(Boolean);
       const initial = safe((user.name || user.email || "?").trim()[0].toUpperCase());
-      return `<li class="list-item admin-user"><div class="place-main"><span class="admin-avatar" aria-hidden="true">${initial}</span><div><strong>${safe(user.name || user.email || `User ${user.id}`)} ${badges}</strong><small>${safe(details.join(" · "))}</small></div></div>${
+      return `<li class="list-item admin-user"><div class="place-main"><span class="admin-avatar" aria-hidden="true">${initial}</span><div><strong>${safe(user.name || user.email || `User ${user.id}`)} ${badges}</strong><small>${safe(details.filter(Boolean).join(" · "))}</small></div></div>${
         actions.length
           ? `<details class="row-menu"><summary class="button secondary small">Manage</summary><div class="row-menu-list">${actions.join("")}</div></details>`
           : ""
@@ -119,6 +122,16 @@ function renderUsers(users) {
     linkReveal("admin-reveal", `Password reset link for ${find(id).email}`,
       made.emailed ? "Emailed to them, and here to pass on. It works once, for an hour." : "Pass it on: this server can't email. It works once, for an hour.",
       made.link);
+  }));
+  onEach($("admin-users"), "admin-erase", (id) => act(async () => {
+    const user = find(id);
+    const typed = prompt(
+      `Delete every location ${user.email || "this account"} recorded (${user.fixes.toLocaleString()} fixes), with the stays, trips, routes, corrections and daily summaries made of them? ` +
+        `The account stays, with its settings, saved places, reminders and devices. This cannot be undone.\n\n${user.email ? "Type the email" : `Type ${user.id}`} to confirm.`,
+    );
+    if (typed == null) return;
+    const done = await post("/api/admin/users/delete-locations", { id: +id, email: typed });
+    toast(`Deleted ${done.fixes.toLocaleString()} fixes`);
   }));
   onEach($("admin-users"), "admin-delete", (id) => act(async () => {
     const user = find(id);

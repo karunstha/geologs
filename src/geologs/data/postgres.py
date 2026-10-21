@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS user_stats (
     fixes BIGINT NOT NULL, sources INTEGER NOT NULL, first_fix TEXT, last_fix TEXT,
     stays BIGINT NOT NULL, places INTEGER NOT NULL, updated_at TEXT NOT NULL
 );
+ALTER TABLE user_stats ADD COLUMN IF NOT EXISTS bytes BIGINT;
 CREATE TABLE IF NOT EXISTS ingest_failures (
     kind TEXT NOT NULL, device TEXT NOT NULL DEFAULT '', status INTEGER NOT NULL, message TEXT,
     first_at TEXT NOT NULL, last_at TEXT NOT NULL, attempts BIGINT NOT NULL DEFAULT 1, client TEXT,

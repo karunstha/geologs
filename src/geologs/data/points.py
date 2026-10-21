@@ -221,6 +221,22 @@ class PointsRepository(Repository):
             WHERE p.source=ANY(?) AND o.source<>ALL(?) GROUP BY o.source ORDER BY o.source""",
             (list(sources), list(sources)))}
 
+    # Everything made of the fixes, which goes with them, in an order no row outlives what it points at.
+    LOCATION_TABLES = ("timeline_fixes", "observed_stays_v2", "observed_stays", "stay_checkpoints", "stay_observation_state",
+                       "stay_processing_state", "events", "source_state", "point_observations", "points", "known_paths",
+                       "trip_tracks", "place_routes", "path_exclusions", "mode_overrides", "stay_edits",
+                       "daily_summaries", "analysis_cache")
+
+    def erase_all(self):
+        """Delete every location the current user recorded and all that was made of them (stays,
+        the timeline, trips, routes, corrections, daily summaries); returns how many fixes went."""
+        if self.db.user_id is None:
+            raise RuntimeError("erasing needs a user")
+        fixes = self.execute("SELECT COUNT(*) AS n FROM point_observations WHERE user_id=?", (self.db.user_id,)).fetchone()["n"]
+        for table in self.LOCATION_TABLES:
+            self.execute(f"DELETE FROM {table} WHERE user_id=?", (self.db.user_id,))
+        return fixes
+
     def first_new(self, source, after_id):
         """The earliest timestamp among a source's samples newer than after_id."""
         # MIN over the id range reads only the new samples (point_observations_source_id).

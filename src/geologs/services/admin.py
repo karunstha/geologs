@@ -83,6 +83,11 @@ def reset_link(db, actor, user_id, client=None):
     return made
 
 
+def _confirmed(target, confirm_email):
+    if (target["email"] or str(target["id"])).lower() != str(confirm_email or "").strip().lower():
+        raise ValueError("type the account's email to confirm")
+
+
 @use_case
 def delete_user(db, actor, user_id, confirm_email, client=None):
     """Erase an account and everything recorded for it. The admin types its email to confirm."""
@@ -91,11 +96,43 @@ def delete_user(db, actor, user_id, confirm_email, client=None):
         raise ValueError("you cannot delete your own account here")
     if target["id"] == OWNER_ID:
         raise ValueError("the owner's account cannot be deleted")
-    if (target["email"] or str(target["id"])).lower() != str(confirm_email or "").strip().lower():
-        raise ValueError("type the account's email to confirm")
+    _confirmed(target, confirm_email)
     db.users.delete(target["id"])
     db.admin.log(_now(), actor, "delete", target, None, client)
     return {"deleted": target["id"]}
+
+
+@use_case
+def _location_target(db, user_id, confirm_email):
+    target = _target(db, user_id)
+    _confirmed(target, confirm_email)
+    return target
+
+
+@use_case
+def _erase_locations(db):
+    return db.points.erase_all()
+
+
+@use_case
+def _log(db, actor, action, target, details, client):
+    db.admin.log(_now(), actor, action, target, details, client)
+
+
+def delete_locations(db, actor, user_id, confirm_email, client=None):
+    """Erase every location a user recorded and all that was made of them (stays, trips, routes,
+    corrections, daily summaries), keeping the account with its settings, saved places, reminders
+    and devices. The admin types its email to confirm. The erase runs as that user, the only way
+    to reach their rows, and is counted again at once; the admin's `db` works as the admin after."""
+    target = _location_target(db, user_id, confirm_email)
+    db.as_user(target["id"])
+    try:
+        fixes = _erase_locations(db)
+        refresh_user_stats(db, force=True)
+    finally:
+        db.as_user(actor["id"])
+    _log(db, actor, "delete locations", target, {"fixes": fixes}, client)
+    return {"user": target["id"], "fixes": fixes}
 
 
 @use_case
@@ -166,7 +203,7 @@ def refresh_user_stats(db, force=False):
             return None
     first, last = db.points.span()
     stats = {"fixes": db.points.count(), "sources": len(db.points.sources()), "first_fix": first, "last_fix": last,
-             "stays": db.stays.count(), "places": len(db.places.saved())}
+             "stays": db.stays.count(), "places": len(db.places.saved()), "bytes": db.admin.archive_bytes()}
     db.admin.save_stats(db.user_id, stats, _now())
     return stats
 
