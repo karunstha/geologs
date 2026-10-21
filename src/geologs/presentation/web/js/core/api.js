@@ -43,7 +43,9 @@ export async function api(path, options = {}) {
     if (response.status === 503) setConnection("error", "Database unavailable", value.error);
     throw Error(value.error || `HTTP ${response.status}`);
   }
-  setConnection("ok", "Connected");
+  // sw.js answered from what this browser kept, because the server cannot be reached.
+  if (response.headers.get("X-GeoLogs-Offline")) setConnection("warning", "Offline", "Showing what this browser kept from your last visit.");
+  else setConnection("ok", "Connected");
   return value;
 }
 

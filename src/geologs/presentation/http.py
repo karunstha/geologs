@@ -4,7 +4,9 @@ import binascii
 import hashlib
 import hmac
 import json
+import os
 import secrets
+import tempfile
 import threading
 import time
 from datetime import datetime, timezone
@@ -44,10 +46,12 @@ from ..services.place_routes import route_map
 from ..services.patterns import insights, place_overview, place_patterns, predict_next, resolve_place_patterns, search_visits, transitions, visited_places
 from ..services.places import geocode, nearby_places, place_details, places_provider, reverse_geocode
 from ..services.reminders import cancel_reminder, create_reminder, delete_reminder
-from ..services.samples import delete_samples, delete_source, export_geojson, near, stats
+from ..services.imports import import_file
+from ..services.samples import delete_samples, delete_source, export_csv, export_geojson, export_gpx, near, stats
 from ..services.saved_places import delete_label, delete_place, enrich_saved_places, place_visits, save_place, save_place_label
 from ..services.settings import place_providers, save_settings
 from ..services.stays import anchored_trips, stays
+from ..services.tracker_alerts import check_quiet_trackers, quiet_alerts, set_quiet_alert, tracker_notices
 from .errors import INPUT_ERRORS, input_message, internal_failure
 from .ingest_formats import claimed_source, FORMATS as INGEST_FORMATS
 from .mcp import dispatch, SUPPORTED_VERSIONS
@@ -57,7 +61,10 @@ PUBLIC_POSTS = ("/api/password/forgot", "/api/password/reset", "/api/invites/acc
                 "/api/signup")
 
 WEB_TYPES = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8",
-             ".yaml": "text/yaml; charset=utf-8"}
+             ".yaml": "text/yaml; charset=utf-8", ".webmanifest": "application/manifest+json", ".png": "image/png"}
+# What installs the app on a phone: its manifest and icons, and the service worker that opens it offline
+# (served from the root, so it may look after every page).
+APP_FILES = ("/manifest.webmanifest", "/sw.js")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -85,6 +92,17 @@ class Handler(BaseHTTPRequestHandler):
 
     def error_json(self, status, message):
         self.send_json(status, {"error": message})
+
+    def send_download(self, text, content_type, filename):
+        body = text.encode()
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(body)
 
     def request_length(self):
         """The declared body length, or -1 when it is not a whole number of bytes (a negative
@@ -225,8 +243,9 @@ class Handler(BaseHTTPRequestHandler):
         return f"This token can only send as {locked}" + (" trackers" if locked.endswith(":") else "") + f", not {stray}"
 
     def send_web_file(self, path):
-        """The browser app: index.html, stylesheets and modules under /css/ and /js/, and the Home
-        Assistant blueprint under /ha/ (public: Home Assistant fetches it, and it holds no secrets)."""
+        """The browser app: index.html, stylesheets and modules under /css/ and /js/, what installs it
+        (APP_FILES, /icons/), and the Home Assistant blueprint under /ha/ (public: Home Assistant
+        fetches it, and it holds no secrets)."""
         relative = "index.html" if path == "/" else path.lstrip("/")
         parts = relative.split("/")
         kind = WEB_TYPES.get(Path(relative).suffix)
@@ -461,7 +480,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         url = urlparse(self.path)
-        if url.path == "/" or url.path.startswith(("/css/", "/js/", "/ha/")):
+        if url.path == "/" or url.path in APP_FILES or url.path.startswith(("/css/", "/js/", "/ha/", "/icons/")):
             self.send_web_file(url.path)
             return
         if url.path == "/mcp":
@@ -546,7 +565,8 @@ class Handler(BaseHTTPRequestHandler):
             elif url.path == "/api/daily-summary/stored": value = stored_daily_record(db, q["date"])
             elif url.path == "/api/sources":
                 value = {**source_activity(db), "ingest_token": bool(config.ingest_token()), "formats": list(INGEST_FORMATS),
-                         "now": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+                         "quiet_alerts": quiet_alerts(db), "now": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+            elif url.path == "/api/tracker-notices": value = tracker_notices(db, q.get("since_id", 0))
             elif url.path == "/api/daily-brief": value = daily_briefs(db, q["date"], q.get("end_date"))
             elif url.path == "/api/places": value = db.places.saved()
             elif url.path == "/api/place-labels": value = db.places.labels()
@@ -567,6 +587,11 @@ class Handler(BaseHTTPRequestHandler):
             elif url.path == "/api/reverse": value = reverse_geocode(db, q["lat"], q["lon"], q.get("radius_m"))
             elif url.path == "/api/nearby-places": value = nearby_places(db, q["lat"], q["lon"], q.get("radius_m"), q.get("limit", 15))
             elif url.path == "/api/export.geojson": value = export_geojson(db, q.get("start"), q.get("end"))
+            elif url.path in EXPORTS:
+                export, content_type = EXPORTS[url.path]
+                self.send_download(export(db, q.get("start"), q.get("end")), content_type, "geologs" + url.path[len("/api/export"):])
+                return
+            elif url.path == "/api/import": value = import_status(self.user["id"])
             elif url.path == "/api/paths": value = list_paths(db, q.get("limit", 200))
             elif url.path == "/api/route-map": value = route_map(db, q["south"], q["west"], q["north"], q["east"], q.get("limit", 300))
             else:
@@ -580,6 +605,41 @@ class Handler(BaseHTTPRequestHandler):
             self.error_json(500, internal_failure(self.command + " " + urlparse(self.path).path))
         finally:
             db.close()
+
+    def receive_import(self, source):
+        """Save an uploaded history file, then import it in the background; GET /api/import says how
+        it is going. One import at a time for each person."""
+        length = self.request_length()
+        if length <= 0 or length > IMPORT_MAX_BYTES:
+            self.close_connection = True
+            self.error_json(413 if length > IMPORT_MAX_BYTES else 400, f"Choose a file of at most "
+                            f"{IMPORT_MAX_BYTES // 1_000_000} MB" if length > IMPORT_MAX_BYTES else "Choose a file to import")
+            return
+        user_id = self.user["id"]
+        with _imports_lock:
+            if (_imports.get(user_id) or {}).get("state") == "running":
+                self.close_connection = True
+                self.error_json(409, "An import is already running")
+                return
+            _imports[user_id] = {"state": "running", "phase": "uploading", "inserted": 0, "duplicates": 0,
+                                 "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+        handle, path = tempfile.mkstemp(prefix="geologs-import-")
+        try:
+            with os.fdopen(handle, "wb") as out:
+                remaining = length
+                while remaining:
+                    chunk = self.rfile.read(min(65536, remaining))
+                    if not chunk:
+                        raise ConnectionError("the upload stopped")
+                    out.write(chunk)
+                    remaining -= len(chunk)
+        except (OSError, ConnectionError):
+            os.unlink(path)
+            _import_progress(user_id, state="failed", phase=None, error="The upload was interrupted. Try again.")
+            self.close_connection = True
+            return
+        threading.Thread(target=_run_import, args=(self.server.pool, user_id, path, source), daemon=True).start()
+        self.send_json(202, import_status(user_id))
 
     def do_POST(self):
         url = urlparse(self.path)
@@ -599,6 +659,9 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
             self.error_json(403, "cross-origin request denied"); return
         if not sender and not self.guarded():
+            return
+        if path == "/api/import":
+            self.receive_import((parse_qs(url.query).get("source") or [""])[0])
             return
         if path == "/mcp" and not self.mcp_headers_valid():
             return
@@ -690,6 +753,8 @@ class Handler(BaseHTTPRequestHandler):
                 result = delete_ingest_token(db, payload["id"])
             elif path == "/api/sources/delete":
                 result = delete_source(db, payload.get("source"), payload.get("confirm") is True)
+            elif path == "/api/tracker-alerts":
+                result = {"quiet_alerts": set_quiet_alert(db, payload)}
             elif path == "/api/ingest-devices/delete":
                 result = delete_ingest_device(db, payload["kind"], payload.get("device") or "")
             elif path == "/api/observations/delete":
@@ -743,12 +808,49 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(200, {"ok": True}, {"Set-Cookie": self.session_cookie("", 0)})
 
 
+# Downloads of every fix in a range, beside /api/export.geojson.
+EXPORTS = {"/api/export.csv": (export_csv, "text/csv; charset=utf-8"),
+           "/api/export.gpx": (export_gpx, "application/gpx+xml; charset=utf-8")}
+IMPORT_MAX_BYTES = 1_000_000_000
+# How each person's latest import went (kept in memory: an import outlives its request).
+_imports = {}
+_imports_lock = threading.Lock()
+
+
+def import_status(user_id):
+    with _imports_lock:
+        return dict(_imports.get(user_id) or {"state": "idle"})
+
+
+def _import_progress(user_id, **changes):
+    with _imports_lock:
+        _imports[user_id] = {**_imports.get(user_id, {}), **changes}
+
+
+def _run_import(pool, user_id, path, source):
+    db = None
+    try:
+        db = pool.open(user_id)
+        totals = import_file(db, path, source, progress=lambda progress: _import_progress(user_id, **progress))
+        _import_progress(user_id, **totals, state="done", phase=None)
+    except INPUT_ERRORS as exc:
+        _import_progress(user_id, state="failed", phase=None, error=input_message(exc))
+    except Exception:
+        internal_failure("import")
+        _import_progress(user_id, state="failed", phase=None, error="The import failed on the server; its log says why.")
+    finally:
+        _import_progress(user_id, finished_at=datetime.now(timezone.utc).isoformat(timespec="seconds"))
+        if db is not None:
+            db.close()
+        os.unlink(path)
+
+
 def _daily_summary_worker(pool, stop):
     """Background upkeep, so that reading never writes: for each user, the path library, place
     details, stored daily summaries, and fuel prices; then expired sessions. Each job fails on its own."""
     work = (("paths", learn_recent_paths), ("place details", enrich_saved_places),
             ("daily summary", save_scheduled_summaries), ("fuel prices", refresh_prices),  # prices at most every 12 hours
-            ("user counts", refresh_user_stats))
+            ("user counts", refresh_user_stats), ("quiet trackers", check_quiet_trackers))
     while not stop.is_set():
         db = None
         try:

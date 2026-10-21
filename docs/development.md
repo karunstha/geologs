@@ -30,3 +30,16 @@ GEOLOGS_DATABASE_URL=postgresql://geologs:test@127.0.0.1:55432/geologs_load scri
 The role in that URL must be able to create databases. `postgis/postgis` is published for amd64 only, so on Apple silicon and other arm64 machines the script uses the community multi-arch build `imresamu/postgis` of the same image, which runs the suite about twice as fast as emulation.
 
 The Python tests also check that every file `index.html` loads is served, and that every module import names something its target exports.
+
+### Browser tests
+
+`tests/e2e` drives the real app in Chromium: signing in, one person's page never showing in the next person's session, the Home map fitting each day clear of its cards, import and export, quiet-tracker warnings, and opening offline. They start their own server on a fresh database filled by `scripts/demo-data` (a fictional person in Portland, Oregon; the same data the README's screenshots show), and need internet access for the map libraries. Without Playwright, `GEOLOGS_TEST_DATABASE_URL` or `scripts/demo-data` they skip themselves, so the command above runs them only when all three are there. To set up and run only them:
+
+```bash
+.venv/bin/pip install -e '.[browser-tests]' && .venv/bin/playwright install chromium
+.venv/bin/python -m unittest discover -s tests -p 'test_browser.py' -v
+```
+
+`scripts/demo-data --url http://127.0.0.1:8799 --token "$GEOLOGS_TOKEN"` fills any empty server you can throw away, for trying the app or taking screenshots.
+
+GitHub Actions (`.github/workflows/tests.yml`) runs the Python tests against PostGIS and checks every browser module parses, on each push and pull request.

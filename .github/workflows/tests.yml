@@ -1,0 +1,42 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.11", "3.13"]
+    services:
+      # The same server scripts/test-db starts locally: PostGIS, and a role that may create databases.
+      postgres:
+        image: postgis/postgis:17-3.5
+        env:
+          POSTGRES_USER: geologs
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: geologs
+        ports: ["55432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U geologs -d geologs"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      GEOLOGS_TEST_DATABASE_URL: postgresql://geologs:test@127.0.0.1:55432/geologs
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      # Node 22 tells ES modules (import, top-level await) from CommonJS by itself for node --check.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: pip install -e .
+      # The browser tests (tests/e2e) skip themselves here: they need scripts/demo-data, which is not in
+      # the repository yet.
+      - run: python -m unittest discover -s tests -v
+      - name: Check the browser modules parse
+        run: for file in $(find src/geologs/presentation/web/js -name '*.js'); do node --check "$file"; done

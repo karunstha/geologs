@@ -1,0 +1,16 @@
+{
+  "name": "GeoLogs",
+  "short_name": "GeoLogs",
+  "description": "Your private location archive: where you stayed, how you travelled, and the places you go.",
+  "id": "/",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0e1113",
+  "theme_color": "#0e1113",
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

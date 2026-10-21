@@ -34,6 +34,7 @@ import { refreshInsights } from "./patterns.js";
 import { showAccount } from "./account.js";
 import { showView } from "./shell.js";
 import { refreshAdmin } from "./admin.js";
+import { showData } from "./data.js";
 
 export function populateTimezones(selected) {
   const select = $("summary-timezone");
@@ -229,6 +230,7 @@ export function showSettingsPage(id) {
   if (id === "settings-car" && state.settings) refreshFuel(true).catch((error) => toast(error.message));
   if (id === "settings-paths") refreshPaths().catch((error) => toast(error.message));
   if (id.startsWith("settings-admin-")) refreshAdmin().catch((error) => toast(error.message));
+  if (id === "settings-data") showData();
   document.querySelector(".settings-tab.active")?.scrollIntoView({ block: "nearest", inline: "nearest" });
 }
 
@@ -718,10 +720,28 @@ function sourceDetails(item) {
   ].filter(Boolean);
 }
 
+// The choices for "warn me when this tracker goes quiet" (services/tracker_alerts.py HOURS).
+const QUIET_HOURS = [2, 6, 12, 24, 48];
+
+async function saveQuietAlert(source, hours, select) {
+  try {
+    const result = await post("/api/tracker-alerts", { source, hours });
+    state.sources.quiet_alerts = result.quiet_alerts;
+    toast(hours ? `You'll be told if ${trackerLabel(source)} sends nothing for ${hours} h` : `No quiet warning for ${trackerLabel(source)}`);
+    // The warning arrives as a browser notification too, once this browser allows them.
+    if (hours && "Notification" in window && Notification.permission === "default") Notification.requestPermission();
+  } catch (error) {
+    toast(error.message);
+  }
+  select.blur();
+  renderPriority();
+}
+
 // Every tracker, most trusted first, with its health; reorder by dragging or the arrows.
 export function renderPriority(focusSource, focusMove) {
   const list = $("priority-list");
-  if (list.querySelector(".dragging")) return; // the 30 s Sources refresh must not drop a drag in progress
+  // The 30 s Sources refresh must not drop a drag in progress, or close a quiet-warning choice being made.
+  if (list.querySelector(".dragging") || (list.contains(document.activeElement) && document.activeElement.matches("select"))) return;
   const order = priorityOrder();
   const bySource = new Map((state.sources?.sources || []).map((item) => [item.source, item]));
   const several = order.length > 1;
@@ -736,12 +756,14 @@ export function renderPriority(focusSource, focusMove) {
     .map((source, index) => {
       const name = sourceName(source),
         label = trackerLabel(source),
-        item = bySource.get(source);
+        item = bySource.get(source),
+        quietHours = state.sources?.quiet_alerts?.[source]?.hours || 0;
       const [tone, health] = sourceHealth(item);
+      const quiet = `<select class="input quiet-select" data-quiet aria-label="Warn when ${safe(label)} goes quiet" title="Warn when this tracker sends nothing for a while"><option value="0">No quiet warning</option>${QUIET_HOURS.map((hours) => `<option value="${hours}"${hours === quietHours ? " selected" : ""}>Warn after ${hours} h quiet</option>`).join("")}</select>`;
       const moves = several
         ? `<button type="button" class="icon-button" data-move="-1" aria-label="Move ${safe(label)} up"${index === 0 ? " disabled" : ""}>${CHEVRON(-1)}</button><button type="button" class="icon-button" data-move="1" aria-label="Move ${safe(label)} down"${index === order.length - 1 ? " disabled" : ""}>${CHEVRON(1)}</button>`
         : "";
-      return `<li class="priority-item" draggable="${several}" data-source="${safe(source)}">${several ? `<span class="drag-handle" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="9" cy="6" r="1.3"/><circle cx="15" cy="6" r="1.3"/><circle cx="9" cy="12" r="1.3"/><circle cx="15" cy="12" r="1.3"/><circle cx="9" cy="18" r="1.3"/><circle cx="15" cy="18" r="1.3"/></svg></span><span class="priority-rank" title="${index === 0 ? "Preferred when trackers disagree" : ""}">${index + 1}</span>` : ""}<span class="health-dot ${tone}" title="${health}" aria-hidden="true"></span><span class="priority-name" title="${safe(source)}"><strong>${safe(name.kind)}${name.device ? ` <span class="muted">· ${safe(name.device)}</span>` : ""}</strong><small>${safe([health, ...sourceDetails(item)].join(" · "))}</small></span><span class="priority-moves">${moves}<button type="button" class="icon-button danger" data-remove-source aria-label="Remove ${safe(label)} and its data" title="Remove this tracker">${actionIcon("delete")}</button></span></li>`;
+      return `<li class="priority-item" draggable="${several}" data-source="${safe(source)}">${several ? `<span class="drag-handle" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="9" cy="6" r="1.3"/><circle cx="15" cy="6" r="1.3"/><circle cx="9" cy="12" r="1.3"/><circle cx="15" cy="12" r="1.3"/><circle cx="9" cy="18" r="1.3"/><circle cx="15" cy="18" r="1.3"/></svg></span><span class="priority-rank" title="${index === 0 ? "Preferred when trackers disagree" : ""}">${index + 1}</span>` : ""}<span class="health-dot ${tone}" title="${health}" aria-hidden="true"></span><span class="priority-name" title="${safe(source)}"><strong>${safe(name.kind)}${name.device ? ` <span class="muted">· ${safe(name.device)}</span>` : ""}</strong><small>${safe([health, ...sourceDetails(item)].join(" · "))}</small></span>${quiet}<span class="priority-moves">${moves}<button type="button" class="icon-button danger" data-remove-source aria-label="Remove ${safe(label)} and its data" title="Remove this tracker">${actionIcon("delete")}</button></span></li>`;
     })
     .join("");
   list.querySelectorAll("[data-move]").forEach((button) => {
@@ -753,6 +775,9 @@ export function renderPriority(focusSource, focusMove) {
       next.splice(to, 0, next.splice(from, 1)[0]);
       savePriority(next, source, button.dataset.move);
     };
+  });
+  list.querySelectorAll("[data-quiet]").forEach((select) => {
+    select.onchange = () => saveQuietAlert(select.closest("li").dataset.source, +select.value, select);
   });
   list.querySelectorAll("[data-remove-source]").forEach((button) => {
     button.onclick = () => removeTracker(button.closest("li").dataset.source);

@@ -13,6 +13,8 @@ export const state = {
   events: [],
   day: null,
   lastEventId: 0,
+  // The newest tracker notice seen; null until the first poll, so old notices are not shown again.
+  lastTrackerNotice: null,
   insights: null,
   settings: null,
   followToday: true,

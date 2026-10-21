@@ -1,5 +1,8 @@
 """Your samples: reading them, measuring them, and deleting them (with everything derived from them)."""
+import csv
+import io
 from datetime import datetime, timedelta
+from xml.sax.saxutils import escape, quoteattr
 from zoneinfo import ZoneInfo
 
 from ..domain.trips import stats_from_points
@@ -162,3 +165,36 @@ def near(db, lat, lon, radius_m=250, start=None, end=None, limit=100, source=Non
 @use_case
 def export_geojson(db, start=None, end=None):
     return {"type": "FeatureCollection", "features": [{"type": "Feature", "geometry": {"type": "Point", "coordinates": [p["lon"], p["lat"]]}, "properties": {k: v for k, v in p.items() if k not in ("lat", "lon")}} for p in db.points.observations(start, end, limit=None)]}
+
+
+# The columns import_csv reads back, so an export can be imported again; source says which tracker.
+CSV_COLUMNS = ("timestamp", "lat", "lon", "accuracy_m", "speed_mps", "source")
+
+
+@use_case
+def export_csv(db, start=None, end=None):
+    """Every fix in the range as CSV, oldest first."""
+    out = io.StringIO()
+    writer = csv.writer(out, lineterminator="\n")
+    writer.writerow(CSV_COLUMNS)
+    for point in reversed(db.points.observations(start, end, limit=None)):
+        writer.writerow(["" if point[column] is None else point[column] for column in CSV_COLUMNS])
+    return out.getvalue()
+
+
+@use_case
+def export_gpx(db, start=None, end=None):
+    """Every fix in the range as GPX 1.1: a track per tracker, oldest first, for apps such as OsmAnd."""
+    tracks = {}
+    for point in reversed(db.points.observations(start, end, limit=None)):
+        tracks.setdefault(point["source"], []).append(point)
+    parts = ['<?xml version="1.0" encoding="UTF-8"?>\n<gpx version="1.1" creator="GeoLogs" '
+             'xmlns="http://www.topografix.com/GPX/1/1">']
+    for source, points in tracks.items():
+        parts.append(f"<trk><name>{escape(source)}</name><trkseg>")
+        for point in points:
+            at = datetime.fromisoformat(point["timestamp"]).strftime("%Y-%m-%dT%H:%M:%SZ")
+            parts.append(f"<trkpt lat={quoteattr(str(point['lat']))} lon={quoteattr(str(point['lon']))}><time>{at}</time></trkpt>")
+        parts.append("</trkseg></trk>")
+    parts.append("</gpx>\n")
+    return "\n".join(parts)

@@ -90,6 +90,15 @@ export async function pollEvents() {
     }
     state.lastEventId = newest;
     if (events.length) await refreshMeta();
+    // A watched tracker that went quiet or came back (services/tracker_alerts.py).
+    const notices = await api("/api/tracker-notices?since_id=" + (state.lastTrackerNotice ?? 0));
+    if (state.lastTrackerNotice != null)
+      for (const notice of notices) {
+        const text = notice.kind === "quiet" ? `${notice.label} has sent nothing for over ${notice.hours} h` : `${notice.label} is sending again`;
+        toast(text);
+        if ("Notification" in window && Notification.permission === "granted") new Notification("Tracker", { body: text });
+      }
+    state.lastTrackerNotice = notices.reduce((max, notice) => Math.max(max, notice.id), state.lastTrackerNotice ?? 0);
   } catch (e) {
     /* Connection errors are surfaced on explicit actions. */
   }

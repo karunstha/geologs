@@ -16,6 +16,10 @@ classifiers = [
     "Topic :: Scientific/Engineering :: GIS",
 ]
 
+[project.optional-dependencies]
+# The browser tests (tests/e2e); also run `playwright install chromium` once.
+browser-tests = ["playwright>=1.48"]
+
 [project.urls]
 Repository = "https://github.com/karunstha/geologs"
 Issues = "https://github.com/karunstha/geologs/issues"
@@ -31,4 +35,4 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
-"geologs.presentation" = ["web/*.html", "web/css/*.css", "web/css/*/*.css", "web/js/*.js", "web/js/*/*.js", "web/ha/*.yaml"]
+"geologs.presentation" = ["web/*.html", "web/*.js", "web/*.webmanifest", "web/icons/*.png", "web/css/*.css", "web/css/*/*.css", "web/js/*.js", "web/js/*/*.js", "web/ha/*.yaml"]

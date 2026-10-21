@@ -10,3 +10,6 @@ __pycache__/
 
 # Screenshots of real data stay out of the repository; the README's are made from demo data in docs/images/.
 /screenshots/
+
+# The demo archive's generator stays local for now; the browser tests skip without it.
+/scripts/demo-data

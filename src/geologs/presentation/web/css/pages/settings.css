@@ -560,6 +560,14 @@
   display: flex;
   gap: 2px;
 }
+/* "Warn after 6 h quiet": small beside the tracker, as wide as its words. */
+.priority-item .quiet-select {
+  width: auto;
+  flex: none;
+  min-height: 30px;
+  padding-block: 4px;
+  font-size: 12.5px;
+}
 .priority-moves .icon-button:disabled {
   opacity: 0.3;
   cursor: default;
@@ -568,6 +576,13 @@
   /* Rank 1 already says it; the pill would crowd out the tracker's name. */
   .priority-item .status-pill {
     display: none;
+  }
+  .priority-item {
+    flex-wrap: wrap;
+  }
+  .priority-item .quiet-select {
+    order: 1;
+    margin-left: 28px;
   }
 }
 /* Configured or not: quiet text with a tick, never shaped like a button. */
@@ -762,3 +777,22 @@
     grid-template-columns: 1fr;
   }
 }
+
+/* Import & export: a date range or a file, then the buttons under it. */
+.data-form {
+  display: grid;
+  gap: 12px;
+  max-width: 560px;
+}
+.data-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+#import-status {
+  display: grid;
+  gap: 2px;
+  margin-top: 14px;
+  max-width: 560px;
+}
+

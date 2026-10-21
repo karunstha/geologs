@@ -38,6 +38,22 @@ curl -X POST http://127.0.0.1:8765/api/points \
 
 Required fields: `lat`, `lon`. Use a timezone-aware ISO 8601 `timestamp` and stable `source`/`external_id` for reliable history and retries. `speed_mps` and `accuracy_m` are optional. The server can estimate speed if consecutive fixes are 5–900 seconds apart, both are reasonably accurate, and the implied speed is plausible. A single point with no speed is classified as `unknown`.
 
+## Importing history
+
+**Settings → Import & export** takes a file in the browser and imports it on the server while you wait (or leave: the page picks the import up again when you come back). It tells the kind of file apart by its contents:
+
+-   **CSV** with `timestamp,lat,lon` and optional `accuracy_m,speed_mps,external_id` columns. GeoLogs' own CSV export is one, so an export imports again.
+-   **Google Takeout's `Records.json`** (classic Location History).
+-   **Google Timeline exports**: Takeout's monthly Semantic Location History files (`timelineObjects`), and the file a phone exports since Timeline moved onto phones in 2024 (Android's `semanticSegments` and `rawSignals`, or iOS's list of segments). Raw signals and recorded paths come in as they are. A visit becomes a fix at its place every 30 minutes from arrival to departure, so it shows as a stay; a trip contributes its two ends.
+
+Files of up to 1 GB are read as streams, never whole. Each kind goes under its own tracker name (`csv`, `google_takeout`, `google_timeline`) unless you give one. From the command line, `geologs import FILE [--source NAME]` does the same:
+
+```bash
+docker compose exec app geologs import /data/Timeline.json --source old-phone
+```
+
+The older commands below remain for CSV and classic Takeout files.
+
 CSV files can contain `timestamp,lat,lon` plus optional `accuracy_m,speed_mps,external_id`:
 
 ```bash
@@ -50,4 +66,4 @@ Classic Google Takeout `Records.json` or `Location History.json` files with a to
 ./geologs import-takeout Records.json
 ```
 
-The importer supports `latitudeE7`, `longitudeE7`, `timestamp` or `timestampMs`, and optional `accuracy`. It is safe to rerun overlapping exports. Modern semantic segment and `timelineObjects` exports need a separate parser and are not accepted by this command. Historical imports never trigger reminders or geocoding. After repairing imported data, run `docker compose exec app geologs rebuild-stays` (add `--user EMAIL` for someone other than the owner).
+The importer supports `latitudeE7`, `longitudeE7`, `timestamp` or `timestampMs`, and optional `accuracy`. It is safe to rerun overlapping exports. For Timeline exports, use `geologs import` or the browser. Historical imports never trigger reminders or geocoding. After repairing imported data, run `docker compose exec app geologs rebuild-stays` (add `--user EMAIL` for someone other than the owner).

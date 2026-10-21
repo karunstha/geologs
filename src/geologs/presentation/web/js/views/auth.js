@@ -3,7 +3,7 @@
 import { refreshAll } from "../app/refresh.js";
 import { $, toast } from "../core/dom.js";
 import { state } from "../core/state.js";
-import { clearAccount, refreshAccount, showAccount } from "./account.js";
+import { clearAccount, refreshAccount, SIGNED_OUT_KEY, showAccount } from "./account.js";
 
 let mode = "signin";
 let linkToken = null; // a reset or invite token, kept only in memory once read from the address bar
@@ -121,7 +121,12 @@ export async function initAuth() {
     try {
       preferred = localStorage.getItem("geologs-sign-in") === "token" && options.token ? "token" : "signin";
     } catch (_error) {}
-    show(preferred, event.detail?.message || "");
+    let message = event.detail?.message || "";
+    try {
+      message ||= sessionStorage.getItem(SIGNED_OUT_KEY) || "";
+      sessionStorage.removeItem(SIGNED_OUT_KEY);
+    } catch (_error) {}
+    show(preferred, message);
   });
   document.querySelectorAll("[data-auth-go]").forEach((button) => {
     button.onclick = () => {

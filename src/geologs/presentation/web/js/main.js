@@ -8,6 +8,7 @@ import { initTheme } from "./ui/theme.js";
 import { initAccount } from "./views/account.js";
 import { initAdmin } from "./views/admin.js";
 import { initAuth } from "./views/auth.js";
+import { initData } from "./views/data.js";
 import { initHistory, refreshCurrent, refreshExplore } from "./views/history.js";
 import { initHome } from "./views/home.js";
 import { refreshInsights } from "./views/patterns.js";
@@ -31,6 +32,7 @@ initPlaceDialogs();
 initReminders();
 initSummaries();
 initSettings();
+initData();
 initStayEdits();
 initMap();
 // After the map: the new Home borrows it, with the classic Home's timeline and details.
@@ -48,3 +50,6 @@ setInterval(() => {
   refreshExplore(false).catch(() => {});
 }, 60000);
 setInterval(() => refreshInsights().catch(() => {}), 300000);
+
+// Installable, and able to open offline with the views last seen (sw.js).
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});

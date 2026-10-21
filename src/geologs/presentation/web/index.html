@@ -21,6 +21,8 @@
     })();
   </script>
   <title>GeoLogs</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%232cc9b4'/%3E%3Cstop offset='1' stop-color='%230b5d56'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='15' fill='url%28%23g%29'/%3E%3Cpath d='M22.5 46.6c3.5-1.2 4-8.5 10-9.5 4.8-.8 6.8 2.8 10 2.2' fill='none' stroke='%23fff' stroke-opacity='.75' stroke-width='3.4' stroke-linecap='round' stroke-dasharray='0.1 6.2'/%3E%3Ccircle cx='15' cy='49' r='4.6' fill='none' stroke='%23fff' stroke-width='3'/%3E%3Cpath d='M44 8.5c-6.6 0-12 5.1-12 11.4 0 8.5 12 18.1 12 18.1s12-9.6 12-18.1c0-6.3-5.4-11.4-12-11.4Z' fill='%23fff'/%3E%3Ccircle cx='44' cy='19.9' r='4.4' fill='%230f766e'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
   <link rel="stylesheet" href="/css/tokens.css">
@@ -261,6 +263,7 @@
           </div>
           <div class="settings-group" data-group="tracking" role="group" aria-labelledby="settings-group-tracking"><p id="settings-group-tracking" class="settings-group-label">Tracking</p>
             <button type="button" class="settings-tab" data-settings-page="settings-sources"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="2.5" width="10" height="19" rx="2.5"/><path d="M11 18.5h2"/></svg><span>Devices</span></button>
+            <button type="button" class="settings-tab" data-settings-page="settings-data"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v11M7.5 9.5 12 14l4.5-4.5"/><path d="M4 15v3.5A2.5 2.5 0 0 0 6.5 21h11a2.5 2.5 0 0 0 2.5-2.5V15"/></svg><span>Import &amp; export</span></button>
             <button type="button" class="settings-tab" data-settings-page="settings-access"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/></svg><span>Access</span></button>
           </div>
           <div class="settings-group" data-group="admin" role="group" aria-labelledby="settings-group-admin" hidden><p id="settings-group-admin" class="settings-group-label">Admin</p>
@@ -395,6 +398,25 @@
               <div class="card-head"><div><h3>Connect a tracker app</h3><p>Phones send locations straight here. Use an address your phone can reach, such as HTTPS or Tailscale.</p></div></div>
               <p id="ingest-token-note" class="callout warning" hidden><strong>Give each device its own token</strong><span>Create one under Access → Device tokens, so apps don't need your main token.</span></p>
               <div id="tracker-endpoints" class="tracker-list"></div>
+            </div>
+          </section>
+
+          <section id="settings-data" class="settings-section" aria-labelledby="data-title" hidden>
+            <div class="section-intro"><h2 id="data-title">Import &amp; export</h2><p>Bring in history from another app, or take yours with you.</p></div>
+            <div class="card">
+              <div class="card-head"><div><h3>Export</h3><p>Every location you recorded in these days, oldest first. Leave the dates empty for all of them. A CSV can be imported again.</p></div></div>
+              <form id="export-form" class="data-form">
+                <div class="form-pair"><label class="field"><span>From</span><input id="export-start" class="input" type="date"></label><label class="field"><span>To</span><input id="export-end" class="input" type="date"></label></div>
+                <div class="data-actions"><button type="submit" class="button primary" data-export="csv">Download CSV</button><button type="submit" class="button secondary" data-export="gpx">GPX</button><button type="submit" class="button secondary" data-export="geojson">GeoJSON</button></div>
+              </form>
+            </div>
+            <div class="card">
+              <div class="card-head"><div><h3>Import</h3><p>A CSV with timestamp, lat and lon columns; Google Takeout's Records.json or Semantic Location History; or the Timeline file your phone exports (its Timeline settings → Export Timeline data). Locations already here are recognised, so importing a file twice is safe.</p></div></div>
+              <form id="import-form" class="data-form">
+                <div class="form-pair"><label class="field"><span>File</span><input id="import-file" class="input" type="file" accept=".csv,.json,text/csv,application/json" required></label><label class="field"><span>File it under</span><input id="import-source" class="input" maxlength="80" placeholder="Automatic" autocomplete="off"></label></div>
+                <div class="data-actions"><button id="import-go" class="button primary">Import</button></div>
+              </form>
+              <div id="import-status" class="callout" role="status" hidden></div>
             </div>
           </section>
 

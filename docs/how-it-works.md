@@ -47,6 +47,10 @@ Create a reminder at a saved place, search for another place near the latest fix
 
 The browser's arrival inbox persists events. Browser notifications work while that tab is open and permission is granted. For alerts when the browser is closed, set `GEOLOGS_WEBHOOK_URL` to an HTTPS endpoint (or loopback HTTP). Each event is POSTed as JSON; `GEOLOGS_WEBHOOK_TOKEN` adds a bearer header. This can feed a Home Assistant automation, `ntfy`, or your own notifier. Failed webhook attempts remain marked in the event log; automatic retries are not implemented yet.
 
+## Quiet trackers
+
+A phone app that is closed, or loses permission to read your location, simply stops sending, and the gap shows only when you next look. In **Settings → Devices**, each tracker can warn you instead: choose **Warn after 2, 6, 12, 24 or 48 h quiet**. The server checks every minute. Once that tracker's newest fix is older than the time you chose, it says so once, and once more when locations arrive again; never more than that. The notice appears in an open GeoLogs tab (as a browser notification when allowed), by email to your confirmed address when the server can send mail, and, for the server's owner, at `GEOLOGS_WEBHOOK_URL` (see [MCP and the API](mcp-and-api.md#reminder-webhooks)).
+
 ## Weather and photos
 
 Home opens with a photo of the day's town in its weather: where you are now for today, else where that day's history ends. The weather is not shown, only used to choose the photo. The town comes from OpenStreetMap's [Nominatim](https://nominatim.org/release-docs/latest/api/Reverse/) and the weather, used only to choose the photo, from [Open-Meteo](https://open-meteo.com/) (no key for either; past days use Open-Meteo's archive after about three months). Positions are rounded to about a kilometre before they are sent; town names are cached in the database and weather in memory for ten minutes (six hours for a past day).

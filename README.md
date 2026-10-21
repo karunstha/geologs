@@ -8,12 +8,14 @@ Your history stays in a PostgreSQL database that you run. Nothing is sent to any
 
 ## What it does
 
--   **Collects locations** from the apps you may already use: [OwnTracks](https://owntracks.org/), [Overland](https://github.com/aaronpk/Overland-iOS), Traccar Client, OsmAnd, GPSLogger, Home Assistant, or any script that can send an HTTP request. CSV files and Google Takeout `Records.json` can be imported.
+-   **Collects locations** from the apps you may already use: [OwnTracks](https://owntracks.org/), [Overland](https://github.com/aaronpk/Overland-iOS), Traccar Client, OsmAnd, GPSLogger, Home Assistant, or any script that can send an HTTP request. Import a CSV, Google Takeout's `Records.json`, or Google's newer Timeline export from your phone, right in the browser; export everything as CSV, GPX or GeoJSON.
 -   **Understands the day.** It finds stays (sitting still, or moving around one place, such as a lake loop), the trips between them, and how you travelled: walking, running, cycling or driving. It shows each day with a map, a timeline, speed while driving, and the places you visited.
 -   **Names places.** Save your own, or let a provider (Geoapify, Mapbox or your own Photon) name visits. Search your history: "what day did I go to Costco?".
 -   **Reminds you on arrival.** "Remind me to buy salt when I get to the supermarket" fires when your phone arrives, as a browser notification or a webhook.
 -   **Summaries and costs.** Each day, month and year at a glance: a calendar of how far you went, the places and towns you spent time in, and the fuel cost of your drives.
 -   **Maps your places.** A heat map of where you go, your saved zones, and the routes you take most.
+-   **Warns when a tracker goes quiet**, by browser notification, email or webhook, so a phone app that stopped sending is noticed the same day.
+-   **Installs on your phone** as an app, and opens the days you last looked at without a connection.
 -   **Answers questions through MCP.** Connect Claude or any other [MCP](https://modelcontextprotocol.io/) client and ask about your own history.
 -   **Is multi-user.** Accounts with email sign-in, invites, password reset, two-factor sign-in and an admin portal. Admins see how much each person recorded, never where. The database itself enforces that users cannot read each other's rows.
 

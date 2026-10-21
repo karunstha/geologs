@@ -28,6 +28,8 @@ Only what you turn on. Each service sees the requests below, from your server, s
 
 The browser also loads the map's tiles from OpenStreetMap (which sees the area the map shows) and Leaflet from unpkg.com. Raw GPS fixes are never sent to any provider.
 
+Installed as an app (or once a browser has opened GeoLogs over HTTPS), the page keeps what the views you opened last read, in that browser alone, so it can open them without a connection. That copy is deleted when you sign out, and whenever the server answers that you are signed out.
+
 ## For operators
 
 -   Use HTTPS, keep the database off the internet, and back up `.env` and the database together.

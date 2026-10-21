@@ -157,6 +157,11 @@ class PointsRepository(Repository):
                   FROM point_observations GROUP BY source) o
             JOIN point_observations r ON r.id=o.last_id ORDER BY r.received_at DESC""", (since,))
 
+    def newest_fix(self, source):
+        """The time of a source's newest fix, or None (an index lookup, cheap enough to ask every minute)."""
+        row = self.execute("SELECT MAX(timestamp) AS last_fix FROM point_observations WHERE source=?", (source,)).fetchone()
+        return row["last_fix"] if row else None
+
     # Recording a sample (see services.ingest).
 
     def live_point(self, source):

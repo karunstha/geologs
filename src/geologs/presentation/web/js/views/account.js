@@ -1,6 +1,6 @@
 // The account page: your name and email, your password, the browsers you're signed in on, and
 // personal API tokens. Opened from the account button at the top right.
-import { api, openAuth, post, setConnection } from "../core/api.js";
+import { api, post } from "../core/api.js";
 import { $, copyText, safe, toast } from "../core/dom.js";
 import { ago, zoneOptions } from "../core/format.js";
 import { state } from "../core/state.js";
@@ -37,6 +37,9 @@ export function browserName(agent) {
               : "";
   return system ? `${browser} on ${system}` : browser;
 }
+
+// The message for the sign-in screen after signing out reloads the page.
+export const SIGNED_OUT_KEY = "geologs-signed-out";
 
 function shortDate(value) {
   return new Date(value).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric", ...zoneOptions() });
@@ -161,10 +164,16 @@ export async function signOut(message = "You're signed out.") {
     await fetch("/api/session", { method: "DELETE", credentials: "same-origin" });
   } catch (_error) {}
   sessionStorage.removeItem("geologs-token");
-  state.user = null;
-  state.authDismissed = false;
-  setConnection("warning", "Signed out");
-  openAuth(message);
+  // What sw.js kept of this person's data for offline use goes with them.
+  try {
+    await caches.delete("geologs-data-v1");
+  } catch (_error) {}
+  // A fresh page, so nothing the last person loaded (in any view) is left for whoever signs in next;
+  // the sign-in screen it opens on says why.
+  try {
+    sessionStorage.setItem(SIGNED_OUT_KEY, message);
+  } catch (_error) {}
+  location.reload();
 }
 
 function showRecoveryCodes(codes) {

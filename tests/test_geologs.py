@@ -4282,5 +4282,176 @@ class WebAppTests(LiveServerCase):
         self.assertEqual(self.send("GET", "/css/tokens.css", headers={"If-None-Match": tag})[0], 304)
 
 
+PHONE_TIMELINE = {
+    "semanticSegments": [
+        {"startTime": "2024-05-01T08:00:00.000-07:00", "endTime": "2024-05-01T09:00:00.000-07:00",
+         "visit": {"topCandidate": {"placeLocation": {"latLng": "45.5252°, -122.6322°"}}}},
+        {"startTime": "2024-05-01T09:00:00.000-07:00", "endTime": "2024-05-01T09:20:00.000-07:00",
+         "activity": {"start": {"latLng": "45.5252°, -122.6322°"}, "end": {"latLng": "45.5266°, -122.6819°"}}},
+        {"startTime": "2024-05-01T09:00:00.000-07:00", "endTime": "2024-05-01T10:00:00.000-07:00",
+         "timelinePath": [{"point": "45.5255°, -122.6400°", "time": "2024-05-01T09:05:00.000-07:00"},
+                          {"point": "45.5260°, -122.6600°", "time": "2024-05-01T09:12:00.000-07:00"}]},
+    ],
+    "rawSignals": [{"position": {"LatLng": "45.5266°, -122.6819°", "accuracyMeters": 12, "timestamp": "2024-05-01T09:30:00.000-07:00",
+                                 "speedMetersPerSecond": 0.0}}, {"wifiScan": {}}],
+}
+IOS_TIMELINE = [
+    {"startTime": "2024-05-01T08:00:00.000-07:00", "endTime": "2024-05-01T08:40:00.000-07:00",
+     "visit": {"topCandidate": {"placeLocation": "geo:45.525200,-122.632200"}}},
+    {"startTime": "2024-05-01T09:00:00.000-07:00", "endTime": "2024-05-01T10:00:00.000-07:00",
+     "timelinePath": [{"point": "geo:45.525500,-122.640000", "durationMinutesOffsetFromStartTime": "5"}]},
+]
+SEMANTIC_HISTORY = {"timelineObjects": [
+    {"placeVisit": {"location": {"latitudeE7": 455252000, "longitudeE7": -1226322000},
+                    "duration": {"startTimestamp": "2019-06-01T15:00:00Z", "endTimestamp": "2019-06-01T15:45:00Z"}}},
+    {"activitySegment": {"startLocation": {"latitudeE7": 455252000, "longitudeE7": -1226322000},
+                         "endLocation": {"latitudeE7": 455266000, "longitudeE7": -1226819000},
+                         "duration": {"startTimestamp": "2019-06-01T15:45:00Z", "endTimestamp": "2019-06-01T16:00:00Z"},
+                         "simplifiedRawPath": {"points": [{"latE7": 455260000, "lngE7": -1226600000, "timestamp": "2019-06-01T15:52:00Z"}]}}},
+]}
+
+
+class ImportExportTests(unittest.TestCase):
+    """Taking your history out (CSV, GPX) and bringing it in from Google's exports, told apart by content."""
+
+    def setUp(self):
+        self.url = scratch_database(self)
+        self.db = open_database(self.url)
+        self.addCleanup(self.db.close)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def file(self, content, name="upload"):
+        path = Path(self.tmp.name) / name
+        path.write_text(content if isinstance(content, str) else json.dumps(content), encoding="utf-8")
+        return str(path)
+
+    def test_a_csv_export_imports_again_under_another_name(self):
+        from geologs.services.imports import import_file
+        from geologs.services.samples import export_csv, export_gpx
+        for minute in range(3):
+            ingest(self.db, {"source": "owntracks:alex/phone", "timestamp": f"2026-09-01T10:0{minute}:00Z",
+                             "lat": 45.52 + minute / 1000, "lon": -122.63, "accuracy_m": 8})
+        exported = export_csv(self.db)
+        self.assertEqual(exported.splitlines()[0], "timestamp,lat,lon,accuracy_m,speed_mps,source")
+        self.assertEqual(len(exported.splitlines()), 4)
+        result = import_file(self.db, self.file(exported), "restored")
+        self.assertEqual((result["format"], result["source"], result["inserted"]), ("csv", "restored", 3))
+        gpx = export_gpx(self.db, "2026-09-01T10:01:00Z")
+        self.assertEqual(gpx.count("<trkpt"), 4)  # two fixes from each tracker since 10:01
+        self.assertIn("<name>owntracks:alex/phone</name>", gpx)
+        self.assertIn('<trkpt lat="45.521" lon="-122.63"><time>2026-09-01T10:01:00Z</time></trkpt>', gpx)
+
+    def test_the_phone_timeline_export_imports_its_signals_paths_and_visits(self):
+        from geologs.services.imports import import_file
+        result = import_file(self.db, self.file(PHONE_TIMELINE))
+        self.assertEqual((result["format"], result["source"]), ("timeline (phone)", "google_timeline"))
+        # The visit's hour (8:00, 8:30, 9:00), the trip's ends (9:00 is the same fix), two path points, one raw fix.
+        self.assertEqual(result["inserted"], 7)
+        points = self.db.points.observations(limit=None)
+        self.assertEqual({p["source"] for p in points}, {"google_timeline"})
+        raw = next(p for p in points if p["timestamp"].startswith("2024-05-01T16:30"))
+        self.assertEqual(raw["accuracy_m"], 12)
+        self.assertEqual(import_file(self.db, self.file(PHONE_TIMELINE))["inserted"], 0)
+
+    def test_the_ios_export_and_takeout_semantic_history_import_too(self):
+        from geologs.services.imports import import_file
+        ios = import_file(self.db, self.file(IOS_TIMELINE), "iphone")
+        self.assertEqual((ios["format"], ios["inserted"]), ("timeline (ios)", 4))  # 8:00, 8:30, 8:40, and 9:05
+        semantic = import_file(self.db, self.file(SEMANTIC_HISTORY), "history")
+        self.assertEqual((semantic["format"], semantic["inserted"]), ("timeline (semantic)", 5))
+
+    def test_a_file_of_another_kind_is_refused_plainly(self):
+        from geologs.services.imports import import_file
+        with self.assertRaisesRegex(ValueError, "isn't a CSV"):
+            import_file(self.db, self.file("name,city\nAlex,Portland\n"))
+
+
+class ImportServerTests(LiveServerCase):
+    def test_an_upload_imports_in_the_background(self):
+        import time
+        auth = {"Authorization": "Bearer main-token"}
+        status, started, _ = self.send("POST", "/api/import?source=old-phone", json.dumps(PHONE_TIMELINE).encode(),
+                                       {**auth, "Content-Type": "application/octet-stream"})
+        self.assertEqual((status, started["state"]), (202, "running"))
+        for _ in range(100):
+            _, progress, _ = self.send("GET", "/api/import", headers=auth)
+            if progress["state"] != "running":
+                break
+            time.sleep(0.1)
+        self.assertEqual((progress["state"], progress["source"], progress["inserted"]), ("done", "old-phone", 7))
+        status, body, response = self.send("GET", "/api/export.csv", headers=auth)
+        self.assertEqual(status, 200)
+        self.assertIn("attachment", response.getheader("Content-Disposition"))
+        self.assertEqual(len(body.decode().splitlines()), 8)
+
+    def test_an_upload_needs_a_file_and_a_sign_in(self):
+        self.assertEqual(self.send("POST", "/api/import", b"", {"Authorization": "Bearer main-token"})[0], 400)
+        self.assertEqual(self.send("POST", "/api/import", b"timestamp,lat,lon\n")[0], 401)
+
+
+class TrackerAlertTests(unittest.TestCase):
+    """A watched tracker that stops sending is told about once, and once more when it is back."""
+
+    def setUp(self):
+        self.url = scratch_database(self)
+        self.db = open_database(self.url)
+        self.addCleanup(self.db.close)
+
+    def fix_at(self, at, source="owntracks:alex/phone"):
+        ingest(self.db, {"source": source, "timestamp": at.isoformat(), "lat": 45.52, "lon": -122.63})
+
+    def test_a_quiet_tracker_is_told_once_and_again_when_back(self):
+        from geologs.services.tracker_alerts import check_quiet_trackers, set_quiet_alert, tracker_notices
+        now = datetime.now(timezone.utc)
+        self.fix_at(now - timedelta(hours=3))
+        set_quiet_alert(self.db, {"source": "owntracks:alex/phone", "hours": 2})
+        quiet = check_quiet_trackers(self.db, now)
+        self.assertEqual([(n["kind"], n["label"], n["hours"]) for n in quiet], [("quiet", "alex/phone (owntracks)", 2)])
+        self.assertEqual(check_quiet_trackers(self.db, now + timedelta(minutes=1)), [])
+        self.fix_at(now + timedelta(minutes=2))
+        back = check_quiet_trackers(self.db, now + timedelta(minutes=3))
+        self.assertEqual([n["kind"] for n in back], ["back"])
+        self.assertEqual([n["kind"] for n in tracker_notices(self.db)], ["quiet", "back"])
+        self.assertEqual(tracker_notices(self.db, quiet[0]["id"]), back)
+
+    def test_an_unwatched_or_recent_tracker_says_nothing(self):
+        from geologs.services.tracker_alerts import check_quiet_trackers, set_quiet_alert
+        now = datetime.now(timezone.utc)
+        self.fix_at(now - timedelta(hours=1))
+        self.fix_at(now - timedelta(days=3), source="generic:old-tablet")
+        set_quiet_alert(self.db, {"source": "owntracks:alex/phone", "hours": 2})
+        self.assertEqual(check_quiet_trackers(self.db, now), [])
+        set_quiet_alert(self.db, {"source": "owntracks:alex/phone", "hours": 0})
+        self.assertEqual(check_quiet_trackers(self.db, now + timedelta(hours=5)), [])
+
+    def test_only_offered_hours_and_known_trackers_can_be_watched(self):
+        from geologs.services.tracker_alerts import set_quiet_alert
+        self.fix_at(datetime.now(timezone.utc))
+        with self.assertRaises(ValueError):
+            set_quiet_alert(self.db, {"source": "owntracks:alex/phone", "hours": 5})
+        with self.assertRaises(ValueError):
+            set_quiet_alert(self.db, {"source": "owntracks:someone-else", "hours": 6})
+
+    def test_the_owner_hears_by_email_and_webhook(self):
+        from geologs.services.tracker_alerts import check_quiet_trackers, set_quiet_alert
+        now = datetime.now(timezone.utc)
+        self.db.users.set_email(1, "alex@example.com")
+        self.db.users.mark_verified(1, now.isoformat())
+        self.db.commit()
+        self.fix_at(now - timedelta(hours=7))
+        set_quiet_alert(self.db, {"source": "owntracks:alex/phone", "hours": 6})
+        env = {"GEOLOGS_PUBLIC_URL": "https://geologs.example.com/", "GEOLOGS_SMTP_HOST": "smtp.example.com",
+               "GEOLOGS_SMTP_FROM": "GeoLogs <geologs@example.com>", "GEOLOGS_WEBHOOK_URL": "https://hooks.example/geologs"}
+        with patch.dict(os.environ, env), patch("geologs.integrations.webhooks.send", return_value="sent") as send:
+            check_quiet_trackers(self.db, now)
+        self.assertEqual(send.call_args.args[1]["type"], "tracker_quiet")
+        self.assertEqual(send.call_args.args[1]["source"], "owntracks:alex/phone")
+        with psycopg.connect(self.url) as raw:
+            to, subject, body = raw.execute("SELECT to_address,subject,body FROM outbox").fetchone()
+        self.assertEqual((to, subject), ("alex@example.com", "alex/phone (owntracks) has gone quiet"))
+        self.assertIn("over 6 hours", body)
+
+
 if __name__ == "__main__":
     unittest.main()
