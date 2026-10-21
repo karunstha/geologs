@@ -123,6 +123,23 @@ export async function refreshAccount() {
   renderAccount();
 }
 
+// Signed out: nothing of the last person's account (their name, sessions, tokens, or a key or recovery
+// codes still on screen) stays on the page for whoever signs in next.
+export function clearAccount() {
+  state.account = null;
+  document.querySelectorAll("#account-view form").forEach((form) => form.reset());
+  $("account-email").textContent = "—";
+  for (const id of ["account-email-state", "account-2fa-state", "account-sessions", "account-tokens"]) $(id).innerHTML = "";
+  for (const id of ["account-2fa-codes", "account-token-reveal"]) {
+    $(id).hidden = true;
+    $(id).innerHTML = "";
+  }
+  $("account-2fa-secret").value = "";
+  $("account-2fa-link").removeAttribute("href");
+  $("account-2fa-setup").hidden = true;
+  $("account-email-change").open = false;
+}
+
 export function showAccount() {
   showView("account");
   refreshAccount().catch((error) => toast(error.message));

@@ -3,7 +3,7 @@
 import { refreshAll } from "../app/refresh.js";
 import { $, toast } from "../core/dom.js";
 import { state } from "../core/state.js";
-import { showAccount } from "./account.js";
+import { clearAccount, refreshAccount, showAccount } from "./account.js";
 
 let mode = "signin";
 let linkToken = null; // a reset or invite token, kept only in memory once read from the address bar
@@ -62,6 +62,8 @@ async function signedIn(user) {
   state.authDismissed = false;
   hide();
   await refreshAll();
+  // Signed out from the account page, a new sign-in lands back on it: show this person's account.
+  if ($("account-view").classList.contains("active")) await refreshAccount().catch((failure) => toast(failure.message));
 }
 
 function error(name, message) {
@@ -114,6 +116,7 @@ export async function initAuth() {
     // is what this visit is for, stays open).
     if (!$("auth-panel").hidden) return;
     state.user = null;
+    clearAccount();
     let preferred = "signin";
     try {
       preferred = localStorage.getItem("geologs-sign-in") === "token" && options.token ? "token" : "signin";

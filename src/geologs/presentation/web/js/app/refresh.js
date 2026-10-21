@@ -8,7 +8,7 @@ import { refreshExplore, renderCurrent } from "../views/history.js";
 import { refreshInsights } from "../views/patterns.js";
 import { renderPlaces } from "../views/places.js";
 import { renderReminders } from "../views/reminders.js";
-import { renderSettings } from "../views/settings.js";
+import { renderSettings, showSettingsPage } from "../views/settings.js";
 import { setSunPosition } from "../ui/theme.js";
 
 export async function refreshMeta() {
@@ -39,6 +39,9 @@ function showUser() {
   const admin = !!(user && user.role === "admin");
   document.querySelector('.settings-group[data-group="admin"]').hidden = !admin;
   document.querySelector('[data-settings-group="admin"]').hidden = !admin;
+  // An Admin page the last person left open closes for someone who is not an admin.
+  const page = document.querySelector(".settings-section:not([hidden])");
+  if (page && !admin) showSettingsPage(page.id);
   $("access-browser").textContent = user
     ? `Signed in as ${user.email || user.name || "the owner"}.`
     : "Not signed in.";
