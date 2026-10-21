@@ -26,8 +26,6 @@ Your history stays in a PostgreSQL database that you run. Nothing is sent to any
 | ![Summaries: a month at a glance](docs/images/summaries.png) | ![Places: where you spend your time](docs/images/places.png) |
 | **Summaries**: a month with its towns, calendar and places | **Places**: a heat map of where you go, beside your visits |
 
-![Settings, Admin: accounts and their usage, never their locations](docs/images/admin.png)
-
 *The screenshots show made-up data for a fictional person.*
 
 ## Quick start

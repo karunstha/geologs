@@ -109,8 +109,10 @@ async function openLink() {
 
 export async function initAuth() {
   document.addEventListener("geologs:sign-in", (event) => {
-    // A reset or invite form stays open: it is what this visit is for.
-    if (!$("auth-panel").hidden && (mode === "reset" || mode === "invite")) return;
+    // Background polls ask again every few seconds while signed out; a sign-in screen already open is
+    // left as it is, so the cursor stays where the person is typing (and a reset or invite form, which
+    // is what this visit is for, stays open).
+    if (!$("auth-panel").hidden) return;
     state.user = null;
     let preferred = "signin";
     try {
