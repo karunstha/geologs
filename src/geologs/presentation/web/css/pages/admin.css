@@ -78,6 +78,7 @@
 }
 .admin-server {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 22px;
 }
 .admin-section h3 {
@@ -165,7 +166,7 @@
   .admin-invite-form,
   .segmented-choice,
   .admin-columns {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 /* Lists scroll when long elsewhere; here a row's menu must be free to open past the list. */

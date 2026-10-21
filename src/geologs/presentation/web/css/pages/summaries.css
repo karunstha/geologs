@@ -460,14 +460,14 @@
 }
 .summary-lower-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 .summary-lower-grid > .summary-content-section:first-child {
   border-right: 1px solid var(--border);
 }
 /* Without reminder activity, Places has the row to itself. */
 .summary-lower-grid.single {
-  grid-template-columns: 1fr;
+  grid-template-columns: minmax(0, 1fr);
 }
 .summary-lower-grid.single > .summary-content-section:first-child {
   border-right: 0;
@@ -720,7 +720,7 @@
 }
 @media (max-width: 1100px) {
   .summary-lower-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
   .summary-lower-grid > .summary-content-section:first-child {
     border-right: 0;
@@ -729,7 +729,7 @@
 @media (max-width: 900px) {
   .reminders-layout,
   .summaries-layout {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
   .summary-index {
     position: static;
@@ -762,11 +762,11 @@
     margin: 16px 20px 0;
   }
   .summary-facts {
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     padding: 16px 20px 6px;
   }
   .summary-secondary-facts {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     padding: 6px 20px 18px;
   }
   .summary-secondary-facts > div,
@@ -789,7 +789,7 @@
     padding: 18px 20px;
   }
   .summary-timeline-card {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
   .summary-event-time {
     grid-row: auto;
@@ -813,7 +813,7 @@
     margin-left: 0;
   }
   .summary-missing {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     justify-items: start;
     padding: 28px 20px;
   }

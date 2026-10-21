@@ -56,6 +56,6 @@
     width: auto;
   }
   .account-form .form-pair {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 }

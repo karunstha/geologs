@@ -209,7 +209,7 @@ main {
     z-index: 600;
     display: grid;
     /* One column per visible item: five, or six with Admin. */
-    grid-auto-columns: 1fr;
+    grid-auto-columns: minmax(0, 1fr);
     grid-auto-flow: column;
     gap: 0;
     padding: 6px 6px calc(6px + env(safe-area-inset-bottom));
@@ -221,6 +221,7 @@ main {
   .nav {
     flex-direction: column;
     justify-content: center;
+    min-width: 0;
     gap: 3px;
     height: 52px;
     padding: 0;
@@ -231,12 +232,26 @@ main {
     width: 22px;
     height: 22px;
   }
+  .nav > span:not(.tab-count) {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
   .nav.active {
     background: none;
     color: var(--accent-text);
   }
   .nav:hover {
     background: none;
+  }
+  @media (max-width: 360px) {
+    .main-nav {
+      padding-inline: 2px;
+    }
+    .nav {
+      font-size: 10px;
+      letter-spacing: -0.01em;
+    }
   }
   main {
     padding: 20px 16px calc(96px + env(safe-area-inset-bottom));

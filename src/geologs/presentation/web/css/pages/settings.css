@@ -276,7 +276,7 @@
 }
 @media (max-width: 900px) {
   .settings-layout {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     gap: 16px;
   }
   .settings-nav {
@@ -294,6 +294,7 @@
   }
   .settings-cats button {
     flex: 1;
+    min-width: 0;
     justify-content: center;
   }
   .settings-group {
@@ -331,7 +332,7 @@
   }
   .setting-row,
   .setting-row.static {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     gap: 10px;
   }
   .copy-field {
@@ -774,7 +775,7 @@
 }
 @media (max-width: 760px) {
   .fuel-stats {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 
