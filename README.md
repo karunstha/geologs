@@ -1,4 +1,4 @@
-<img src="docs/images/icon.svg" width="64" height="64" alt="">
+![](docs/images/icon.svg)
 
 # GeoLogs
 
@@ -26,7 +26,7 @@ Your history stays in a PostgreSQL database that you run. Nothing is sent to any
 | ![Summaries: a month at a glance](docs/images/summaries.png) | ![Places: where you spend your time](docs/images/places.png) |
 | **Summaries**: a month with its towns, calendar and places | **Places**: a heat map of where you go, beside your visits |
 
-![Admin: accounts and their usage, never their locations](docs/images/admin.png)
+![Settings, Admin: accounts and their usage, never their locations](docs/images/admin.png)
 
 *The screenshots show made-up data for a fictional person.*
 
@@ -46,7 +46,7 @@ Edit `.env` and set three secrets to long random values (`openssl rand -base64 3
 docker compose up --build -d
 ```
 
-Open <http://127.0.0.1:8765>, choose **Sign in with the server's access token**, and enter `GEOLOGS_TOKEN`. Open the account button at the top right to add your email and a password, so you can sign in without the token from then on.
+Open [http://127.0.0.1:8765](http://127.0.0.1:8765), choose **Sign in with the server's access token**, and enter `GEOLOGS_TOKEN`. Open the account button at the top right to add your email and a password, so you can sign in without the token from then on.
 
 ## Connect a phone
 
@@ -73,18 +73,45 @@ The assistant can read your history, search visits, and manage reminders, as you
 
 ## Documentation
 
-| | |
-| --- | --- |
-| [Deploying](docs/deploying.md) | Docker Compose, running without Docker, HTTPS and reverse proxies, backups, updating |
-| [Configuration](docs/configuration.md) | Every setting |
-| [Connecting trackers](docs/trackers.md) | Phone apps, Home Assistant, imports, device tokens |
-| [Accounts](docs/accounts.md) | Users, invites, email, two-factor sign-in, the admin portal |
-| [How GeoLogs works](docs/how-it-works.md) | Stays, trips, places, reminders, geocoding, fuel costs |
-| [MCP and the API](docs/mcp-and-api.md) | Assistants, the REST API, reminder webhooks |
-| [Privacy](docs/privacy.md) | Who can see what, and what leaves your server |
-| [Upgrading](docs/upgrading.md) | Steps for versions that need more than a restart |
-| [Architecture](docs/architecture.md) | How the code is organised |
-| [Development](docs/development.md) | Setting up, running the tests |
+[Deploying](docs/deploying.md)
+
+Docker Compose, running without Docker, HTTPS and reverse proxies, backups, updating
+
+[Configuration](docs/configuration.md)
+
+Every setting
+
+[Connecting trackers](docs/trackers.md)
+
+Phone apps, Home Assistant, imports, device tokens
+
+[Accounts](docs/accounts.md)
+
+Users, invites, email, two-factor sign-in, the admin portal
+
+[How GeoLogs works](docs/how-it-works.md)
+
+Stays, trips, places, reminders, geocoding, fuel costs
+
+[MCP and the API](docs/mcp-and-api.md)
+
+Assistants, the REST API, reminder webhooks
+
+[Privacy](docs/privacy.md)
+
+Who can see what, and what leaves your server
+
+[Upgrading](docs/upgrading.md)
+
+Steps for versions that need more than a restart
+
+[Architecture](docs/architecture.md)
+
+How the code is organised
+
+[Development](docs/development.md)
+
+Setting up, running the tests
 
 ## Contributing
 
