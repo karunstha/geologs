@@ -142,8 +142,14 @@ export function centerOn(latlng, zoom) {
   if (coveredRight) map.panBy([coveredRight / 2, 0], { animate: false });
 }
 
+// The new Home fits the day around its own cards; it returns true when it has done so.
+let dayFitter = null;
+export function setDayFitter(fit) {
+  dayFitter = fit;
+}
+
 export function fitDay() {
-  if (!map) return;
+  if (!map || dayFitter?.()) return;
   const bounds = dayBounds();
   if (bounds.length) map.fitBounds(L.latLngBounds(bounds).pad(0.12), clear({ maxZoom: 15 }));
   else if (state.places.length)

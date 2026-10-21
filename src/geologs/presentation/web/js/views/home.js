@@ -16,7 +16,7 @@ import {
   zonedMidnight,
 } from "../core/format.js";
 import { state } from "../core/state.js";
-import { dayBounds, drawSelection, map, selectItem, setCoveredRight, tripKey } from "../map/map.js";
+import { dayBounds, drawSelection, map, selectItem, setCoveredRight, setDayFitter, tripKey } from "../map/map.js";
 import { modeIcon, modeInfo, placeIcon, visitNumbers } from "../ui/icons.js";
 import { moveDay } from "./history.js";
 import { showView } from "./shell.js";
@@ -54,6 +54,10 @@ let styleReady = false;
 // null until the first setExploring, so that call always sets everything up.
 let exploring = null;
 let fittedKey = null;
+// Whether a fit is waiting for the zoom animation in progress to end.
+let fitWaiting = false;
+// Room past the outermost path or pin, so pins and their numbers stay clear of the cards and edges.
+const PIN_ROOM = 48;
 
 // "1h 05m" rather than "1 h 5 min": the glance cards' numbers are large.
 function shortDuration(minutes) {
@@ -289,18 +293,30 @@ function updateCover() {
 // Fit the day to the part of the map the cards and the timeline leave clear.
 function restFit() {
   if (!map || $("home-hero").hidden) return;
+  // Leaflet ignores a new view while a zoom is still animating, so a quick change of day would keep
+  // the last day's view: fit again once that zoom ends.
+  if (map._animatingZoom) {
+    if (!fitWaiting) {
+      fitWaiting = true;
+      map.once("zoomend", () => {
+        fitWaiting = false;
+        restFit();
+      });
+    }
+    return;
+  }
   const cover = updateCover();
   const bounds = dayBounds();
   if (!bounds.length) return;
-  let left = 40,
-    right = cover ? cover + 28 : 40,
-    top = exploring ? 70 : 56,
-    bottom = exploring ? 70 : 36;
+  let left = PIN_ROOM,
+    right = cover ? cover + PIN_ROOM : PIN_ROOM,
+    top = exploring ? 70 + PIN_ROOM : 56 + PIN_ROOM,
+    bottom = exploring ? 70 : 36 + PIN_ROOM / 2;
   const box = $("map").getBoundingClientRect();
   if (!exploring && matchMedia("(min-width: 901px)").matches && !$("home-glance").hidden) {
-    left = document.querySelector(".home-stack").getBoundingClientRect().right - box.left + 28;
-    right = box.right - $("home-brief").getBoundingClientRect().left + 28;
-    if (box.width - left - right < 160) left = right = 40;
+    left = document.querySelector(".home-stack").getBoundingClientRect().right - box.left + PIN_ROOM;
+    right = box.right - $("home-brief").getBoundingClientRect().left + PIN_ROOM;
+    if (box.width - left - right < 160) left = right = PIN_ROOM;
   }
   map.fitBounds(L.latLngBounds(bounds), { paddingTopLeft: [left, top], paddingBottomRight: [right, bottom], maxZoom: 15, duration: 0.7 });
 }
@@ -379,17 +395,21 @@ function useGreyMap() {
     const fallback = setTimeout(useTiles, 15000);
     glMap.once("load", () => clearTimeout(fallback));
     glMap.on("style.load", styleMap);
-    // Safari drops a WebGL context when the GPU is short of memory, and MapLibre does not draw again
-    // after it: start a fresh map instead, and after a few losses settle for the plain tiles.
+    // Safari drops a WebGL context when the GPU is short of memory. MapLibre redraws once the context is
+    // restored, but with the tiles' buffers from the lost one ("object does not belong to this
+    // context"), so start a fresh map at once, before any restore, and after a few losses settle for
+    // the plain tiles.
+    const replace = () => {
+      if (layer !== current) return;
+      unmount();
+      if (++losses > 3) useTiles();
+      else mount();
+    };
     glMap.on("webglcontextlost", () => {
       clearTimeout(fallback);
-      setTimeout(() => {
-        if (layer !== current) return;
-        unmount();
-        if (++losses > 3) useTiles();
-        else mount();
-      }, 250);
+      setTimeout(replace);
     });
+    glMap.on("webglcontextrestored", replace);
   };
   mount();
   if (tiles) map.removeLayer(tiles);
@@ -479,6 +499,13 @@ export function initHome() {
     if (state.selected && !exploring && $("home-view").classList.contains("active")) setExploring(true);
   }).observe($("day-timeline"), { subtree: true, attributes: true, attributeFilter: ["class"] });
   useGreyMap();
+  // The classic fit knows nothing of the cards, and run first it starts a zoom that would swallow this
+  // page's own fit; on Home, this page fits the day instead.
+  setDayFitter(() => {
+    if (!$("home-view").classList.contains("active") || $("home-hero").hidden) return false;
+    restFit();
+    return true;
+  });
   // Popups keep clear of the map's faded edge and the bar over its top while exploring.
   L.Popup.prototype.options.autoPanPaddingTopLeft = L.point(30, 100);
   L.Popup.prototype.options.autoPanPaddingBottomRight = L.point(30, 56);
