@@ -31,8 +31,20 @@ def export_backup(db, out):
                                "exported_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}) + "\n")
         for table, names in TABLES.items():
             text.write(json.dumps({"table": table, "columns": names.split()}) + "\n")
-            for row in db.backup.table_rows(table):
+            rows = db.backup.table_rows(table)
+            for row in _with_timezone(db, rows) if table == "app_settings" else rows:
                 text.write(json.dumps(row, separators=(",", ":")) + "\n")
+
+
+def _with_timezone(db, rows):
+    """The settings, with the timezone in use even when it was never saved (the server's
+    GEOLOGS_TIMEZONE): another server's default would move every day's bounds."""
+    saved = False
+    for key, value in rows:
+        saved = saved or key == "timezone"
+        yield [key, value]
+    if not saved:
+        yield ["timezone", json.dumps(db.settings.get()["timezone"])]
 
 
 def _sections(stream):

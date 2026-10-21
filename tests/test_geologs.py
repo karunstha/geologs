@@ -4487,6 +4487,33 @@ class ImportExportTests(unittest.TestCase):
         # It describes this server, so a backup leaves it out.
         self.assertNotIn("last_import", [row[0] for row in self.db.backup.table_rows("app_settings")])
 
+    def test_exports_are_timed_in_the_archives_timezone_and_import_as_the_same_instant(self):
+        from geologs.services.imports import import_file
+        from geologs.services.samples import export_csv, export_geojson
+        save_settings(self.db, {"timezone": "America/Chicago"})
+        ingest(self.db, {"source": "phone", "timestamp": "2026-09-01T03:30:00Z", "lat": 41.88, "lon": -87.63})
+        row = export_csv(self.db).splitlines()[1]
+        self.assertTrue(row.startswith("2026-08-31T22:30:00-05:00,41.88,-87.63"), row)  # the evening before, as the app shows it
+        feature = export_geojson(self.db)["features"][0]
+        self.assertEqual(feature["properties"]["timestamp"], "2026-08-31T22:30:00-05:00")
+        self.assertEqual(import_file(self.db, self.file(export_csv(self.db)), "phone")["duplicates"], 1)
+        self.assertEqual(import_file(self.db, self.file(export_geojson(self.db)), "phone")["duplicates"], 1)
+
+    def test_a_backup_carries_the_timezone_even_when_it_came_from_the_servers_default(self):
+        from geologs.services.backup import export_backup
+        from geologs.services.imports import import_file
+        ingest(self.db, {"source": "phone", "timestamp": "2026-09-01T03:30:00Z", "lat": 41.88, "lon": -87.63})
+        path = Path(self.tmp.name) / "backup.json.gz"
+        with patch("geologs.config.default_timezone", return_value="America/Chicago"):
+            self.assertEqual(self.db.settings.value("timezone"), None)  # never saved here
+            with open(path, "wb") as out:
+                export_backup(self.db, out)
+        other = open_database(scratch_database(self))
+        self.addCleanup(other.close)
+        import_file(other, str(path))
+        self.assertEqual(other.settings.get()["timezone"], "America/Chicago")
+        self.assertEqual(other.points.observations(limit=None)[0]["timestamp"], "2026-09-01T03:30:00+00:00")
+
     def test_a_file_of_another_kind_is_refused_plainly(self):
         from geologs.services.imports import import_file
         with self.assertRaisesRegex(ValueError, "isn't a CSV"):

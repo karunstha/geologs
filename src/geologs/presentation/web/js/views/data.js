@@ -4,7 +4,7 @@
 import { refreshAll } from "../app/refresh.js";
 import { api } from "../core/api.js";
 import { $, safe, toast } from "../core/dom.js";
-import { shiftDateKey, zonedMidnight } from "../core/format.js";
+import { localDateKey, shiftDateKey, zonedMidnight } from "../core/format.js";
 
 let polling = 0;
 
@@ -124,7 +124,7 @@ export function initData() {
   $("backup-go").onclick = async () => {
     $("backup-go").disabled = true;
     try {
-      await download("/api/backup", `geologs-backup-${new Date().toISOString().slice(0, 10)}.json.gz`);
+      await download("/api/backup", `geologs-backup-${localDateKey()}.json.gz`);
     } catch (error) {
       toast(error.message);
     } finally {

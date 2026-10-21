@@ -16,6 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+from zoneinfo import ZoneInfo
 
 from .. import config
 from ..domain.access import token_allows_source
@@ -115,7 +116,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "application/gzip")
             self.send_header("Content-Length", str(length))
-            self.send_header("Content-Disposition", f'attachment; filename="geologs-backup-{datetime.now(timezone.utc):%Y-%m-%d}.json.gz"')
+            today = datetime.now(ZoneInfo(db.settings.get()["timezone"])).date()
+            self.send_header("Content-Disposition", f'attachment; filename="geologs-backup-{today}.json.gz"')
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.end_headers()

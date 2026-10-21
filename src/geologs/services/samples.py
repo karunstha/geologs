@@ -162,9 +162,23 @@ def near(db, lat, lon, radius_m=250, start=None, end=None, limit=100, source=Non
     return db.points.near(lat, lon, radius_m, start, end, limit, source)
 
 
+def _local(timestamp, zone):
+    """A stored UTC time in the archive's timezone, with its offset: the hour the app shows, and
+    the same instant when imported again."""
+    return datetime.fromisoformat(timestamp).astimezone(zone).isoformat(timespec="auto") if timestamp else timestamp
+
+
 @use_case
 def export_geojson(db, start=None, end=None):
-    return {"type": "FeatureCollection", "features": [{"type": "Feature", "geometry": {"type": "Point", "coordinates": [p["lon"], p["lat"]]}, "properties": {k: v for k, v in p.items() if k not in ("lat", "lon")}} for p in db.points.observations(start, end, limit=None)]}
+    """Every fix in the range as GeoJSON points, oldest first, timed in the archive's timezone."""
+    zone = ZoneInfo(db.settings.get()["timezone"])
+    features = []
+    for point in reversed(db.points.observations(start, end, limit=None)):
+        properties = {k: v for k, v in point.items() if k not in ("lat", "lon")}
+        properties["timestamp"], properties["received_at"] = _local(point["timestamp"], zone), _local(point["received_at"], zone)
+        features.append({"type": "Feature", "geometry": {"type": "Point", "coordinates": [point["lon"], point["lat"]]},
+                         "properties": properties})
+    return {"type": "FeatureCollection", "features": features}
 
 
 # The columns import_csv reads back, so an export can be imported again; source says which tracker.
@@ -173,11 +187,13 @@ CSV_COLUMNS = ("timestamp", "lat", "lon", "accuracy_m", "speed_mps", "source")
 
 @use_case
 def export_csv(db, start=None, end=None):
-    """Every fix in the range as CSV, oldest first."""
+    """Every fix in the range as CSV, oldest first, timed in the archive's timezone."""
+    zone = ZoneInfo(db.settings.get()["timezone"])
     out = io.StringIO()
     writer = csv.writer(out, lineterminator="\n")
     writer.writerow(CSV_COLUMNS)
     for point in reversed(db.points.observations(start, end, limit=None)):
+        point = {**point, "timestamp": _local(point["timestamp"], zone)}
         writer.writerow(["" if point[column] is None else point[column] for column in CSV_COLUMNS])
     return out.getvalue()
 
