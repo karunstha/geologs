@@ -62,6 +62,12 @@ docker compose exec -T db pg_dump -U geologs -d geologs -Fc > geologs-$(date +%F
 
 Keep `.env` too: without it a restored database has no passwords to log in with. Restore with `pg_restore` into an empty database. Every account's data is in the one database, so one dump covers everyone.
 
+### Moving one account to another server
+
+A full backup clones one person's archive onto another GeoLogs server, even one that already has other accounts. **Settings → Import & export → Download backup** (or `geologs backup FILE [--user EMAIL]`) writes a gzipped file holding every location and what was made of them by hand: saved places and place names, corrections to stays and travel modes, excluded and learned routes, reminders and what they fired, daily summaries, settings, and the device and API tokens. Make your account on the new server and import the file there (in the browser, or `geologs import FILE [--user EMAIL]`). The tokens come along, so phones and MCP clients keep working once they point at the new address.
+
+The account itself does not move: its password, two-step sign-in and sessions stay on the old server. Stays are found again from the locations after the import, which takes a while for years of history. What is already on the new server is kept, so a phone that started sending there first loses nothing, and importing the same backup twice adds nothing.
+
 ## Updating
 
 Pull the new code, rebuild, and restart:

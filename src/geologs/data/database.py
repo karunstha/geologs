@@ -11,6 +11,7 @@ from contextlib import contextmanager
 
 from .. import config
 from .admin import AdminRepository
+from .backup import BackupRepository
 from .caches import CachesRepository
 from .corrections import CorrectionsRepository
 from .devices import DevicesRepository
@@ -96,6 +97,7 @@ class Database:
         self.users = UsersRepository(self)
         self.outbox = OutboxRepository(self)
         self.admin = AdminRepository(self)
+        self.backup = BackupRepository(self)
         self.as_user(user_id)
 
     def as_user(self, user_id):

@@ -43,10 +43,12 @@ Required fields: `lat`, `lon`. Use a timezone-aware ISO 8601 `timestamp` and sta
 **Settings → Import & export** takes a file in the browser and imports it on the server while you wait (or leave: the page picks the import up again when you come back). It tells the kind of file apart by its contents:
 
 -   **CSV** with `timestamp,lat,lon` and optional `accuracy_m,speed_mps,external_id` columns. GeoLogs' own CSV export is one, so an export imports again.
+-   **GeoJSON** `FeatureCollection`s of points with a `timestamp` (or `time`) property, and optional `accuracy_m`, `speed_mps` and `external_id`, as GeoLogs' GeoJSON export writes them; lines with `coordTimes`, as GPX-to-GeoJSON converters write them, come in point by point. Other features are skipped.
 -   **Google Takeout's `Records.json`** (classic Location History).
+-   **A GeoLogs full backup**, to move an archive to another server: see [Moving one account to another server](deploying.md#moving-one-account-to-another-server). It keeps its own tracker names.
 -   **Google Timeline exports**: Takeout's monthly Semantic Location History files (`timelineObjects`), and the file a phone exports since Timeline moved onto phones in 2024 (Android's `semanticSegments` and `rawSignals`, or iOS's list of segments). Raw signals and recorded paths come in as they are. A visit becomes a fix at its place every 30 minutes from arrival to departure, so it shows as a stay; a trip contributes its two ends.
 
-Files of up to 1 GB are read as streams, never whole. Each kind goes under its own tracker name (`csv`, `google_takeout`, `google_timeline`) unless you give one. From the command line, `geologs import FILE [--source NAME]` does the same:
+Files of up to 1 GB, gzipped or not, are read as streams, never whole. Once the upload is done, the import runs on the server: closing or reloading the page does not stop it, and the page shows how it is going when you come back. If the server restarts mid-import, the page says it was cut short; import the same file again, and what already came in is recognised while the rest is added and its stays are found. When the same locations are also under another tracker name (an earlier import of part of the history, filed as `csv`, say), the result says so, so you can remove that tracker in **Settings → Devices**. Each kind goes under its own tracker name (`csv`, `geojson`, `google_takeout`, `google_timeline`) unless you give one. From the command line, `geologs import FILE [--source NAME]` does the same:
 
 ```bash
 docker compose exec app geologs import /data/Timeline.json --source old-phone

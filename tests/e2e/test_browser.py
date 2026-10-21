@@ -296,6 +296,16 @@ class DataTest(BrowserTest):
         self.assertIn("2 new locations", self.page.text_content("#import-status"))
         self.assertIn("old-gps", self.page.text_content("#import-status"))
 
+    def test_a_full_backup_downloads_and_imports_back_as_already_here(self):
+        with self.page.expect_download() as download:
+            self.page.click("#backup-go")
+        self.assertRegex(download.value.suggested_filename, r"^geologs-backup-\d{4}-\d\d-\d\d\.json\.gz$")
+        self.page.set_input_files("#import-file", download.value.path())
+        self.page.click("#import-go")
+        self.page.wait_for_function("document.getElementById('import-status').textContent.includes('Restored')", timeout=60000)
+        self.assertIn("0 new locations", self.page.text_content("#import-status"))
+        self.assertIn("already here", self.page.text_content("#import-status"))
+
 
 class QuietTrackerTest(BrowserTest):
     def test_a_tracker_can_be_watched_from_its_row(self):

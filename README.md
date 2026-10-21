@@ -8,7 +8,7 @@ Your history stays in a PostgreSQL database that you run. Nothing is sent to any
 
 ## What it does
 
--   **Collects locations** from the apps you may already use: [OwnTracks](https://owntracks.org/), [Overland](https://github.com/aaronpk/Overland-iOS), Traccar Client, OsmAnd, GPSLogger, Home Assistant, or any script that can send an HTTP request. Import a CSV, Google Takeout's `Records.json`, or Google's newer Timeline export from your phone, right in the browser; export everything as CSV, GPX or GeoJSON.
+-   **Collects locations** from the apps you may already use: [OwnTracks](https://owntracks.org/), [Overland](https://github.com/aaronpk/Overland-iOS), Traccar Client, OsmAnd, GPSLogger, Home Assistant, or any script that can send an HTTP request. Import a CSV or GeoJSON file, Google Takeout's `Records.json`, or Google's newer Timeline export from your phone, right in the browser; export everything as CSV, GPX or GeoJSON, or as a full backup that clones your archive onto another server.
 -   **Understands the day.** It finds stays (sitting still, or moving around one place, such as a lake loop), the trips between them, and how you travelled: walking, running, cycling or driving. It shows each day with a map, a timeline, speed while driving, and the places you visited.
 -   **Names places.** Save your own, or let a provider (Geoapify, Mapbox or your own Photon) name visits. Search your history: "what day did I go to Costco?".
 -   **Reminds you on arrival.** "Remind me to buy salt when I get to the supermarket" fires when your phone arrives, as a browser notification or a webhook.

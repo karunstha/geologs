@@ -7,6 +7,10 @@ from .. import config
 from ..domain.settings import DEFAULT_SETTINGS
 from .repository import Repository
 
+# How this person's latest import went, kept beside the settings so a restart can tell it was
+# cut short. It describes this server, so a backup leaves it out.
+IMPORT_STATUS_KEY = "last_import"
+
 
 class SettingsRepository(Repository):
     def get(self):

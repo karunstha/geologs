@@ -404,16 +404,20 @@
           <section id="settings-data" class="settings-section" aria-labelledby="data-title" hidden>
             <div class="section-intro"><h2 id="data-title">Import &amp; export</h2><p>Bring in history from another app, or take yours with you.</p></div>
             <div class="card">
-              <div class="card-head"><div><h3>Export</h3><p>Every location you recorded in these days, oldest first. Leave the dates empty for all of them. A CSV can be imported again.</p></div></div>
+              <div class="card-head"><div><h3>Export</h3><p>Every location you recorded in these days, oldest first. Leave the dates empty for all of them. A CSV or GeoJSON file can be imported again.</p></div></div>
               <form id="export-form" class="data-form">
                 <div class="form-pair"><label class="field"><span>From</span><input id="export-start" class="input" type="date"></label><label class="field"><span>To</span><input id="export-end" class="input" type="date"></label></div>
                 <div class="data-actions"><button type="submit" class="button primary" data-export="csv">Download CSV</button><button type="submit" class="button secondary" data-export="gpx">GPX</button><button type="submit" class="button secondary" data-export="geojson">GeoJSON</button></div>
               </form>
             </div>
             <div class="card">
-              <div class="card-head"><div><h3>Import</h3><p>A CSV with timestamp, lat and lon columns; Google Takeout's Records.json or Semantic Location History; or the Timeline file your phone exports (its Timeline settings → Export Timeline data). Locations already here are recognised, so importing a file twice is safe.</p></div></div>
+              <div class="card-head"><div><h3>Full backup</h3><p>Your whole archive, to move it to another GeoLogs server: every location, saved places and their names, your corrections to stays and travel modes, learned routes, reminders, daily summaries, settings, and the tokens your phones and apps send with, so they keep working once pointed at the new address. Your password and two-step sign-in stay here: make your account on the new server, then import this file there.</p></div></div>
+              <div class="data-actions"><button id="backup-go" type="button" class="button secondary">Download backup</button></div>
+            </div>
+            <div class="card">
+              <div class="card-head"><div><h3>Import</h3><p>A CSV with timestamp, lat and lon columns; a GeoJSON file of timed points; Google Takeout's Records.json or Semantic Location History; the Timeline file your phone exports (its Timeline settings → Export Timeline data); or a GeoLogs full backup, which keeps its own tracker names. Locations already here are recognised, so importing a file twice is safe.</p></div></div>
               <form id="import-form" class="data-form">
-                <div class="form-pair"><label class="field"><span>File</span><input id="import-file" class="input" type="file" accept=".csv,.json,text/csv,application/json" required></label><label class="field"><span>File it under</span><input id="import-source" class="input" maxlength="80" placeholder="Automatic" autocomplete="off"></label></div>
+                <div class="form-pair"><label class="field"><span>File</span><input id="import-file" class="input" type="file" accept=".csv,.json,.geojson,.gz,text/csv,application/json,application/geo+json,application/gzip" required></label><label class="field"><span>File it under</span><input id="import-source" class="input" maxlength="80" placeholder="Automatic" autocomplete="off"></label></div>
                 <div class="data-actions"><button id="import-go" class="button primary">Import</button></div>
               </form>
               <div id="import-status" class="callout" role="status" hidden></div>

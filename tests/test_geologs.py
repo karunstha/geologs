@@ -4311,8 +4311,13 @@ SEMANTIC_HISTORY = {"timelineObjects": [
 ]}
 
 
+def csv_rows(text):
+    import csv
+    return list(csv.DictReader(io.StringIO(text)))
+
+
 class ImportExportTests(unittest.TestCase):
-    """Taking your history out (CSV, GPX) and bringing it in from Google's exports, told apart by content."""
+    """Taking your history out (CSV, GPX, GeoJSON) and bringing it in from Google's exports, told apart by content."""
 
     def setUp(self):
         self.url = scratch_database(self)
@@ -4337,10 +4342,28 @@ class ImportExportTests(unittest.TestCase):
         self.assertEqual(len(exported.splitlines()), 4)
         result = import_file(self.db, self.file(exported), "restored")
         self.assertEqual((result["format"], result["source"], result["inserted"]), ("csv", "restored", 3))
+        self.assertEqual(result["overlaps"], {"owntracks:alex/phone": 3})
         gpx = export_gpx(self.db, "2026-09-01T10:01:00Z")
         self.assertEqual(gpx.count("<trkpt"), 4)  # two fixes from each tracker since 10:01
         self.assertIn("<name>owntracks:alex/phone</name>", gpx)
         self.assertIn('<trkpt lat="45.521" lon="-122.63"><time>2026-09-01T10:01:00Z</time></trkpt>', gpx)
+
+    def test_a_geojson_export_imports_again_and_lines_with_times_do_too(self):
+        from geologs.services.imports import import_file
+        from geologs.services.samples import export_geojson
+        for minute in range(3):
+            ingest(self.db, {"source": "owntracks:alex/phone", "timestamp": f"2026-09-01T10:0{minute}:00Z",
+                             "lat": 45.52 + minute / 1000, "lon": -122.63, "accuracy_m": 8})
+        result = import_file(self.db, self.file(export_geojson(self.db)), "restored")
+        self.assertEqual((result["format"], result["source"], result["inserted"], result["skipped"]), ("geojson", "restored", 3, 0))
+        restored = [p for p in self.db.points.observations(limit=None) if p["source"] == "restored"]
+        self.assertEqual({p["accuracy_m"] for p in restored}, {8})
+        converted = {"type": "FeatureCollection", "features": [
+            {"type": "Feature", "geometry": {"type": "LineString", "coordinates": [[-122.6, 45.5], [-122.61, 45.51]]},
+             "properties": {"coordTimes": ["2026-09-02T08:00:00Z", "2026-09-02T08:05:00Z"]}},
+            {"type": "Feature", "geometry": {"type": "Polygon", "coordinates": []}, "properties": {}}]}
+        result = import_file(self.db, self.file(converted))
+        self.assertEqual((result["source"], result["inserted"], result["skipped"]), ("geojson", 2, 1))
 
     def test_the_phone_timeline_export_imports_its_signals_paths_and_visits(self):
         from geologs.services.imports import import_file
@@ -4361,6 +4384,109 @@ class ImportExportTests(unittest.TestCase):
         semantic = import_file(self.db, self.file(SEMANTIC_HISTORY), "history")
         self.assertEqual((semantic["format"], semantic["inserted"]), ("timeline (semantic)", 5))
 
+    def test_a_full_backup_clones_the_archive_onto_another_server(self):
+        from geologs.services import accounts
+        from geologs.services.backup import export_backup
+        from geologs.services.devices import ingest_token_for
+        from geologs.services.imports import import_file
+        # An hour at the market, then a drive away: one stay, and a trip.
+        for minute in range(0, 60, 2):
+            ingest(self.db, {"source": "phone", "timestamp": f"2026-09-01T10:{minute:02d}:00Z", "lat": 45.52, "lon": -122.63, "accuracy_m": 8})
+        for step in range(1, 6):
+            ingest(self.db, {"source": "phone", "timestamp": f"2026-09-01T11:0{step}:00Z",
+                             "lat": 45.52 + step / 200, "lon": -122.63, "accuracy_m": 8, "speed_mps": 15})
+        place = save_place(self.db, {"name": "Market", "lat": 45.52, "lon": -122.63, "radius_m": 120})
+        create_reminder(self.db, {"text": "Buy salt", "place_id": place["id"]})
+        save_settings(self.db, {"timezone": "America/Los_Angeles"})
+        save_mode_override(self.db, {"source": "phone", "mode": "transit",
+                                     "started_at": "2026-09-01T11:00:00Z", "ended_at": "2026-09-01T11:05:00Z"})
+        save_stay_edit(self.db, {"source": "phone", "action": "remove",
+                                 "started_at": "2026-09-01T10:20:00Z", "ended_at": "2026-09-01T10:30:00Z"})
+        token = create_ingest_token(self.db, {"name": "Phone"})
+        path = Path(self.tmp.name) / "backup.json.gz"
+        with open(path, "wb") as out:
+            export_backup(self.db, out)
+
+        # The new server already has an account (and someone else) before the backup arrives.
+        other = open_database(scratch_database(self))
+        self.addCleanup(other.close)
+        accounts.add_user(other, "someone@example.com", "correct horse battery")
+        me = accounts.add_user(other, "me@example.com", "correct horse battery")
+        other.as_user(me["id"])
+        result = import_file(other, str(path), "ignored")
+        self.assertEqual((result["format"], result["inserted"], result["duplicates"]), ("backup", 35, 0))
+        restored = result["restored"]
+        self.assertEqual((restored["places"], restored["reminders"], restored["mode_overrides"],
+                          restored["stay_edits"], restored["ingest_tokens"]), (1, 1, 1, 1, 1))
+        self.assertEqual({p["source"] for p in other.points.observations(limit=None)}, {"phone"})
+        self.assertEqual(len(other.points.observations(limit=None)), 35)
+        reminder = other.reminders.active()[0]
+        self.assertEqual((reminder["text"], reminder["place_name"]), ("Buy salt", "Market"))
+        self.assertEqual(other.settings.get()["timezone"], "America/Los_Angeles")
+        self.assertEqual(len(other.corrections.stay_edits()), 1)
+        # The phone's token works on the new server, for the same person.
+        self.assertEqual(ingest_token_for(other, token["token"])["user_id"], me["id"])
+        # Stays were found again from the restored fixes (the edit is applied as they are read).
+        def found(db):
+            return [(stay["kind"], stay["started_at"], stay["ended_at"]) for stay in db.stays.between(None, None, None, None)]
+        self.assertTrue(found(self.db))
+        self.assertEqual(found(other), found(self.db))
+        # Restoring again adds nothing.
+        again = import_file(other, str(path))
+        self.assertEqual((again["inserted"], again["duplicates"]), (0, 35))
+        self.assertEqual(sum(again["restored"].values()), 0)
+
+    def backup_of_a_morning(self):
+        from geologs.services.backup import export_backup
+        for minute in range(0, 40, 2):
+            ingest(self.db, {"source": "phone", "timestamp": f"2026-09-01T10:{minute:02d}:00Z", "lat": 45.52, "lon": -122.63, "accuracy_m": 8})
+        path = Path(self.tmp.name) / "backup.json.gz"
+        with open(path, "wb") as out:
+            export_backup(self.db, out)
+        other = open_database(scratch_database(self))
+        self.addCleanup(other.close)
+        return other, str(path)
+
+    def test_part_of_the_history_imported_first_under_its_own_name_is_not_doubled_by_the_backup(self):
+        from geologs.services.imports import import_file
+        from geologs.services.samples import export_csv
+        other, backup = self.backup_of_a_morning()
+        part = "\n".join(export_csv(self.db).splitlines()[:11]) + "\n"  # the first ten fixes
+        self.assertEqual(import_file(other, self.file(part), "phone")["inserted"], 10)
+        result = import_file(other, backup)
+        self.assertEqual((result["inserted"], result["duplicates"], result["overlaps"]), (10, 10, {}))
+        self.assertEqual(len(other.points.observations(limit=None)), 20)
+
+    def test_part_of_the_history_imported_under_another_name_is_pointed_out(self):
+        from geologs.services.imports import import_file
+        from geologs.services.samples import export_csv
+        other, backup = self.backup_of_a_morning()
+        import_file(other, self.file(export_csv(self.db)))  # filed under "csv"
+        result = import_file(other, backup)
+        self.assertEqual((result["inserted"], result["overlaps"]), (20, {"csv": 20}))
+
+    def test_importing_again_finds_the_stays_an_import_cut_short_never_found(self):
+        from geologs.services.imports import import_file
+        csv = "timestamp,lat,lon,accuracy_m\n" + "".join(
+            f"2026-09-01T10:{minute:02d}:00Z,45.52,-122.63,8\n" for minute in range(0, 40, 2))
+        # The fixes came in, then the server stopped before stays were found.
+        ingest(self.db, [{**row, "source": "old-gps"} for row in csv_rows(csv)], trigger_reminders=False, process_analysis=False)
+        self.assertEqual(self.db.stays.between(None, None, "old-gps", None), [])
+        result = import_file(self.db, self.file(csv), "old-gps")
+        self.assertEqual((result["inserted"], result["duplicates"]), (0, 20))
+        self.assertTrue(self.db.stays.between(None, None, "old-gps", None))
+
+    def test_an_import_running_when_the_server_stopped_says_it_was_cut_short(self):
+        from geologs.services.imports import CUT_SHORT, last_import, note_import
+        self.assertEqual(last_import(self.db), {"state": "idle"})
+        note_import(self.db, {"state": "running", "phase": "reading", "inserted": 4000})
+        status = last_import(self.db)
+        self.assertEqual((status["state"], status["error"], status["inserted"]), ("failed", CUT_SHORT, 4000))
+        note_import(self.db, {"state": "done", "inserted": 9000})
+        self.assertEqual(last_import(self.db)["state"], "done")
+        # It describes this server, so a backup leaves it out.
+        self.assertNotIn("last_import", [row[0] for row in self.db.backup.table_rows("app_settings")])
+
     def test_a_file_of_another_kind_is_refused_plainly(self):
         from geologs.services.imports import import_file
         with self.assertRaisesRegex(ValueError, "isn't a CSV"):
@@ -4380,10 +4506,23 @@ class ImportServerTests(LiveServerCase):
                 break
             time.sleep(0.1)
         self.assertEqual((progress["state"], progress["source"], progress["inserted"]), ("done", "old-phone", 7))
+        from geologs.presentation import http as http_module
+        with http_module._imports_lock:
+            http_module._imports.clear()  # as after a restart
+        _, kept, _ = self.send("GET", "/api/import", headers=auth)
+        self.assertEqual((kept["state"], kept["inserted"]), ("done", 7))
         status, body, response = self.send("GET", "/api/export.csv", headers=auth)
         self.assertEqual(status, 200)
         self.assertIn("attachment", response.getheader("Content-Disposition"))
         self.assertEqual(len(body.decode().splitlines()), 8)
+        import gzip
+        status, body, response = self.send("GET", "/api/backup", headers=auth)
+        self.assertEqual((status, response.getheader("Content-Type")), (200, "application/gzip"))
+        lines = gzip.decompress(body).decode().splitlines()
+        self.assertTrue(lines[0].startswith('{"geologs_backup": 1'))
+        self.assertIn('{"table": "points", "columns": ["id", "source", "external_id", "timestamp", "lat", "lon", '
+                      '"accuracy_m", "speed_mps", "speed_origin", "mode"]}', lines)
+        self.assertEqual(self.send("GET", "/api/backup")[0], 401)
 
     def test_an_upload_needs_a_file_and_a_sign_in(self):
         self.assertEqual(self.send("POST", "/api/import", b"", {"Authorization": "Bearer main-token"})[0], 400)

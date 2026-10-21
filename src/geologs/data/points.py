@@ -213,6 +213,14 @@ class PointsRepository(Repository):
 
     # Reading samples for stays (see services.stays).
 
+    def overlaps(self, sources):
+        """{tracker: fixes} for other trackers' points at the very time and place of a point of
+        `sources`: the same history twice, usually an earlier import filed under another name."""
+        return {row["source"]: row["fixes"] for row in self.rows("""SELECT o.source,COUNT(DISTINCT o.id) AS fixes
+            FROM points o JOIN points p ON p.timestamp=o.timestamp AND p.lat=o.lat AND p.lon=o.lon
+            WHERE p.source=ANY(?) AND o.source<>ALL(?) GROUP BY o.source ORDER BY o.source""",
+            (list(sources), list(sources)))}
+
     def first_new(self, source, after_id):
         """The earliest timestamp among a source's samples newer than after_id."""
         # MIN over the id range reads only the new samples (point_observations_source_id).

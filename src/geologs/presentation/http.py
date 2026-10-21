@@ -6,6 +6,7 @@ import hmac
 import json
 import os
 import secrets
+import shutil
 import tempfile
 import threading
 import time
@@ -33,6 +34,7 @@ from ..services.admin import (audit as admin_audit, clear_failures as admin_clea
 from ..services import jobs
 from ..services.mail import can_send, deliver_due, waiting as mail_waiting
 from ..services.ambient import ambient
+from ..services.backup import export_backup
 from ..services.corrections import delete_stay_edit, save_mode_override, save_stay_edit
 from ..services.day import day_summary
 from ..services.devices import create_ingest_token, delete_ingest_device, delete_ingest_token, ingest_token_for, record_ingest, source_activity
@@ -46,7 +48,7 @@ from ..services.place_routes import route_map
 from ..services.patterns import insights, place_overview, place_patterns, predict_next, resolve_place_patterns, search_visits, transitions, visited_places
 from ..services.places import geocode, nearby_places, place_details, places_provider, reverse_geocode
 from ..services.reminders import cancel_reminder, create_reminder, delete_reminder
-from ..services.imports import import_file
+from ..services.imports import import_file, last_import, note_import
 from ..services.samples import delete_samples, delete_source, export_csv, export_geojson, export_gpx, near, stats
 from ..services.saved_places import delete_label, delete_place, enrich_saved_places, place_visits, save_place, save_place_label
 from ..services.settings import place_providers, save_settings
@@ -103,6 +105,21 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(body)
+
+    def send_backup(self, db):
+        """The full backup, written to a scratch file first: it can be far too big to hold in memory."""
+        with tempfile.TemporaryFile(prefix="geologs-backup-") as out:
+            export_backup(db, out)
+            length = out.tell()
+            out.seek(0)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/gzip")
+            self.send_header("Content-Length", str(length))
+            self.send_header("Content-Disposition", f'attachment; filename="geologs-backup-{datetime.now(timezone.utc):%Y-%m-%d}.json.gz"')
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            shutil.copyfileobj(out, self.wfile)
 
     def request_length(self):
         """The declared body length, or -1 when it is not a whole number of bytes (a negative
@@ -591,7 +608,10 @@ class Handler(BaseHTTPRequestHandler):
                 export, content_type = EXPORTS[url.path]
                 self.send_download(export(db, q.get("start"), q.get("end")), content_type, "geologs" + url.path[len("/api/export"):])
                 return
-            elif url.path == "/api/import": value = import_status(self.user["id"])
+            elif url.path == "/api/backup":
+                self.send_backup(db)
+                return
+            elif url.path == "/api/import": value = import_status(self.user["id"], db)
             elif url.path == "/api/paths": value = list_paths(db, q.get("limit", 200))
             elif url.path == "/api/route-map": value = route_map(db, q["south"], q["west"], q["north"], q["east"], q.get("limit", 300))
             else:
@@ -817,9 +837,14 @@ _imports = {}
 _imports_lock = threading.Lock()
 
 
-def import_status(user_id):
+def import_status(user_id, db=None):
+    """How the person's latest import is going: this process's record, else (after a restart) the
+    one kept in the archive."""
     with _imports_lock:
-        return dict(_imports.get(user_id) or {"state": "idle"})
+        status = _imports.get(user_id)
+    if status is None and db is not None:
+        return last_import(db)
+    return dict(status or {"state": "idle"})
 
 
 def _import_progress(user_id, **changes):
@@ -831,6 +856,7 @@ def _run_import(pool, user_id, path, source):
     db = None
     try:
         db = pool.open(user_id)
+        note_import(db, import_status(user_id))
         totals = import_file(db, path, source, progress=lambda progress: _import_progress(user_id, **progress))
         _import_progress(user_id, **totals, state="done", phase=None)
     except INPUT_ERRORS as exc:
@@ -841,6 +867,10 @@ def _run_import(pool, user_id, path, source):
     finally:
         _import_progress(user_id, finished_at=datetime.now(timezone.utc).isoformat(timespec="seconds"))
         if db is not None:
+            try:
+                note_import(db, import_status(user_id))
+            except Exception:
+                internal_failure("import status")
             db.close()
         os.unlink(path)
 

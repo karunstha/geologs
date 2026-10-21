@@ -61,9 +61,12 @@ def main():
     takeout.add_argument("file")
     takeout.add_argument("--source", default="google_takeout")
     any_file = sub.add_parser("import", parents=[one_user],
-                              help="import a CSV, Takeout Records.json or Google Timeline export, told apart by its contents")
+                              help="import a CSV, GeoJSON, Takeout Records.json, Google Timeline export or GeoLogs backup, told apart by its contents")
     any_file.add_argument("file")
     any_file.add_argument("--source", help="the tracker name to file it under (by default csv, google_takeout or google_timeline)")
+    backup = sub.add_parser("backup", parents=[one_user],
+                            help="write a full backup of the archive (to clone it onto another server with `import`)")
+    backup.add_argument("file")
     add_user = sub.add_parser("add-user", help="create an account (asks for its password)")
     add_user.add_argument("email")
     add_user.add_argument("--admin", action="store_true", help="may run the admin portal")
@@ -125,6 +128,14 @@ def main():
             db = archive()
             try:
                 print(json.dumps(import_file(db, args.file, args.source)))
+            finally:
+                db.close()
+        elif args.command == "backup":
+            from ..services.backup import export_backup
+            db = archive()
+            try:
+                with open(args.file, "wb") as out:
+                    export_backup(db, out)
             finally:
                 db.close()
         elif args.command in ("add-user", "owner-sign-in"):
