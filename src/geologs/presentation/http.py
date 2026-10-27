@@ -51,6 +51,7 @@ from ..services.patterns import insights, place_overview, place_patterns, predic
 from ..services.places import geocode, nearby_places, place_details, places_provider, reverse_geocode
 from ..services.reminders import cancel_reminder, create_reminder, delete_reminder
 from ..services.replay import day_replay
+from ..services.shares import create_share, delete_share, list_shares, open_share
 from ..services.imports import import_file, last_import, note_import
 from ..services.samples import delete_samples, delete_source, export_csv, export_geojson, export_gpx, near, stats
 from ..services.saved_places import delete_label, delete_place, enrich_saved_places, place_visits, save_place, save_place_label
@@ -263,7 +264,7 @@ class Handler(BaseHTTPRequestHandler):
             return None
         return f"This token can only send as {locked}" + (" trackers" if locked.endswith(":") else "") + f", not {stray}"
 
-    def send_web_file(self, path):
+    def send_web_file(self, path, extra_headers=None):
         """The browser app: index.html, stylesheets and modules under /css/ and /js/, what installs it
         (APP_FILES, /icons/), and the Home Assistant blueprint under /ha/ (public: Home Assistant
         fetches it, and it holds no secrets)."""
@@ -278,7 +279,7 @@ class Handler(BaseHTTPRequestHandler):
         body = resource.read_bytes()
         tag = '"' + hashlib.sha256(body).hexdigest()[:20] + '"'
         # Revalidate every time: unchanged files cost a 304, and an upgrade is never stale.
-        headers = {"Cache-Control": "no-cache", "ETag": tag, "X-Content-Type-Options": "nosniff"}
+        headers = {"Cache-Control": "no-cache", "ETag": tag, "X-Content-Type-Options": "nosniff", **(extra_headers or {})}
         unchanged = self.headers.get("If-None-Match") == tag
         self.send_response(304 if unchanged else 200)
         self.send_header("Content-Type", kind)
@@ -288,6 +289,30 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         if not unchanged:
             self.wfile.write(body)
+
+    def send_shared(self, path):
+        """A shared replay, public to whoever holds its link: /s/<token> is the page that plays it, and
+        /api/shared/<token> what it plays (only that one link's frozen replay; see services.shares).
+        Neither tells search engines, or the sites a viewer goes on to, where it was found."""
+        private = {"Referrer-Policy": "no-referrer", "X-Robots-Tag": "noindex, nofollow"}
+        if path.startswith("/s/"):
+            self.send_web_file("/share.html", private)
+            return
+        self.user = None
+        db = self.open_store()
+        if db is None:
+            return
+        try:
+            shared = open_share(db, path[len("/api/shared/"):])
+        except Exception:
+            self.error_json(500, internal_failure("GET /api/shared"))
+            return
+        finally:
+            db.close()
+        if shared is None:
+            self.send_json(404, {"error": "This link was turned off, or has expired."}, private)
+        else:
+            self.send_json(200, shared, private)
 
     def open_store(self):
         """The store, working for the request's user (see guarded and ingest_authorized), or a 503
@@ -508,6 +533,9 @@ class Handler(BaseHTTPRequestHandler):
             if self.guarded():
                 self.send_empty(405, {"Allow": "POST"})
             return
+        if url.path.startswith("/s/") or url.path.startswith("/api/shared/"):
+            self.send_shared(url.path)
+            return
         if url.path.startswith("/api/ingest/"):
             self.receive_locations(url.path[len("/api/ingest/"):], {key: value[0] for key, value in parse_qs(url.query).items()})
             return
@@ -580,6 +608,7 @@ class Handler(BaseHTTPRequestHandler):
             elif url.path == "/api/insights": value = insights(db, min(int(q.get("limit", 50)), 100))
             elif url.path == "/api/ambient": value = ambient(db, q["lat"], q["lon"], q.get("date"), q.get("timezone"))
             elif url.path == "/api/day": value = day_summary(db, q["date"], q.get("timezone") or db.settings.get()["timezone"], q.get("source"))
+            elif url.path == "/api/shares": value = list_shares(db)
             elif url.path == "/api/replay": value = day_replay(db, q["date"], q.get("timezone") or db.settings.get()["timezone"], q.get("source"))
             elif url.path == "/api/daily-summary": value = daily_overview(db, q["date"], q.get("timezone"), q.get("source"))
             elif url.path == "/api/daily-summaries": value = daily_overviews(db, q.get("start"), q.get("end"), q.get("limit", 90))
@@ -742,6 +771,8 @@ class Handler(BaseHTTPRequestHandler):
                                           self.device_token["id"] if sender and self.device_token else None)
             elif path == "/api/ingest-tokens":
                 result = create_ingest_token(db, payload)
+            elif path == "/api/shares": result = create_share(db, payload)
+            elif path == "/api/shares/delete": result = delete_share(db, payload["id"])
             elif path == "/api/invites":
                 require_admin(self.user)
                 result = admin_invite(db, self.user, payload.get("email"), payload.get("role") or "user", self.client_address[0])

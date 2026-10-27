@@ -3091,6 +3091,116 @@ class ReplayTests(unittest.TestCase):
         self.assertEqual(replay["start"], "2026-09-27T00:00:00+00:00")
 
 
+class ShareTests(unittest.TestCase):
+    """A shared replay leaves out what its options keep private, and only its link opens it."""
+
+    def setUp(self):
+        self.url = scratch_database(self)
+        self.db = open_database(self.url)
+        self.addCleanup(lambda: self.db.close())  # the archive a test reopened, too
+
+    def test_a_way_through_home_is_cut_around_it_and_split_in_two(self):
+        from geologs.domain.shares import share_options, shared_replay
+        # West 3 km to east 3 km, through Home, a point every 100 m and second.
+        track = [[float(step), shifted(HOME, step * 100 - 3000, 0)[1], HOME[0]] for step in range(61)]
+        replay = {"start": "2026-09-27T00:00:00+00:00", "timezone": "UTC",
+                  "moves": [{"kind": "trip", "mode": "cycling", "start": 0, "end": 60, "from_name": "Shop",
+                             "to_name": "Park", "distance_km": 6.0, "recorded": True, "track": track, "source": "phone"}],
+                  "stays": [{"name": "Home", "lat": HOME[0], "lon": HOME[1], "kind": "stationary", "activity": None,
+                             "home": True, "start": 0, "end": 0},
+                            {"name": "Shop", "lat": HOME[0], "lon": track[0][1], "kind": "stationary", "activity": None,
+                             "home": False, "start": 0, "end": 0}]}
+        shared = shared_replay(replay, share_options({"hide_m": 500}))
+        self.assertEqual(len(shared["moves"]), 2)
+        for move in shared["moves"]:
+            for _, lon, lat in move["track"]:
+                for lat_, lon_ in (HOME, (track[0][2], track[0][1]), (track[-1][2], track[-1][1])):
+                    self.assertGreater(metres_between((lat_, lon_), {"lat": lat, "lon": lon}), 500)
+        # Elapsed time starts at the first way shown; each piece keeps its share of the distance:
+        # 600 m to 2.4 km and 3.6 to 5.4 km, the points past 500 m of each end and of Home.
+        self.assertEqual(shared["moves"][0]["start"], 0)
+        self.assertEqual([move["distance_km"] for move in shared["moves"]], [1.8, 1.8])
+        self.assertEqual(shared["stays"], [])  # Home, and the shop at the start, are both hidden
+        self.assertNotIn("start", shared)
+        self.assertNotIn("source", json.dumps(shared))
+        nothing_hidden = shared_replay(replay, share_options({"hide_m": 0, "times": "clock", "names": False}))
+        self.assertEqual(len(nothing_hidden["moves"]), 1)
+        self.assertEqual(nothing_hidden["moves"][0]["track"], track)
+        self.assertEqual((nothing_hidden["moves"][0]["to_name"], nothing_hidden["stays"][0]["name"]), (None, ""))
+        self.assertEqual((nothing_hidden["start"], nothing_hidden["timezone"]), (replay["start"], "UTC"))
+
+    def test_options_are_checked_and_private_unless_chosen(self):
+        from geologs.domain.shares import share_options
+        self.assertEqual(share_options({}), {"hide_m": 500, "times": "elapsed", "names": True, "expires_days": 7, "title": ""})
+        for bad in ({"hide_m": 123}, {"times": "noon"}, {"expires_days": 3}, {"title": "x" * 81}):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                share_options(bad)
+
+    def test_only_the_link_opens_a_share_until_it_is_turned_off_or_expires(self):
+        from geologs.services import accounts
+        from geologs.services.shares import create_share, delete_share, list_shares, open_share
+        ingest(self.db, lake_run_day())
+        made = create_share(self.db, {"date": "2026-09-27", "timezone": "UTC", "hide_m": 500})
+        self.assertEqual((made["title"], made["path"]), ("Sunday, September 27", "/s/" + made["token"]))
+        self.assertEqual([item["id"] for item in list_shares(self.db)], [made["id"]])
+        self.assertNotIn("token", json.dumps(list_shares(self.db)).replace('"token_', ""))
+        # No one signed in: the link alone opens it, and nothing else of the archive.
+        nobody = open_database(self.url, user_id=None)
+        self.addCleanup(nobody.close)
+        nobody.as_user(None)
+        shared = open_share(nobody, made["token"])
+        self.assertEqual([move["mode"] for move in shared["moves"]], ["driving", "running", "driving"])
+        self.assertTrue(all(metres_between(HOME, {"lat": lat, "lon": lon}) > 500
+                            for move in shared["moves"] for _, lon, lat in move["track"]))
+        self.assertIsNone(open_share(nobody, made["token"][:-1] + "x"))
+        self.assertEqual(nobody.rows("SELECT id FROM shares"), [])  # outside a link's own transaction: nothing
+        # Another user sees none of it, and cannot turn it off.
+        bob = accounts.add_user(self.db, "bob@example.com", "correct horse battery")
+        as_bob = open_database(self.url, user_id=bob["id"])
+        self.addCleanup(as_bob.close)
+        self.assertEqual(list_shares(as_bob), [])
+        with self.assertRaises(ValueError):
+            delete_share(as_bob, made["id"])
+        self.assertIsNotNone(open_share(nobody, made["token"]))
+        # Expired, or turned off: gone for everyone.
+        self.db.conn.execute("UPDATE shares SET expires_at='2000-01-01T00:00:00+00:00'")
+        self.db.commit()
+        self.assertIsNone(open_share(nobody, made["token"]))
+        never = create_share(self.db, {"date": "2026-09-27", "timezone": "UTC", "expires_days": None, "title": "Lake day"})
+        self.assertIsNone(never["expires_at"])
+        self.assertEqual(open_share(nobody, never["token"])["title"], "Lake day")
+        delete_share(self.db, never["id"])
+        self.assertIsNone(open_share(nobody, never["token"]))
+
+    def test_an_archive_from_before_shares_gets_them_its_users_own(self):
+        from geologs.services.shares import create_share, list_shares
+        # As an archive upgraded to accounts before shares existed: the table, but nobody's rows.
+        self.db.close()
+        older_schema(self.url, 31, changes=["DROP POLICY IF EXISTS shared_link ON shares",
+                                            "ALTER TABLE shares DROP COLUMN user_id CASCADE"])
+        self.db = open_database(self.url)
+        ingest(self.db, lake_run_day())
+        made = create_share(self.db, {"date": "2026-09-27", "timezone": "UTC"})
+        self.assertEqual([item["id"] for item in list_shares(self.db)], [made["id"]])
+        policies = {row["policyname"] for row in self.db.rows("SELECT policyname FROM pg_policies WHERE tablename='shares'")}
+        self.assertEqual(policies, {"own_rows", "shared_link"})
+
+    def test_a_day_with_nothing_left_once_hidden_is_not_shared(self):
+        from geologs.services.shares import create_share
+        cafe = shifted(HOME, 300, 0)
+        ingest(self.db, minute_fixes([still(HOME, 20), line(HOME, cafe, 5), still(cafe, 20)]))
+        with self.assertRaisesRegex(ValueError, "Nothing is left"):
+            create_share(self.db, {"date": "2026-09-27", "timezone": "UTC", "hide_m": 500})
+
+    def test_erasing_a_users_locations_turns_their_links_off(self):
+        from geologs.services.shares import create_share, list_shares
+        ingest(self.db, lake_run_day())
+        create_share(self.db, {"date": "2026-09-27", "timezone": "UTC"})
+        self.db.points.erase_all()
+        self.db.commit()
+        self.assertEqual(list_shares(self.db), [])
+
+
 class AmbientTests(unittest.TestCase):
     """History's hero: the town, its weather, and a photo of it in that weather, each on its own."""
 
@@ -3361,6 +3471,27 @@ class LiveServerCase(unittest.TestCase):
         finally:
             db.close()
 
+
+
+class ShareServerTests(LiveServerCase):
+    def test_a_link_plays_for_anyone_and_says_nothing_to_search_engines(self):
+        owner = {"Authorization": "Bearer main-token"}
+        self.assertEqual(self.send("POST", "/api/points", lake_run_day(), owner)[0], 200)
+        status, made, _ = self.send("POST", "/api/shares", {"date": "2026-09-27", "timezone": "UTC"}, owner)
+        self.assertEqual(status, 200, made)
+        status, page, response = self.send("GET", made["path"])
+        self.assertEqual(status, 200)
+        self.assertIn(b"js/share.js", page)
+        self.assertEqual((response.getheader("Referrer-Policy"), response.getheader("X-Robots-Tag")),
+                         ("no-referrer", "noindex, nofollow"))
+        status, shared, response = self.send("GET", "/api/shared/" + made["token"])
+        self.assertEqual((status, response.getheader("Referrer-Policy")), (200, "no-referrer"))
+        self.assertEqual(len(shared["moves"]), 3)
+        self.assertEqual(self.send("GET", "/api/shares")[0], 401)
+        self.assertEqual(self.send("POST", "/api/shares/delete", {"id": made["id"]}, owner)[0], 200)
+        status, body, _ = self.send("GET", "/api/shared/" + made["token"])
+        self.assertEqual((status, body), (404, {"error": "This link was turned off, or has expired."}))
+        self.assertEqual(self.send("GET", "/api/shared/")[0], 404)
 
 
 class IngestTests(LiveServerCase):

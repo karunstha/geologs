@@ -303,7 +303,8 @@ def _session_id(token_hash_value):
 
 @use_case
 def account(db, user_id, current_session=None):
-    """The account page: the user, their signed-in browsers (this one marked) and API tokens."""
+    """The account page: the user, their signed-in browsers (this one marked), API tokens and shared links.
+    `db` works as this user: shared links are theirs by row-level security."""
     from . import mail
     user = db.users.get(user_id)
     current = token_hash(current_session) if current_session else None
@@ -313,7 +314,8 @@ def account(db, user_id, current_session=None):
     return {"user": {**public_user(user), "email_verified": bool(user["email_verified_at"]),
                      "has_password": db.users.has_password(user_id), "created_at": user["created_at"]},
             "two_factor": two_factor_state(db, user_id),
-            "sessions": sessions, "api_tokens": db.users.api_tokens(user_id), "can_email": mail.can_send()}
+            "sessions": sessions, "api_tokens": db.users.api_tokens(user_id), "shares": db.shares.mine(),
+            "can_email": mail.can_send()}
 
 
 @use_case

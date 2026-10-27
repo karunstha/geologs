@@ -10,6 +10,7 @@ Everything is in your PostgreSQL database and your `.env` file. Nothing is sent 
 
 -   **Each user** sees only their own archive. This is enforced by the database itself (row-level security), and the test suite checks it on every route and every MCP tool.
 -   **Admins** manage accounts and see how much each person recorded (counts and the time of the latest fix), never where. An admin can delete an account, or only its location data, but cannot read it.
+-   **Anyone with a link you share** can watch that one day's replay, without signing in, until the link expires or you turn it off (Account → Shared links). A link shows the day as it was when you made it: the ways you went and the stops, but by default not the first and last 500 m of the day or anything within 500 m of Home, with times counted from the start rather than the time of day; you choose that, and whether place names show, when you make it. Nothing else of your archive is reachable through it. The link's address is its only key, so anyone you send it to can pass it on; GeoLogs keeps only a hash of it, and the page tells browsers and search engines not to pass it on or index it. Deleting your location data, or your account, turns your links off.
 -   **Whoever runs the server** can read the database, its backups and `.env`, and so everyone's data. If you run GeoLogs for other people, tell them so, and protect backups as you would the database. An account's data is erased by deleting the account.
 
 ## What leaves your server

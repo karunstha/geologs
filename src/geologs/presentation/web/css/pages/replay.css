@@ -359,3 +359,145 @@
     margin-left: auto;
   }
 }
+
+/* Share: a pill in the title bar, then a panel under it with what to keep private and the link. */
+.replay-share-button {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  margin-left: auto;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--replay-well);
+  color: var(--replay-text);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.replay-share-button[hidden] {
+  display: none;
+}
+.replay-share-button svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.replay-share-panel {
+  z-index: 3;
+  top: 92px;
+  left: 16px;
+  display: grid;
+  gap: 14px;
+  width: min(400px, calc(100% - 32px));
+  max-height: calc(100% - 200px);
+  padding: 16px 18px 18px;
+  overflow: auto;
+  /* The form's own fields, in the panel's colours. */
+  --text: var(--replay-text);
+  --text-2: var(--replay-text-2);
+}
+.replay-share-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.replay-share-head h3 {
+  font-size: 16px;
+  font-weight: 650;
+}
+.replay-share-head .icon-button {
+  color: var(--replay-text);
+}
+.replay-share-note {
+  margin-top: -8px;
+  color: var(--replay-text-2);
+  font-size: 13px;
+}
+.replay-share-choice {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  font-size: 14px;
+}
+.replay-share-choice legend {
+  margin-bottom: 4px;
+  color: var(--replay-text-2);
+  font-size: 13px;
+  font-weight: 600;
+}
+.replay-share-choice label,
+.replay-share-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+}
+.replay-share-error {
+  color: var(--danger);
+  font-size: 13px;
+}
+.replay-share-result {
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+  border-radius: 12px;
+  background: var(--accent-soft);
+  font-size: 13px;
+}
+.replay-share-result .copy-field {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+}
+.replay-share-result .copy-field input {
+  flex: 1;
+  min-width: 0;
+}
+.replay-share-result[hidden],
+.replay-share-error[hidden] {
+  display: none;
+}
+
+/* A shared link's page: only the replay, or why it cannot play. */
+.share-page {
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--text);
+}
+.share-message {
+  display: grid;
+  place-content: center;
+  gap: 8px;
+  min-height: 100vh;
+  padding: 24px 16px;
+  text-align: center;
+}
+.share-message h1 {
+  font-size: 20px;
+  font-weight: 650;
+}
+.share-message p {
+  color: var(--text-2);
+}
+
+@media (max-width: 700px) {
+  .replay-share-button span {
+    display: none;
+  }
+  .replay-share-panel {
+    top: 80px;
+    right: 10px;
+    left: 10px;
+    width: auto;
+  }
+}

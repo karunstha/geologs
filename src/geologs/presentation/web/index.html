@@ -512,6 +512,10 @@
           <div class="card-head"><div><h3 id="account-sessions-title">Signed-in browsers</h3><p>Each stays signed in for 30 days after you last used it.</p></div><button id="account-end-others" class="button secondary small" type="button" hidden>Sign out all others</button></div>
           <ul id="account-sessions" class="list rows token-list"></ul>
         </section>
+        <section class="card" aria-labelledby="account-shares-title">
+          <div class="card-head"><div><h3 id="account-shares-title">Shared links</h3><p>Replays anyone with the link can watch. Make one with Replay → Share on a day.</p></div></div>
+          <ul id="account-shares" class="list rows token-list"></ul>
+        </section>
         <section class="card" aria-labelledby="account-tokens-title">
           <div class="card-head"><div><h3 id="account-tokens-title">API tokens</h3><p>For your own tools, such as an MCP client. It acts as you, so keep it private.</p></div></div>
           <div id="account-token-reveal" class="callout success token-reveal" role="status" hidden></div>
@@ -522,32 +526,6 @@
     </section>
     </section>
   </main>
-
-  <!-- The day replayed (js/views/replay.js): a dot travels the day's ways on a map of its own. -->
-  <dialog id="replay-dialog" class="replay" aria-labelledby="replay-title">
-    <div id="replay-map" class="replay-map"></div>
-    <header class="replay-head replay-panel">
-      <div><h2 id="replay-title">Replay</h2><p id="replay-summary"></p></div>
-      <button id="replay-close" class="icon-button" type="button" aria-label="Close replay" title="Close (Esc)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
-    </header>
-    <section class="replay-now replay-panel" aria-label="Now in the replay">
-      <div id="replay-status" class="replay-status" aria-live="off"></div>
-      <dl class="replay-stats">
-        <div><dt>Time</dt><dd id="replay-clock"></dd></div>
-        <div><dt>Distance</dt><dd id="replay-distance"></dd></div>
-        <div><dt>Moving</dt><dd id="replay-moving"></dd></div>
-      </dl>
-    </section>
-    <footer class="replay-controls replay-panel">
-      <button id="replay-play" class="replay-play" type="button" aria-label="Play" autofocus></button>
-      <div class="replay-track">
-        <div id="replay-ribbon" class="replay-ribbon" aria-hidden="true"></div>
-        <input id="replay-scrub" class="replay-scrub" type="range" min="0" max="1000" step="1" value="0" aria-label="Replay position">
-      </div>
-      <div id="replay-speeds" class="replay-speeds" role="group" aria-label="Speed"></div>
-      <button id="replay-follow" class="replay-follow" type="button" aria-pressed="true" title="Follow the dot"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg><span>Follow</span></button>
-    </footer>
-  </dialog>
 
   <dialog id="place-dialog" class="dialog" aria-labelledby="place-dialog-title">
     <div class="dialog-head"><div><h2 id="place-dialog-title">Add place</h2><p id="place-dialog-note">Search near your latest fix, or enter coordinates.</p></div><button id="close-place-dialog" class="icon-button" type="button" aria-label="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>

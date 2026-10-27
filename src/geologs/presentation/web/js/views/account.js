@@ -1,5 +1,5 @@
-// The account page: your name and email, your password, the browsers you're signed in on, and
-// personal API tokens. Opened from the account button at the top right.
+// The account page: your name and email, your password, the browsers you're signed in on, the replays
+// you shared, and personal API tokens. Opened from the account button at the top right.
 import { api, post } from "../core/api.js";
 import { $, copyText, safe, toast } from "../core/dom.js";
 import { ago, zoneOptions } from "../core/format.js";
@@ -100,6 +100,29 @@ function renderAccount() {
     }
   });
 
+  // A link's own address is shown once, when it is made; here it can only be turned off.
+  const now = Date.now();
+  $("account-shares").innerHTML =
+    data.shares
+      .map((share) => {
+        const live = !share.expires_at || Date.parse(share.expires_at) > now;
+        const until = share.expires_at ? `${live ? "until" : "expired"} ${shortDate(share.expires_at)}` : "until turned off";
+        return `<li class="list-item"><div class="place-main"><span class="health-dot ${live ? "success" : "neutral"}" aria-hidden="true"></span><div><strong>${safe(share.title)}</strong><small>${safe([share.share_date, `/s/${share.hint}`, `made ${shortDate(share.created_at)}`, until].join(" · "))}</small></div></div><button type="button" class="button secondary small danger-text" data-delete-share="${share.id}">${live ? "Turn off" : "Remove"}</button></li>`;
+      })
+      .join("") ||
+    '<li class="empty-block"><strong>No shared links</strong><span>Open Replay on a day and choose Share to make one.</span></li>';
+  onEach($("account-shares"), "delete-share", async (id) => {
+    const share = data.shares.find((item) => item.id === +id);
+    if (!confirm(`Turn off the link to “${share?.title}”? Anyone who has it can no longer watch it.`)) return;
+    try {
+      await post("/api/shares/delete", { id: +id });
+      await refreshAccount();
+      toast("Link turned off");
+    } catch (error) {
+      toast(error.message);
+    }
+  });
+
   $("account-tokens").innerHTML =
     data.api_tokens
       .map(
@@ -132,7 +155,8 @@ export function clearAccount() {
   state.account = null;
   document.querySelectorAll("#account-view form").forEach((form) => form.reset());
   $("account-email").textContent = "—";
-  for (const id of ["account-email-state", "account-2fa-state", "account-sessions", "account-tokens"]) $(id).innerHTML = "";
+  for (const id of ["account-email-state", "account-2fa-state", "account-sessions", "account-shares", "account-tokens"])
+    $(id).innerHTML = "";
   for (const id of ["account-2fa-codes", "account-token-reveal"]) {
     $(id).hidden = true;
     $(id).innerHTML = "";

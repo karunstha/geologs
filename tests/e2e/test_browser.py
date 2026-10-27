@@ -269,6 +269,38 @@ class ReplayTest(BrowserTest):
         self.page.keyboard.press("Escape")
         self.assertFalse(self.page.evaluate("document.getElementById('replay-dialog').open"))
 
+    def test_a_shared_link_plays_for_someone_signed_out_until_it_is_turned_off(self):
+        self.page.goto(f"{base_url}/#date={recent_weekdays(1)[0]}")
+        self.page.wait_for_selector("#replay-day:not([hidden])")
+        self.page.click("#replay-day")
+        self.page.click("#replay-share")
+        self.page.fill('#replay-share-panel input[name="title"]', "A day in Portland")
+        self.page.click('#replay-share-panel button[type="submit"]')
+        self.page.wait_for_selector(".replay-share-result:not([hidden])")
+        link = self.page.input_value(".replay-share-result input")
+        self.assertRegex(link, r"/s/[\w-]{22}$")
+        stranger = browser.new_context()
+        self.addCleanup(stranger.close)
+        viewer = stranger.new_page()
+        viewer.on("pageerror", lambda error: self.errors.append(f"viewer page error: {error}"))
+        viewer.goto(link)
+        viewer.wait_for_function("document.getElementById('replay-play')?.ariaLabel === 'Pause'", timeout=10000)
+        self.assertEqual(viewer.text_content("#replay-title"), "A day in Portland")
+        self.assertEqual(viewer.text_content("#replay-clock-label"), "Elapsed")
+        # The viewer's page is the replay: Esc does not close it, and it offers no Share.
+        viewer.keyboard.press("Escape")
+        self.assertTrue(viewer.evaluate("document.getElementById('replay-dialog').open"))
+        self.assertTrue(viewer.is_hidden("#replay-share"))
+        self.page.keyboard.press("Escape")
+        self.page.keyboard.press("Escape")
+        self.page.click("#auth-button")
+        self.page.once("dialog", lambda dialog: dialog.accept())
+        self.page.click("#account-shares [data-delete-share]")
+        self.page.wait_for_selector("#account-shares .empty-block")
+        viewer.reload()
+        viewer.wait_for_selector("#share-message h1")
+        self.assertEqual(viewer.text_content("#share-message h1"), "This replay isn't available")
+
 
 class ViewsTest(BrowserTest):
     def test_every_view_opens(self):

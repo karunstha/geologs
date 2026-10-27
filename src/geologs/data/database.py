@@ -24,6 +24,7 @@ from .points import PointsRepository
 from .postgres import OWNER_ID, PostgresConnection, PostgresPool, create_schema
 from .reminders import RemindersRepository
 from .settings import SettingsRepository
+from .shares import SharesRepository
 from .stays import StaysRepository
 from .summaries import SummariesRepository
 from .timeline import TimelineRepository
@@ -98,6 +99,7 @@ class Database:
         self.outbox = OutboxRepository(self)
         self.admin = AdminRepository(self)
         self.backup = BackupRepository(self)
+        self.shares = SharesRepository(self)
         self.as_user(user_id)
 
     def as_user(self, user_id):
