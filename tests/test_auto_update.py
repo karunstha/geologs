@@ -15,6 +15,24 @@ loader.exec_module(updater)
 
 
 class AutoUpdateTest(unittest.TestCase):
+    def test_update_channel_defaults_to_stable_and_accepts_edge(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            (root / ".env").write_text("")
+            with patch.object(updater, "ROOT", root):
+                self.assertEqual(updater.update_channel(), "stable")
+            (root / ".env").write_text("GEOLOGS_UPDATE_CHANNEL=edge\n")
+            with patch.object(updater, "ROOT", root):
+                self.assertEqual(updater.update_channel(), "edge")
+
+    def test_unknown_update_channel_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            (root / ".env").write_text("GEOLOGS_UPDATE_CHANNEL=nightly\n")
+            with patch.object(updater, "ROOT", root):
+                with self.assertRaisesRegex(RuntimeError, "stable or edge"):
+                    updater.update_channel()
+
     def test_backup_is_validated_before_it_is_published(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)

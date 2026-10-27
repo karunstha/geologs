@@ -78,9 +78,9 @@ git pull && docker compose build app && docker compose up -d
 
 Tables upgrade themselves when the server starts. Take a backup first, and read the release notes: [Upgrading](upgrading.md) covers versions that change what you must do.
 
-### Approved automatic app updates
+### Automatic app updates
 
-GeoLogs can install releases promoted to the `stable-auto` channel. This updates the **app container only**. The database image, Compose configuration and updater script remain under your control. Releases with database upgrade code or required Compose settings changed are rejected by the promotion workflow and need a [manual upgrade](upgrading.md).
+GeoLogs can install either update channel. Set `GEOLOGS_UPDATE_CHANNEL=stable` to install releases promoted to `stable-auto`, or `GEOLOGS_UPDATE_CHANNEL=edge` to install every tested push to `main`. This updates the **app container only**. The database image, Compose configuration and updater script remain under your control. The stable promotion workflow rejects releases with database upgrade code or required Compose settings changed; review such releases and update manually.
 
 Prerequisites: Docker Compose 2.24.4 or newer (for `!reset`), a public `ghcr.io/karunstha/geologs` package, and [Cosign](https://docs.sigstore.dev/cosign/system_config/installation/) on the Docker host. The host user running the updater needs Docker access. First deploy the checkout normally with `docker compose up --build -d` and ensure `.env` has `GEOLOGS_TOKEN`.
 
@@ -98,7 +98,7 @@ Schedule the command for a quiet period. For example, in the Docker host user's 
 0 3 * * 0 cd /path/to/geologs && /path/to/geologs/scripts/auto-update >> /path/to/geologs/update-status/updater.log 2>&1
 ```
 
-The updater locks concurrent runs and keeps eight database dumps by default. Set `GEOLOGS_BACKUP_RETENTION` in the cron environment to change that count. The status and log directories stay out of Git. **Admin → Server → Software** shows the running version and the last check. To pause updates, remove or comment out the cron entry; the current pinned image continues running. To inspect the pin, read `update-status/active.env`. Use the two Compose files and both env files when managing an auto-updated installation manually:
+The updater locks concurrent runs and keeps eight database dumps by default. Set `GEOLOGS_BACKUP_RETENTION` in the cron environment to change that count. The status and log directories stay out of Git. **Admin → Server → Software** shows the running version and the last check. To pause updates, remove or comment out the cron entry; the current pinned image continues running. To change channels, edit `GEOLOGS_UPDATE_CHANNEL` in `.env` and run the updater. To inspect the pin, read `update-status/active.env`. Use the two Compose files and both env files when managing an auto-updated installation manually:
 
 ```bash
 docker compose -f docker-compose.yaml -f docker-compose.auto.yaml \

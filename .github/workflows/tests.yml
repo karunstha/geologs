@@ -5,6 +5,52 @@ on:
   pull_request:
 
 jobs:
+  publish-edge:
+    # Edge is built only after both Python versions have passed on main.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        id: build
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:edge
+            ${{ env.IMAGE }}:edge-${{ github.sha }}
+          provenance: mode=max
+          sbom: true
+          build-args: |
+            GEOLOGS_VERSION=edge-${{ github.sha }}
+            VCS_REF=${{ github.sha }}
+      - uses: actions/attest@v4
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+      - uses: sigstore/cosign-installer@v3
+      - name: Sign edge image
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+
   tests:
     runs-on: ubuntu-latest
     strategy:
