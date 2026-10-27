@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Create and push the annotated Git tag that starts a GeoLogs release.
+set -euo pipefail
+
+if [[ $# -ne 1 ]]; then
+  echo "Usage: $0 VERSION" >&2
+  echo "Example: $0 0.1.0" >&2
+  exit 2
+fi
+
+version=${1#v}
+if [[ ! $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "VERSION must be semantic versioning such as 0.1.0" >&2
+  exit 2
+fi
+
+root=$(git rev-parse --show-toplevel)
+cd "$root"
+
+if [[ -n $(git status --porcelain) ]]; then
+  echo "Commit or stash the working tree before tagging a release." >&2
+  exit 1
+fi
+
+project_version=$(sed -nE 's/^version = "([^"]+)"/\1/p' pyproject.toml | head -n 1)
+package_version=$(sed -nE 's/^__version__ = "([^"]+)"/\1/p' src/geologs/__init__.py | head -n 1)
+if [[ $project_version != "$version" || $package_version != "$version" ]]; then
+  echo "Version $version must match pyproject.toml ($project_version) and src/geologs/__init__.py ($package_version)." >&2
+  exit 1
+fi
+
+tag="v$version"
+if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+  echo "Tag $tag already exists." >&2
+  exit 1
+fi
+
+git tag -a "$tag" -m "GeoLogs $version"
+git push origin "$tag"
+
+echo "Pushed $tag. Publish the GitHub Release to build its image."
