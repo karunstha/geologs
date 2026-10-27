@@ -37,6 +37,9 @@ services:
       GEOLOGS_APP_DB_PASSWORD: ${GEOLOGS_APP_DB_PASSWORD:?Set GEOLOGS_APP_DB_PASSWORD in .env}
       GEOLOGS_TOKEN: ${GEOLOGS_TOKEN:?Set GEOLOGS_TOKEN in .env}
       GEOLOGS_TOKEN_FILE: /config/.env
+      # The updater writes its result here; a release image's commit may be supplied in its pin file.
+      GEOLOGS_REVISION: ${GEOLOGS_REVISION:-unknown}
+      GEOLOGS_UPDATE_STATUS_FILE: ${GEOLOGS_UPDATE_STATUS_FILE:-/update-status/status.json}
       GEOLOGS_TIMEZONE: ${GEOLOGS_TIMEZONE:-UTC}
       GEOAPIFY_API_KEY: ${GEOAPIFY_API_KEY:-}
       MAPBOX_ACCESS_TOKEN: ${MAPBOX_ACCESS_TOKEN:-}

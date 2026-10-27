@@ -146,6 +146,10 @@ def main():
                       "{{index .Config.Labels \"org.opencontainers.image.version\"}}")
         if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", version):
             raise RuntimeError("release image has no valid version label")
+        revision = run("docker", "image", "inspect", reference, "--format",
+                       "{{index .Config.Labels \"org.opencontainers.image.revision\"}}")
+        if not re.fullmatch(r"[0-9a-f]{40}", revision):
+            raise RuntimeError("release image has no valid revision label")
         now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
         previous = ACTIVE.read_text() if ACTIVE.exists() else None
         if previous and reference in previous:
@@ -159,7 +163,7 @@ def main():
             image_id = run("docker", "inspect", "geologs", "--format", "{{.Image}}")
             run("docker", "tag", image_id, "geologs:local")
         saved = backup()
-        write_atomic(ACTIVE, "GEOLOGS_AUTO_IMAGE=" + reference + "\n")
+        write_atomic(ACTIVE, "GEOLOGS_AUTO_IMAGE=" + reference + "\nGEOLOGS_REVISION=" + revision + "\n")
         try:
             compose(True, "up", "--no-build", "--no-deps", "-d", "--force-recreate", "app")
             ready(token)

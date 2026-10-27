@@ -62,7 +62,7 @@ class AutoUpdateTest(unittest.TestCase):
                 if "imagetools" in args:
                     return "sha256:" + "b" * 64
                 if "image" in args and "inspect" in args:
-                    return "v0.2.0"
+                    return "a" * 40 if "revision" in args[-1] else "v0.2.0"
                 return ""
 
             with patch.object(updater, "ROOT", root), patch.object(updater, "STATE", state), \
