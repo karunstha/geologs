@@ -25,6 +25,7 @@
   <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%232cc9b4'/%3E%3Cstop offset='1' stop-color='%230b5d56'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='15' fill='url%28%23g%29'/%3E%3Cpath d='M22.5 46.6c3.5-1.2 4-8.5 10-9.5 4.8-.8 6.8 2.8 10 2.2' fill='none' stroke='%23fff' stroke-opacity='.75' stroke-width='3.4' stroke-linecap='round' stroke-dasharray='0.1 6.2'/%3E%3Ccircle cx='15' cy='49' r='4.6' fill='none' stroke='%23fff' stroke-width='3'/%3E%3Cpath d='M44 8.5c-6.6 0-12 5.1-12 11.4 0 8.5 12 18.1 12 18.1s12-9.6 12-18.1c0-6.3-5.4-11.4-12-11.4Z' fill='%23fff'/%3E%3Ccircle cx='44' cy='19.9' r='4.4' fill='%230f766e'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" integrity="sha384-MinO0mNliZ3vwppuPOUnGa+iq619pfMhLVUXfC4LHwSCvF9H+6P/KO4Q7qBOYV5V" crossorigin="">
   <link rel="stylesheet" href="/css/tokens.css">
   <link rel="stylesheet" href="/css/base.css">
   <link rel="stylesheet" href="/css/layout.css">
@@ -45,6 +46,7 @@
   <link rel="stylesheet" href="/css/pages/settings.css">
   <link rel="stylesheet" href="/css/pages/account.css">
   <link rel="stylesheet" href="/css/pages/admin.css">
+  <link rel="stylesheet" href="/css/pages/replay.css">
   <link rel="stylesheet" href="/css/glass.css">
 </head>
 <body>
@@ -93,6 +95,7 @@
             <label class="sr-only" for="day-date">Day</label><input id="day-date" class="input" type="date" required>
             <button id="next-day" class="icon-button bordered" type="button" aria-label="Next day" title="Next day (→)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9.5 6 6 6-6 6"/></svg></button>
             <button id="today" class="button secondary" type="button">Today</button>
+            <button id="replay-day" class="button secondary replay-button" type="button" hidden title="Replay the day"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5v15l12-7.5z"/></svg><span>Replay</span></button>
           </div>
         </div>
       </section>
@@ -519,6 +522,32 @@
     </section>
     </section>
   </main>
+
+  <!-- The day replayed (js/views/replay.js): a dot travels the day's ways on a map of its own. -->
+  <dialog id="replay-dialog" class="replay" aria-labelledby="replay-title">
+    <div id="replay-map" class="replay-map"></div>
+    <header class="replay-head replay-panel">
+      <div><h2 id="replay-title">Replay</h2><p id="replay-summary"></p></div>
+      <button id="replay-close" class="icon-button" type="button" aria-label="Close replay" title="Close (Esc)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+    </header>
+    <section class="replay-now replay-panel" aria-label="Now in the replay">
+      <div id="replay-status" class="replay-status" aria-live="off"></div>
+      <dl class="replay-stats">
+        <div><dt>Time</dt><dd id="replay-clock"></dd></div>
+        <div><dt>Distance</dt><dd id="replay-distance"></dd></div>
+        <div><dt>Moving</dt><dd id="replay-moving"></dd></div>
+      </dl>
+    </section>
+    <footer class="replay-controls replay-panel">
+      <button id="replay-play" class="replay-play" type="button" aria-label="Play" autofocus></button>
+      <div class="replay-track">
+        <div id="replay-ribbon" class="replay-ribbon" aria-hidden="true"></div>
+        <input id="replay-scrub" class="replay-scrub" type="range" min="0" max="1000" step="1" value="0" aria-label="Replay position">
+      </div>
+      <div id="replay-speeds" class="replay-speeds" role="group" aria-label="Speed"></div>
+      <button id="replay-follow" class="replay-follow" type="button" aria-pressed="true" title="Follow the dot"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg><span>Follow</span></button>
+    </footer>
+  </dialog>
 
   <dialog id="place-dialog" class="dialog" aria-labelledby="place-dialog-title">
     <div class="dialog-head"><div><h2 id="place-dialog-title">Add place</h2><p id="place-dialog-note">Search near your latest fix, or enter coordinates.</p></div><button id="close-place-dialog" class="icon-button" type="button" aria-label="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>

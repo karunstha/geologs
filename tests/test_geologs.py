@@ -3041,6 +3041,56 @@ def process_stays_rebuild(db):
     db.commit()
 
 
+class ReplayTests(unittest.TestCase):
+    def test_a_way_passes_each_fix_at_its_time_and_runs_evenly_between(self):
+        from geologs.domain.replay import timed_path
+        way = [[0.0, 0.0], [0.001, 0.0], [0.002, 0.0], [0.003, 0.0], [0.004, 0.0]]
+        # A fix on the way's third point, one the way never passes, and one outside the window.
+        timed = timed_path(way, [[90, 0.002, 0.0], [95, 5.0, 5.0], [500, 0.003, 0.0]], 0, 100)
+        self.assertEqual([round(point[0], 6) for point in timed], [0, 45, 90, 95, 100])
+        self.assertEqual([point[1:] for point in timed], way)
+
+    def test_a_way_that_passes_one_spot_twice_is_timed_in_order(self):
+        from geologs.domain.replay import timed_path
+        way = [[0.0, 0.0], [0.001, 0.0], [0.002, 0.0], [0.001, 0.0], [0.0, 0.001]]
+        timed = timed_path(way, [[10, 0.001, 0.0], [30, 0.001, 0.0]], 0, 40)
+        self.assertEqual([round(point[0], 6) for point in timed], [0, 10, 20, 30, 40])
+
+    def test_close_points_are_thinned_but_the_ends_stay(self):
+        from geologs.domain.replay import timed_path
+        way = [[0.0, 0.0]] + [[0.00001 * step, 0.0] for step in range(1, 30)]
+        timed = timed_path(way, [], 0, 60)
+        self.assertEqual((timed[0][0], timed[-1][0], timed[-1][1]), (0, 60, way[-1][0]))
+        self.assertLess(len(timed), 10)
+        self.assertEqual(timed_path([], [], 0, 60), [])
+        self.assertEqual(timed_path([[1.0, 2.0]], [], 0, 60), [[60, 1.0, 2.0]])
+
+    def test_a_day_replays_its_drives_and_the_run_between_them(self):
+        from geologs.services.replay import day_replay
+        url = scratch_database(self)
+        db = open_database(url)
+        self.addCleanup(db.close)
+        ingest(db, lake_run_day())
+        replay = day_replay(db, "2026-09-27", "UTC")
+        self.assertEqual([(move["kind"], move["mode"]) for move in replay["moves"]],
+                         [("trip", "driving"), ("activity", "running"), ("trip", "driving")])
+        self.assertEqual(len(replay["stays"]), 3)
+        hour = 3600
+        drive, run, back = replay["moves"]
+        # 13:30 to 13:42, then the hour of laps, then 14:42 to 14:54 home, in seconds after midnight.
+        self.assertEqual((drive["start"], drive["end"], run["start"], run["end"], back["start"], back["end"]),
+                         (13.5 * hour, 13.7 * hour, 13.7 * hour, 14.7 * hour, 14.7 * hour, 14.9 * hour))
+        for move in replay["moves"]:
+            times = [point[0] for point in move["track"]]
+            self.assertEqual((times[0], times[-1]), (move["start"], move["end"]))
+            self.assertEqual(times, sorted(times))
+        # A fix a minute: the drive passes each one at its minute, not just evenly by distance; only
+        # the last leg, from the shore to the middle of the lake the run went around, has no fix on it.
+        self.assertEqual([point[0] % 60 for point in drive["track"][:-2]], [0] * 12)
+        self.assertGreater(len(run["track"]), 50)
+        self.assertEqual(replay["start"], "2026-09-27T00:00:00+00:00")
+
+
 class AmbientTests(unittest.TestCase):
     """History's hero: the town, its weather, and a photo of it in that weather, each on its own."""
 

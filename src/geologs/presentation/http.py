@@ -50,6 +50,7 @@ from ..services.place_routes import route_map
 from ..services.patterns import insights, place_overview, place_patterns, predict_next, resolve_place_patterns, search_visits, transitions, visited_places
 from ..services.places import geocode, nearby_places, place_details, places_provider, reverse_geocode
 from ..services.reminders import cancel_reminder, create_reminder, delete_reminder
+from ..services.replay import day_replay
 from ..services.imports import import_file, last_import, note_import
 from ..services.samples import delete_samples, delete_source, export_csv, export_geojson, export_gpx, near, stats
 from ..services.saved_places import delete_label, delete_place, enrich_saved_places, place_visits, save_place, save_place_label
@@ -579,6 +580,7 @@ class Handler(BaseHTTPRequestHandler):
             elif url.path == "/api/insights": value = insights(db, min(int(q.get("limit", 50)), 100))
             elif url.path == "/api/ambient": value = ambient(db, q["lat"], q["lon"], q.get("date"), q.get("timezone"))
             elif url.path == "/api/day": value = day_summary(db, q["date"], q.get("timezone") or db.settings.get()["timezone"], q.get("source"))
+            elif url.path == "/api/replay": value = day_replay(db, q["date"], q.get("timezone") or db.settings.get()["timezone"], q.get("source"))
             elif url.path == "/api/daily-summary": value = daily_overview(db, q["date"], q.get("timezone"), q.get("source"))
             elif url.path == "/api/daily-summaries": value = daily_overviews(db, q.get("start"), q.get("end"), q.get("limit", 90))
             elif url.path == "/api/period-summary": value = period_summary(db, q["period"])

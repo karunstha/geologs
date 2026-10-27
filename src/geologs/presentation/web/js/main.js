@@ -11,6 +11,7 @@ import { initAuth } from "./views/auth.js";
 import { initData } from "./views/data.js";
 import { initHistory, refreshCurrent, refreshExplore } from "./views/history.js";
 import { initHome } from "./views/home.js";
+import { initReplay } from "./views/replay.js";
 import { refreshInsights } from "./views/patterns.js";
 import { initPlaceDialogs } from "./views/place-dialogs.js";
 import { initPlaces } from "./views/places.js";
@@ -37,6 +38,7 @@ initStayEdits();
 initMap();
 // After the map: the new Home borrows it, with the classic Home's timeline and details.
 initHome();
+initReplay();
 
 refreshAll().then(() => {
   state.lastEventId = state.events.reduce((max, e) => Math.max(max, e.id), 0);

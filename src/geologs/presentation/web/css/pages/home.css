@@ -173,14 +173,17 @@ body:has(#home-view.active) .topbar:not(.scrolled) {
 }
 #home-view .day-navigation .icon-button.bordered,
 #home-view #day-date,
-#home-view #today {
+#home-view #today,
+#home-view #replay-day {
   border-color: var(--home-control-line);
 }
 #home-view .day-navigation .icon-button.bordered:not(:disabled):hover,
-#home-view #today:not(:disabled):hover {
+#home-view #today:not(:disabled):hover,
+#home-view #replay-day:not(:disabled):hover {
   background: var(--home-control-hover);
 }
-#home-view #today {
+#home-view #today,
+#home-view #replay-day {
   border-color: transparent;
   border-radius: 999px;
   background: var(--home-control);

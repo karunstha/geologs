@@ -247,6 +247,29 @@ class HomeMapTest(BrowserTest):
         self.assertEqual(self.page.evaluate(PINS_IN_THE_CLEAR), [])
 
 
+class ReplayTest(BrowserTest):
+    def setUp(self):
+        super().setUp()
+        self.sign_in_with_token()
+
+    def test_a_day_replays_and_space_pauses_it_without_closing(self):
+        self.page.goto(f"{base_url}/#date={recent_weekdays(1)[0]}")
+        self.page.wait_for_selector("#replay-day:not([hidden])")
+        self.page.click("#replay-day")
+        self.page.wait_for_selector("#replay-dialog[open]")
+        # It starts on its own, a moment after fitting the day.
+        self.page.wait_for_function("document.getElementById('replay-play').ariaLabel === 'Pause'", timeout=5000)
+        self.page.keyboard.press(" ")
+        self.assertEqual(self.page.get_attribute("#replay-play", "aria-label"), "Play")
+        self.assertTrue(self.page.evaluate("document.getElementById('replay-dialog').open"))
+        # At the end, the day's whole distance has been travelled.
+        self.page.locator("#replay-scrub").evaluate("(scrub) => { scrub.value = 1000; scrub.dispatchEvent(new Event('input')); }")
+        self.assertEqual(self.page.text_content("#replay-distance"),
+                         self.page.evaluate("document.getElementById('replay-summary').textContent.split(' · ')[0]"))
+        self.page.keyboard.press("Escape")
+        self.assertFalse(self.page.evaluate("document.getElementById('replay-dialog').open"))
+
+
 class ViewsTest(BrowserTest):
     def test_every_view_opens(self):
         self.sign_in_with_token()

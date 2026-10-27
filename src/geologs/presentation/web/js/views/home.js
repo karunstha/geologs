@@ -16,6 +16,7 @@ import {
   zonedMidnight,
 } from "../core/format.js";
 import { state } from "../core/state.js";
+import { FREE_MAP_CREDIT, freeMapStyle, greyMap } from "../map/free-map.js";
 import { dayBounds, drawSelection, map, selectItem, setCoveredRight, setDayFitter, tripKey } from "../map/map.js";
 import { modeIcon, modeInfo, placeIcon, visitNumbers } from "../ui/icons.js";
 import { moveDay } from "./history.js";
@@ -29,18 +30,6 @@ export function newHomeEnabled() {
   }
 }
 
-const FREE_MAP = "https://tiles.openfreemap.org/styles/";
-const FREE_MAP_CREDIT =
-  '&copy; <a href="https://openfreemap.org" target="_blank" rel="noopener">OpenFreeMap</a> &copy; <a href="https://www.openmaptiles.org/" target="_blank" rel="noopener">OpenMapTiles</a> &copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors';
-// Positron's land, water and buildings, in the page's greys (the dark style is already dark).
-const LIGHT_GREYS = {
-  background: "#e4e4e1",
-  park: "#dcdcd8",
-  water: "#cfd0cf",
-  landuse_residential: "#dfdfdb",
-  landcover_wood: "#d9d9d5",
-  building: "#d6d6d2",
-};
 // The map's controls, off while it is the hero's still backdrop.
 const MAP_HANDLERS = ["dragging", "touchZoom", "doubleClickZoom", "scrollWheelZoom", "boxZoom", "keyboard", "tapHold"];
 const ICONS = {
@@ -334,11 +323,7 @@ function showLabels() {
 
 function styleMap() {
   styleReady = true;
-  const light = document.documentElement.dataset.theme !== "dark";
-  for (const layer of glMap.getStyle().layers) {
-    const grey = light && LIGHT_GREYS[layer.id];
-    if (grey) glMap.setPaintProperty(layer.id, layer.type === "background" ? "background-color" : "fill-color", grey);
-  }
+  greyMap(glMap);
   showLabels();
 }
 
@@ -374,8 +359,7 @@ function useGreyMap() {
   map.eachLayer((layer) => {
     if (layer instanceof L.TileLayer) tiles = layer;
   });
-  const styleFor = () => FREE_MAP + (document.documentElement.dataset.theme === "dark" ? "dark" : "positron");
-  let style = styleFor(),
+  let style = freeMapStyle(),
     layer = null,
     losses = 0;
   const unmount = () => {
@@ -389,7 +373,7 @@ function useGreyMap() {
     $("home-view").classList.remove("vector-map");
   };
   const mount = () => {
-    style = styleFor();
+    style = freeMapStyle();
     const current = (layer = L.maplibreGL({ style, attribution: FREE_MAP_CREDIT }).addTo(map));
     glMap = layer.getMaplibreMap();
     const fallback = setTimeout(useTiles, 15000);
@@ -415,9 +399,9 @@ function useGreyMap() {
   if (tiles) map.removeLayer(tiles);
   $("home-view").classList.add("vector-map");
   new MutationObserver(() => {
-    if (!glMap || styleFor() === style) return;
+    if (!glMap || freeMapStyle() === style) return;
     styleReady = false;
-    glMap.setStyle((style = styleFor()));
+    glMap.setStyle((style = freeMapStyle()));
   }).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
 }
 

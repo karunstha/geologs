@@ -1,0 +1,361 @@
+/* The day replayed (js/views/replay.js): a map filling the window, with the day's title at the top, what the
+   dot is doing above the controls, and the controls along the bottom, on nearly solid glass. Every blur
+   over the WebGL map is another copy of it for the GPU (see home.css), so these panels are not blurred. */
+.replay {
+  --replay-panel: rgb(255 255 255/0.92);
+  --replay-line: rgb(0 0 0/0.07);
+  --replay-text: #141414;
+  --replay-text-2: rgb(20 24 29/0.6);
+  --replay-well: rgb(0 0 0/0.06);
+  --replay-lit: #0f766e;
+  width: 100vw;
+  max-width: none;
+  height: 100vh;
+  height: 100dvh;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: #e4e4e1;
+  color: var(--replay-text);
+  overflow: hidden;
+}
+:root[data-theme="dark"] .replay {
+  --replay-panel: rgb(22 26 29/0.9);
+  --replay-line: rgb(255 255 255/0.1);
+  --replay-text: #fff;
+  --replay-text-2: rgb(255 255 255/0.68);
+  --replay-well: rgb(255 255 255/0.1);
+  --replay-lit: #5ed1c2;
+  background: var(--bg);
+}
+.replay[open] {
+  animation: replay-in 0.2s ease-out;
+}
+@keyframes replay-in {
+  from {
+    opacity: 0;
+  }
+}
+.replay::backdrop {
+  background: rgb(10 14 18/0.6);
+}
+.replay-map {
+  position: absolute;
+  inset: 0;
+}
+.replay-panel {
+  position: absolute;
+  z-index: 2;
+  border: 1px solid var(--replay-line);
+  border-radius: 20px;
+  background: var(--replay-panel);
+  box-shadow: var(--shadow-md);
+}
+
+.replay-head {
+  top: 16px;
+  left: 16px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  max-width: min(440px, calc(100% - 90px));
+  padding: 10px 10px 10px 18px;
+}
+.replay-head h2 {
+  font-size: 17px;
+  font-weight: 650;
+  line-height: 1.25;
+}
+.replay-head p {
+  color: var(--replay-text-2);
+  font-size: 13px;
+}
+.replay-head .icon-button {
+  flex: none;
+  color: var(--replay-text);
+}
+
+.replay-now {
+  left: 16px;
+  bottom: 96px;
+  display: grid;
+  gap: 12px;
+  width: min(340px, calc(100% - 32px));
+  padding: 14px 16px;
+}
+.replay-status {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 40px;
+}
+.replay-status > span:last-child {
+  display: grid;
+  min-width: 0;
+}
+.replay-status strong {
+  overflow: hidden;
+  font-size: 15px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.replay-status small {
+  color: var(--replay-text-2);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+.replay-status .mode-icon {
+  flex: none;
+}
+.replay-pin {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: radial-gradient(circle, var(--replay-lit) 0 6px, transparent 7px), var(--replay-well);
+}
+.replay-stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--replay-line);
+}
+.replay-stats dt {
+  color: var(--replay-text-2);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+.replay-stats dd {
+  font-size: 17px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.replay-controls {
+  right: 16px;
+  bottom: 16px;
+  left: 16px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 10px 14px 10px 10px;
+}
+.replay-controls button {
+  border: 0;
+  color: var(--replay-text);
+  font: inherit;
+  cursor: pointer;
+}
+.replay-controls svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.replay-play {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  background: var(--replay-lit) !important;
+  color: #fff !important;
+}
+:root[data-theme="dark"] .replay-play {
+  color: #04201c !important;
+}
+.replay-play svg {
+  width: 20px;
+  height: 20px;
+  fill: currentColor;
+}
+.replay-track {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+}
+.replay-ribbon {
+  position: absolute;
+  top: 12px;
+  right: 0;
+  left: 0;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--replay-well);
+}
+.replay-ribbon span {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--mode);
+}
+.replay-scrub {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+  appearance: none;
+}
+.replay-scrub::-webkit-slider-runnable-track {
+  height: 30px;
+  background: transparent;
+}
+.replay-scrub::-moz-range-track {
+  height: 30px;
+  background: transparent;
+}
+.replay-scrub::-webkit-slider-thumb {
+  width: 6px;
+  height: 26px;
+  margin-top: 2px;
+  border: 2px solid var(--replay-panel);
+  border-radius: 3px;
+  background: var(--replay-text);
+  appearance: none;
+}
+.replay-scrub::-moz-range-thumb {
+  width: 4px;
+  height: 22px;
+  border: 2px solid var(--replay-panel);
+  border-radius: 3px;
+  background: var(--replay-text);
+}
+.replay-scrub:focus-visible {
+  outline: 2px solid var(--replay-lit);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+.replay-speeds {
+  display: flex;
+  flex: none;
+  padding: 3px;
+  border-radius: 999px;
+  background: var(--replay-well);
+}
+.replay-speeds button {
+  min-width: 40px;
+  height: 30px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: transparent;
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.replay-speeds button[aria-pressed="true"] {
+  background: var(--replay-panel);
+  box-shadow: var(--shadow-sm);
+}
+.replay-follow {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  height: 36px;
+  padding: 0 12px;
+  border-radius: 999px;
+  background: var(--replay-well);
+  font-size: 13px;
+  font-weight: 600;
+}
+.replay-follow[aria-pressed="true"] {
+  background: var(--replay-lit);
+  color: #fff;
+}
+:root[data-theme="dark"] .replay-follow[aria-pressed="true"] {
+  color: #04201c;
+}
+
+/* The dot: the colour of the way it is on, with a ring that pulses while it moves. */
+.maplibregl-marker.replay-dot {
+  --mode: #176d69;
+  width: 18px;
+  height: 18px;
+  border: 3px solid #fff;
+  border-radius: 50%;
+  background: var(--mode);
+  box-shadow: 0 1px 6px rgb(0 0 0/0.35);
+}
+.maplibregl-marker.replay-dot::after {
+  position: absolute;
+  inset: -9px;
+  border: 2px solid var(--mode);
+  border-radius: 50%;
+  content: "";
+  animation: replay-pulse 1.4s ease-out infinite;
+}
+.maplibregl-marker.replay-dot.stopped::after {
+  animation: none;
+  opacity: 0;
+}
+@keyframes replay-pulse {
+  from {
+    opacity: 0.8;
+    transform: scale(0.5);
+  }
+  to {
+    opacity: 0;
+    transform: scale(1.3);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .maplibregl-marker.replay-dot::after {
+    animation: none;
+  }
+}
+.replay .maplibregl-ctrl-top-right {
+  top: 8px;
+  right: 8px;
+}
+
+.replay-button svg {
+  width: 14px;
+  height: 14px;
+  fill: currentColor;
+  stroke: none;
+}
+
+@media (max-width: 700px) {
+  .replay-head {
+    top: 10px;
+    right: 60px;
+    left: 10px;
+    max-width: none;
+  }
+  .replay-now {
+    left: 10px;
+    right: 10px;
+    bottom: 132px;
+    width: auto;
+  }
+  .replay-controls {
+    right: 10px;
+    bottom: 10px;
+    left: 10px;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  .replay-track {
+    order: -1;
+    flex-basis: 100%;
+  }
+  .replay-speeds {
+    margin-left: auto;
+  }
+}
