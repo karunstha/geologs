@@ -1,9 +1,11 @@
 // Home's Replay button, and sharing a replay: a link anyone can open (js/share.js) to watch the day,
-// with the start, the end and Home cut out unless you choose otherwise. The player is js/replay/player.js.
+// with the start, the end and Home cut out unless you choose otherwise, a picture of it for chat apps to
+// show with the link, and the code to embed it in a page. The player is js/replay/player.js.
 import { api, post } from "../core/api.js";
 import { $, safe, toast } from "../core/dom.js";
 import { dayTitle, distanceText, formatTime } from "../core/format.js";
 import { state } from "../core/state.js";
+import { blobBase64, drawCard } from "../replay/capture.js";
 import { openReplay, pauseReplay, replayDialog } from "../replay/player.js";
 import { refreshAccount } from "./account.js";
 
@@ -17,6 +19,32 @@ const EXPIRY_CHOICES = [
 
 function hideLabel(metres) {
   return metres ? `Hide ${distanceText(metres / 1000)} around them` : "Show everything";
+}
+
+// A Copy button for a field's text; it says so itself (a toast would sit under the replay's dialog).
+function copier(button, text) {
+  button.onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      button.textContent = "Copied";
+    } catch (_error) {
+      button.previousElementSibling?.select?.();
+    }
+  };
+}
+
+// The picture chat apps show for a link: drawn here from what the link itself shows (its own frozen,
+// trimmed replay, never more of the day), then kept with the link.
+async function addPicture(made, result) {
+  const shared = await fetch(`/api/shared/${encodeURIComponent(made.token)}`, { credentials: "omit", cache: "no-store" });
+  if (!shared.ok) return;
+  const data = await shared.json();
+  const card = await drawCard(data, data.title);
+  if (!card) return;
+  await post("/api/shares/preview", { id: made.id, image: await blobBase64(card) });
+  const image = result.querySelector(".replay-share-card");
+  image.src = URL.createObjectURL(card);
+  image.hidden = false;
 }
 
 // The Share panel, over the paused replay: what to keep private, then the link, shown once. Toasts would
@@ -74,19 +102,15 @@ function openSharePanel(day) {
       const link = location.origin + made.path;
       const result = panel.querySelector(".replay-share-result");
       result.hidden = false;
+      const embed = `<iframe src="${link}" width="640" height="480" style="border:0;border-radius:12px" allow="fullscreen" loading="lazy" referrerpolicy="no-referrer" title="${safe(made.title)}"></iframe>`;
       result.innerHTML = `<strong>Copy the link now</strong><span>It is shown only once. ${
         made.expires_at ? `It works until ${safe(formatTime(made.expires_at))}` : "It works until you turn it off"
-      }, under Account → Shared links.</span><div class="copy-field"><input class="input mono" readonly value="${safe(link)}" aria-label="Link to the replay"><button type="button" class="button secondary small" data-copy>Copy</button><a class="button ghost small" href="${safe(made.path)}" target="_blank" rel="noopener">Open</a></div>`;
-      const copy = result.querySelector("[data-copy]");
-      copy.onclick = async () => {
-        try {
-          await navigator.clipboard.writeText(link);
-          copy.textContent = "Copied";
-        } catch (_error) {
-          result.querySelector("input").select();
-        }
-      };
+      }, under Account → Shared links.</span><div class="copy-field"><input class="input mono" readonly value="${safe(link)}" aria-label="Link to the replay"><button type="button" class="button secondary small" data-copy-link>Copy</button><a class="button ghost small" href="${safe(made.path)}" target="_blank" rel="noopener">Open</a></div><details class="replay-share-embed"><summary>Embed in a page</summary><div class="copy-field"><input class="input mono" readonly value="${safe(embed)}" aria-label="Code to embed the replay"><button type="button" class="button secondary small" data-copy-embed>Copy</button></div></details><img class="replay-share-card" alt="The picture shown with the link" hidden>`;
+      copier(result.querySelector("[data-copy-link]"), link);
+      copier(result.querySelector("[data-copy-embed]"), embed);
       result.querySelector("input").select();
+      // Without a picture, a chat app shows the link with its title and totals alone.
+      addPicture(made, result).catch(() => {});
       submit.hidden = true;
       refreshAccount().catch(() => {});
     } catch (failure) {

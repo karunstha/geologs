@@ -16,14 +16,14 @@ export function darkTheme() {
   return document.documentElement.dataset.theme === "dark";
 }
 
-// Positron, or its dark style, for the page's theme.
-export function freeMapStyle() {
-  return FREE_MAP + (darkTheme() ? "dark" : "positron");
+// Positron, or its dark style, for the page's theme (or the one asked for).
+export function freeMapStyle(dark = darkTheme()) {
+  return FREE_MAP + (dark ? "dark" : "positron");
 }
 
 // Recolour a loaded light style's land and water in LIGHT_GREYS.
-export function greyMap(glMap) {
-  if (darkTheme()) return;
+export function greyMap(glMap, dark = darkTheme()) {
+  if (dark) return;
   for (const layer of glMap.getStyle().layers) {
     const grey = LIGHT_GREYS[layer.id];
     if (grey) glMap.setPaintProperty(layer.id, layer.type === "background" ? "background-color" : "fill-color", grey);

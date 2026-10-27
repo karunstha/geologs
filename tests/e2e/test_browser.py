@@ -279,6 +279,12 @@ class ReplayTest(BrowserTest):
         self.page.wait_for_selector(".replay-share-result:not([hidden])")
         link = self.page.input_value(".replay-share-result input")
         self.assertRegex(link, r"/s/[\w-]{22}$")
+        # The picture chat apps show: drawn from the link's own replay, then kept with it.
+        self.page.wait_for_selector(".replay-share-card:not([hidden])", timeout=30000)
+        with urllib.request.urlopen(link + "/preview.jpg") as picture:
+            self.assertEqual(picture.read(3), b"\xff\xd8\xff")
+        with urllib.request.urlopen(link) as page:
+            self.assertIn(f'<meta property="og:image" content="{link}/preview.jpg">', page.read().decode())
         stranger = browser.new_context()
         self.addCleanup(stranger.close)
         viewer = stranger.new_page()
@@ -300,6 +306,20 @@ class ReplayTest(BrowserTest):
         viewer.reload()
         viewer.wait_for_selector("#share-message h1")
         self.assertEqual(viewer.text_content("#share-message h1"), "This replay isn't available")
+
+
+    def test_a_replay_saves_as_a_video(self):
+        self.page.goto(f"{base_url}/#date={recent_weekdays(1)[0]}")
+        self.page.wait_for_selector("#replay-day:not([hidden])")
+        self.page.click("#replay-day")
+        self.page.click('#replay-speeds [data-speed="4"]')
+        with self.page.expect_download(timeout=90000) as saving:
+            self.page.click("#replay-video")
+            self.page.wait_for_selector(".replay.recording")
+        video = saving.value
+        self.assertRegex(video.suggested_filename, r"\.(mp4|webm)$")
+        self.assertGreater(Path(video.path()).stat().st_size, 50_000)
+        self.assertFalse(self.page.evaluate("document.getElementById('replay-dialog').classList.contains('recording')"))
 
 
 class ViewsTest(BrowserTest):

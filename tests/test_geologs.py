@@ -3129,6 +3129,16 @@ class ShareTests(unittest.TestCase):
         self.assertEqual((nothing_hidden["moves"][0]["to_name"], nothing_hidden["stays"][0]["name"]), (None, ""))
         self.assertEqual((nothing_hidden["start"], nothing_hidden["timezone"]), (replay["start"], "UTC"))
 
+    def test_a_links_picture_must_be_a_small_jpeg(self):
+        import base64
+        from geologs.domain.shares import preview_image
+        jpeg = b"\xff\xd8\xff\xe0" + b"picture" + b"\xff\xd9"
+        self.assertEqual(preview_image(base64.b64encode(jpeg).decode()), jpeg)
+        for bad in ("not base64!", base64.b64encode(b"\x89PNG\r\n").decode(),
+                    base64.b64encode(b"\xff\xd8\xff" + b"x" * 1_000_001 + b"\xff\xd9").decode()):
+            with self.subTest(bad=bad[:12]), self.assertRaises(ValueError):
+                preview_image(bad)
+
     def test_options_are_checked_and_private_unless_chosen(self):
         from geologs.domain.shares import share_options
         self.assertEqual(share_options({}), {"hide_m": 500, "times": "elapsed", "names": True, "expires_days": 7, "title": ""})
@@ -3492,6 +3502,41 @@ class ShareServerTests(LiveServerCase):
         status, body, _ = self.send("GET", "/api/shared/" + made["token"])
         self.assertEqual((status, body), (404, {"error": "This link was turned off, or has expired."}))
         self.assertEqual(self.send("GET", "/api/shared/")[0], 404)
+
+    def test_a_link_shows_its_title_and_picture_in_chat_apps(self):
+        import base64
+        from geologs.services import accounts
+        owner = {"Authorization": "Bearer main-token"}
+        self.send("POST", "/api/points", lake_run_day(), owner)
+        made = self.send("POST", "/api/shares", {"date": "2026-09-27", "timezone": "UTC",
+                                                  "title": 'Lake "run" <fast>'}, owner)[1]
+        page = self.send("GET", made["path"])[1].decode()
+        self.assertIn('<meta property="og:title" content="Lake &quot;run&quot; &lt;fast&gt;">', page)
+        self.assertIn('property="og:description" content="', page)
+        self.assertNotIn("og:image", page)  # no picture yet
+        self.assertEqual(self.send("GET", made["path"] + "/preview.jpg")[0], 404)
+        jpeg = b"\xff\xd8\xff\xe0" + b"picture" + b"\xff\xd9"
+        image = base64.b64encode(jpeg).decode()
+        # Only its owner gives a link its picture.
+        db = open_database(self.db)
+        try:
+            bob = accounts.add_user(db, "bob@example.com", "correct horse battery")
+            bob_token = accounts.create_api_token(db, bob["id"], "test")["token"]
+        finally:
+            db.close()
+        self.assertEqual(self.send("POST", "/api/shares/preview", {"id": made["id"], "image": image},
+                                   {"Authorization": "Bearer " + bob_token})[0], 400)
+        self.assertEqual(self.send("POST", "/api/shares/preview", {"id": made["id"], "image": image}, owner)[0], 200)
+        status, body, response = self.send("GET", made["path"] + "/preview.jpg")
+        self.assertEqual((status, body, response.getheader("Content-Type")), (200, jpeg, "image/jpeg"))
+        page = self.send("GET", made["path"])[1].decode()
+        self.assertIn(f'<meta property="og:image" content="http://127.0.0.1:{self.server.server_address[1]}{made["path"]}/preview.jpg">', page)
+        self.assertNotIn("pictured", json.dumps(self.send("GET", "/api/shared/" + made["token"])[1]))
+        self.send("POST", "/api/shares/delete", {"id": made["id"]}, owner)
+        self.assertEqual(self.send("GET", made["path"] + "/preview.jpg")[0], 404)
+        status, page, _ = self.send("GET", made["path"])
+        self.assertEqual(status, 404)
+        self.assertNotIn(b"og:title", page)
 
 
 class IngestTests(LiveServerCase):

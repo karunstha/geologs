@@ -2,7 +2,7 @@
 from datetime import datetime
 
 from ..domain.accounts import token_hash
-from ..domain.shares import expiry, share_options, share_token, shared_replay
+from ..domain.shares import expiry, preview_image, share_options, share_token, shared_replay
 from ..domain.timing import parse_time
 from .replay import day_replay
 from .use_case import use_case
@@ -27,6 +27,15 @@ def create_share(db, payload):
 
 
 @use_case
+def save_preview(db, payload):
+    """The picture chat apps show for one of your links: your browser draws it from the link's own replay,
+    so it shows only what the link does."""
+    if not db.shares.set_preview(payload["id"], preview_image(payload.get("image"))):
+        raise ValueError("no such link")
+    return {"ok": True}
+
+
+@use_case
 def list_shares(db):
     return db.shares.mine()
 
@@ -39,9 +48,19 @@ def delete_share(db, share_id):
     return {"ok": True}
 
 
+def _usable(token):
+    return bool(token) and len(token) <= 64
+
+
+@use_case
+def share_preview(db, token):
+    """A link's picture (JPEG bytes), or None."""
+    return db.shares.preview(token_hash(token), parse_time(None)) if _usable(token) else None
+
+
 @use_case
 def open_share(db, token):
     """What a link shows, or None once it is turned off or expired (or never was)."""
-    if not token or len(token) > 64:
+    if not _usable(token):
         return None
     return db.shares.shared(token_hash(token), parse_time(None))

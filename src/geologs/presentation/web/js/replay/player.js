@@ -6,7 +6,11 @@ import { $, safe } from "../core/dom.js";
 import { distanceText, durationText, speedText } from "../core/format.js";
 import { freeMapStyle, greyMap } from "../map/free-map.js";
 import { modeIcon, modeInfo, modeName } from "../ui/icons.js";
+import { drawFrame, videoFormat } from "./capture.js";
 
+// A video's longer side at most, and how long it holds the whole day at the end.
+const VIDEO_MAX_PX = 1920;
+const VIDEO_END_MS = 1800;
 // Seconds the day's moving time plays in at 1×, the least any one way gets, and each stop's pause.
 const MOVING_SECONDS = 28;
 const LEAST_MOVE_SECONDS = 1.6;
@@ -24,11 +28,14 @@ const ICONS = {
     '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>',
   share:
     '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M7.5 7.5 12 3l4.5 4.5M5 13v6.5h14V13"/></svg>',
+  video:
+    '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="6" width="13" height="12" rx="2.5"/><path d="m16 10.5 5-3v9l-5-3"/></svg>',
 };
 const DIALOG = `
   <div id="replay-map" class="replay-map"></div>
   <header class="replay-head replay-panel">
     <div><h2 id="replay-title">Replay</h2><p id="replay-summary"></p></div>
+    <button id="replay-video" class="replay-share-button" type="button" title="Save the replay as a video">${ICONS.video}<span>Video</span></button>
     <button id="replay-share" class="replay-share-button" type="button" hidden>${ICONS.share}<span>Share</span></button>
     <button id="replay-close" class="icon-button" type="button" aria-label="Close replay" title="Close (Esc)">${ICONS.close}</button>
   </header>
@@ -245,6 +252,8 @@ function tick(now) {
   if (replay.time >= replay.beats.length) {
     setPlaying(false);
     fitDay();
+    // A video holds the whole day a moment, then is saved.
+    if (replay.recording) setTimeout(() => stopRecording(true), VIDEO_END_MS);
     return;
   }
   frame = requestAnimationFrame(tick);
@@ -375,6 +384,8 @@ function mountMap() {
     style: freeMapStyle(),
     // The style credits OpenFreeMap and OpenStreetMap itself; the credit sits clear of the controls.
     attributionControl: false,
+    // A video copies each frame of the map (see recordVideo).
+    preserveDrawingBuffer: true,
     center: [-98.35, 39.5],
     zoom: 3,
   });
@@ -427,6 +438,7 @@ export function replayDialog() {
   dialog.addEventListener("cancel", (event) => replay?.standalone && event.preventDefault());
   $("replay-close").onclick = () => dialog.close();
   $("replay-share").onclick = () => replay?.share?.();
+  $("replay-video").onclick = () => (replay?.recording ? stopRecording(true) : recordVideo());
   $("replay-play").onclick = () => setPlaying(!replay.playing);
   $("replay-follow").onclick = () => setFollow(!replay.follow);
   $("replay-speeds").onclick = (event) => {
@@ -472,6 +484,11 @@ export function openReplay(data, { title, standalone = false, share = null } = {
   $("replay-clock-label").textContent = data.elapsed ? "Elapsed" : "Time";
   $("replay-close").hidden = standalone;
   $("replay-share").hidden = !share;
+  $("replay-video").hidden = !videoFormat();
+  // Your own replay is the whole day; a link's page shows only what the link does.
+  $("replay-video").title = standalone
+    ? "Save the replay as a video"
+    : "Save the replay as a video. It shows the whole day, Home too: to post one without, make a link and save it from the link's page.";
   dialog.classList.toggle("standalone", standalone);
   dialog.showModal();
   mountMap();
@@ -505,11 +522,82 @@ export function openReplay(data, { title, standalone = false, share = null } = {
 }
 
 function closeReplay() {
+  stopRecording(false);
   setPlaying(false);
   $("replay-share-panel")?.remove();
   cancelAnimationFrame(frame);
   frame = 0;
   replay = null;
+}
+
+// Record the replay from the start, as it plays (at the speed chosen, following the dot), and save the
+// video when it ends or Stop is pressed. Each frame is drawn on a canvas of its own: the map, the dot,
+// and what the panels say (see capture.drawFrame). A browser tab in the background stops drawing, so the
+// video waits for it.
+function recordVideo() {
+  const format = videoFormat();
+  if (!format || !replay) return;
+  $("replay-share-panel")?.remove();
+  const source = glMap.getCanvas(),
+    scale = Math.min(VIDEO_MAX_PX / Math.max(source.clientWidth, source.clientHeight), source.width / source.clientWidth);
+  const even = (value) => Math.round(value / 2) * 2;
+  const canvas = document.createElement("canvas");
+  canvas.width = even(source.clientWidth * scale);
+  canvas.height = even(source.clientHeight * scale);
+  const ctx = canvas.getContext("2d");
+  const recorder = new MediaRecorder(canvas.captureStream(30), { mimeType: format[0], videoBitsPerSecond: 8_000_000 });
+  const chunks = [],
+    name = ($("replay-title").textContent.trim() || "replay").replace(/[^\w-]+/g, "-").replace(/^-|-$/g, "").toLowerCase();
+  recorder.ondataavailable = (event) => event.data.size && chunks.push(event.data);
+  recorder.onstop = () => {
+    if (!recorder.save) return;
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(new Blob(chunks, { type: format[0].split(";")[0] }));
+    link.download = `${name || "replay"}.${format[1]}`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(link.href), 60000);
+  };
+  replay.recording = recorder;
+  $("replay-dialog").classList.add("recording");
+  $("replay-video").querySelector("span").textContent = "Stop";
+  setFollow(true);
+  seek(0);
+  setPlaying(true);
+  recorder.start(1000);
+  const paint = () => {
+    if (replay?.recording !== recorder) return;
+    const status = $("replay-status");
+    drawFrame(
+      ctx,
+      source,
+      {
+        dot: glMap.project(head.getLngLat()),
+        color: head.getElement().style.getPropertyValue("--mode") || NO_MODE_COLOR,
+        title: $("replay-title").textContent,
+        summary: $("replay-summary").textContent,
+        status: status.querySelector("strong")?.textContent || "",
+        detail: status.querySelector("small")?.textContent || "",
+        stats: [...document.querySelectorAll(".replay-stats > div")].map((item) => [
+          item.querySelector("dt").textContent,
+          item.querySelector("dd").textContent,
+        ]),
+      },
+      canvas.width / source.clientWidth,
+    );
+    requestAnimationFrame(paint);
+  };
+  paint();
+}
+
+// Stop recording, and save what was recorded (or not, when the replay is closed).
+function stopRecording(save) {
+  const recorder = replay?.recording;
+  if (!recorder) return;
+  replay.recording = null;
+  recorder.save = save;
+  recorder.stop();
+  $("replay-dialog").classList.remove("recording");
+  $("replay-video").querySelector("span").textContent = "Video";
 }
 
 function seek(time) {

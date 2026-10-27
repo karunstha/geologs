@@ -1,4 +1,6 @@
 """What a shared replay shows: a day's replay (see services.replay) with what you chose to keep private taken out."""
+import base64
+import binascii
 import secrets
 from datetime import datetime, timedelta
 
@@ -11,6 +13,8 @@ DEFAULT_HIDE_M = 500
 EXPIRY_CHOICES_DAYS = (1, 7, 30, None)
 DEFAULT_EXPIRY_DAYS = 7
 TITLE_MAX = 80
+# A link's picture for chat apps: a JPEG (1200 × 630 is what they show), of at most this many bytes.
+PREVIEW_MAX_BYTES = 1_000_000
 
 
 def share_token():
@@ -36,6 +40,19 @@ def share_options(payload):
         raise ValueError(f"title is at most {TITLE_MAX} characters")
     return {"hide_m": hide, "times": times, "names": payload.get("names", True) is not False,
             "expires_days": expires, "title": title}
+
+
+def preview_image(encoded):
+    """A link's picture from its base64 text: the JPEG's bytes, checked to be one and not too large."""
+    try:
+        image = base64.b64decode(str(encoded or ""), validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("image must be base64") from exc
+    if not image.startswith(b"\xff\xd8\xff") or not image.rstrip(b"\0").endswith(b"\xff\xd9"):
+        raise ValueError("image must be a JPEG")
+    if len(image) > PREVIEW_MAX_BYTES:
+        raise ValueError(f"image is at most {PREVIEW_MAX_BYTES // 1000} kB")
+    return image
 
 
 def expiry(now, days):

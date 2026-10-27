@@ -501,3 +501,41 @@
     width: auto;
   }
 }
+
+/* The picture made for a link, and the code to embed it. */
+.replay-share-card {
+  width: 100%;
+  margin-top: 6px;
+  border-radius: 10px;
+  aspect-ratio: 1200 / 630;
+  object-fit: cover;
+}
+.replay-share-card[hidden] {
+  display: none;
+}
+.replay-share-embed summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+/* Recording a video: the button turns into a red Stop, and the controls wait. */
+.replay.recording #replay-video {
+  background: var(--danger);
+  color: #fff;
+}
+.replay.recording .replay-controls,
+.replay.recording #replay-share {
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+/* A short window (a replay embedded in a page): what the dot is doing, without the totals. */
+@media (max-height: 560px) {
+  .replay-now {
+    gap: 0;
+    padding: 8px 12px;
+  }
+  .replay-stats {
+    display: none;
+  }
+}

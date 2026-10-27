@@ -31,8 +31,21 @@ class SharesRepository(Repository):
         return bool(self.execute("DELETE FROM shares WHERE id=?", (int(share_id),)).rowcount)
 
     def shared(self, token_hash, now):
-        """The link with this hash, unless it has expired: its title and frozen replay, or None."""
+        """The link with this hash, unless it has expired: its title, frozen replay, and whether it has a
+        picture (`pictured`), or None."""
         self.db.conn.execute("SELECT set_config('geologs.share', ?, true)", (token_hash,))
-        row = self.one("""SELECT title,payload,expires_at FROM shares
+        row = self.one("""SELECT title,payload,expires_at,preview IS NOT NULL AS pictured FROM shares
             WHERE token_hash=? AND (expires_at IS NULL OR expires_at>?)""", (token_hash, now))
-        return row and {"title": row["title"], "expires_at": row["expires_at"], **json.loads(row["payload"])}
+        return row and {"title": row["title"], "expires_at": row["expires_at"], "pictured": row["pictured"],
+                        **json.loads(row["payload"])}
+
+    def set_preview(self, share_id, image):
+        """The picture a chat app shows for the link (a JPEG its owner's browser drew; see save_preview)."""
+        return bool(self.execute("UPDATE shares SET preview=? WHERE id=?", (image, int(share_id))).rowcount)
+
+    def preview(self, token_hash, now):
+        """The link's picture, unless it has expired or has none: JPEG bytes, or None."""
+        self.db.conn.execute("SELECT set_config('geologs.share', ?, true)", (token_hash,))
+        row = self.one("""SELECT preview FROM shares WHERE token_hash=? AND preview IS NOT NULL
+            AND (expires_at IS NULL OR expires_at>?)""", (token_hash, now))
+        return bytes(row["preview"]) if row else None

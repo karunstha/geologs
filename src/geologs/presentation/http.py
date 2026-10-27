@@ -3,6 +3,7 @@ import base64
 import binascii
 import hashlib
 import hmac
+import html
 import json
 import os
 import secrets
@@ -51,7 +52,7 @@ from ..services.patterns import insights, place_overview, place_patterns, predic
 from ..services.places import geocode, nearby_places, place_details, places_provider, reverse_geocode
 from ..services.reminders import cancel_reminder, create_reminder, delete_reminder
 from ..services.replay import day_replay
-from ..services.shares import create_share, delete_share, list_shares, open_share
+from ..services.shares import create_share, delete_share, list_shares, open_share, save_preview, share_preview
 from ..services.imports import import_file, last_import, note_import
 from ..services.samples import delete_samples, delete_source, export_csv, export_geojson, export_gpx, near, stats
 from ..services.saved_places import delete_label, delete_place, enrich_saved_places, place_visits, save_place, save_place_label
@@ -291,28 +292,59 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
 
     def send_shared(self, path):
-        """A shared replay, public to whoever holds its link: /s/<token> is the page that plays it, and
-        /api/shared/<token> what it plays (only that one link's frozen replay; see services.shares).
-        Neither tells search engines, or the sites a viewer goes on to, where it was found."""
+        """A shared replay, public to whoever holds its link: /s/<token> is the page that plays it (named
+        and pictured for chat apps that show a link), /s/<token>/preview.jpg that picture, and
+        /api/shared/<token> what it plays: only that one link's frozen replay (see services.shares).
+        None tells search engines, or the sites a viewer goes on to, where it was found."""
         private = {"Referrer-Policy": "no-referrer", "X-Robots-Tag": "noindex, nofollow"}
-        if path.startswith("/s/"):
-            self.send_web_file("/share.html", private)
-            return
+        page = path.startswith("/s/")
+        token = path[len("/s/" if page else "/api/shared/"):]
+        picture = page and token.endswith(PREVIEW_SUFFIX)
+        token = token[:-len(PREVIEW_SUFFIX)] if picture else token
         self.user = None
         db = self.open_store()
         if db is None:
             return
         try:
-            shared = open_share(db, path[len("/api/shared/"):])
+            shared = share_preview(db, token) if picture else open_share(db, token)
         except Exception:
-            self.error_json(500, internal_failure("GET /api/shared"))
+            self.error_json(500, internal_failure("GET " + ("/s/" if page else "/api/shared/")))
             return
         finally:
             db.close()
-        if shared is None:
+        if picture:
+            if shared is None:
+                self.error_json(404, "not found")
+            else:
+                self.send_body(200, shared, "image/jpeg", private)
+        elif page:
+            source = files("geologs.presentation").joinpath("web", "share.html").read_text()
+            meta = share_meta(shared, f"{self.public_base()}/s/{token}") if shared else ""
+            self.send_body(200 if shared else 404, source.replace("<!-- share-meta -->", meta).encode(),
+                           "text/html; charset=utf-8", private)
+        elif shared is None:
             self.send_json(404, {"error": "This link was turned off, or has expired."}, private)
         else:
-            self.send_json(200, shared, private)
+            self.send_json(200, {key: value for key, value in shared.items() if key != "pictured"}, private)
+
+    def public_base(self):
+        """Where people reach this server: GEOLOGS_PUBLIC_URL, else the address this request came to."""
+        configured = config.public_url()
+        if configured:
+            return configured
+        scheme = "https" if self.headers.get("X-Forwarded-Proto", "").lower() == "https" else "http"
+        return f"{scheme}://{self.headers.get('Host') or 'localhost'}"
+
+    def send_body(self, status, body, content_type, extra_headers=None):
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        for name, value in (extra_headers or {}).items():
+            self.send_header(name, value)
+        self.end_headers()
+        self.wfile.write(body)
 
     def open_store(self):
         """The store, working for the request's user (see guarded and ingest_authorized), or a 503
@@ -773,6 +805,7 @@ class Handler(BaseHTTPRequestHandler):
                 result = create_ingest_token(db, payload)
             elif path == "/api/shares": result = create_share(db, payload)
             elif path == "/api/shares/delete": result = delete_share(db, payload["id"])
+            elif path == "/api/shares/preview": result = save_preview(db, payload)
             elif path == "/api/invites":
                 require_admin(self.user)
                 result = admin_invite(db, self.user, payload.get("email"), payload.get("role") or "user", self.client_address[0])
@@ -870,6 +903,25 @@ class Handler(BaseHTTPRequestHandler):
 EXPORTS = {"/api/export.csv": (export_csv, "text/csv; charset=utf-8"),
            "/api/export.gpx": (export_gpx, "application/gpx+xml; charset=utf-8")}
 IMPORT_MAX_BYTES = 1_000_000_000
+PREVIEW_SUFFIX = "/preview.jpg"
+
+
+def _distance(km, units):
+    return f"{km / 1.609344:.1f} mi" if units == "imperial" else f"{km:.1f} km"
+
+
+def share_meta(shared, url):
+    """The tags a chat app reads to show a shared replay's link: its title, distance and time moving,
+    and its picture when the owner's browser drew one."""
+    minutes = round(shared["moving_minutes"])
+    moving = f"{minutes // 60} h {minutes % 60} min" if minutes >= 60 else f"{minutes} min"
+    description = f"{_distance(shared['distance_km'], shared.get('units'))} · {moving} moving · a GeoLogs replay"
+    tags = {"og:type": "website", "og:url": url, "og:title": shared["title"], "og:description": description}
+    if shared["pictured"]:
+        tags.update({"og:image": url + PREVIEW_SUFFIX, "og:image:width": "1200", "og:image:height": "630"})
+    return "\n  ".join([f'<meta name="description" content="{html.escape(description)}">',
+                       *(['<meta name="twitter:card" content="summary_large_image">'] if shared["pictured"] else []),
+                       *(f'<meta property="{name}" content="{html.escape(value)}">' for name, value in tags.items())])
 # How each person's latest import went (kept in memory: an import outlives its request).
 _imports = {}
 _imports_lock = threading.Lock()
