@@ -1,0 +1,6 @@
+# Add this file when running the app from the approved GHCR release channel.
+# The updater sets GEOLOGS_AUTO_IMAGE to a verified, immutable digest.
+services:
+  app:
+    build: !reset null
+    image: ${GEOLOGS_AUTO_IMAGE:?Run scripts/auto-update to select an approved image}

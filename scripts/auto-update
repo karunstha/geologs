@@ -1,0 +1,181 @@
+#!/usr/bin/env python3
+"""Install the signed stable-auto app image after a verified PostgreSQL backup.
+
+Run on the Docker host from this checkout. The script never updates the database image.
+"""
+import datetime as dt
+import fcntl
+import json
+import os
+import pathlib
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+IMAGE = "ghcr.io/karunstha/geologs"
+STATE = ROOT / "update-status"
+ACTIVE = STATE / "active.env"
+BACKUPS = ROOT / "backups"
+BASE = ["docker", "compose", "-f", str(ROOT / "docker-compose.yaml")]
+AUTO = BASE + ["-f", str(ROOT / "docker-compose.auto.yaml"), "--env-file", str(ROOT / ".env"),
+               "--env-file", str(ACTIVE)]
+CERT_IDENTITY = r"^https://github\.com/karunstha/geologs/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$"
+
+
+def run(*args, input_file=None, output_file=None):
+    with (open(input_file, "rb") if input_file else open(os.devnull, "rb")) as source:
+        result = subprocess.run(args, cwd=ROOT, stdin=source, stdout=output_file or subprocess.PIPE,
+                                stderr=subprocess.PIPE, check=False)
+    if result.returncode:
+        raise RuntimeError(f"{' '.join(args[:3])} failed: {result.stderr.decode(errors='replace')[-1500:]}")
+    return result.stdout.decode().strip() if output_file is None else ""
+
+
+def compose(auto, *args):
+    return run(*(AUTO if auto else BASE), *args)
+
+
+def write_atomic(path, text, mode=0o600):
+    fd, name = tempfile.mkstemp(prefix=".update-", dir=path.parent)
+    try:
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, "w", encoding="utf-8") as out:
+            out.write(text)
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(name, path)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
+def status(**values):
+    path = STATE / "status.json"
+    try:
+        current = json.loads(path.read_text())
+    except (OSError, ValueError):
+        current = {}
+    current.update(values)
+    write_atomic(path, json.dumps(current, sort_keys=True) + "\n", 0o644)
+
+
+def env_value(name):
+    for line in (ROOT / ".env").read_text().splitlines():
+        if line.startswith(name + "="):
+            value = line.partition("=")[2].strip()
+            return value[1:-1] if len(value) > 1 and value[0] == value[-1] and value[0] in "\"'" else value
+    return ""
+
+
+def backup():
+    BACKUPS.mkdir(mode=0o700, exist_ok=True)
+    stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    target = BACKUPS / f"geologs-{stamp}.dump"
+    fd, partial = tempfile.mkstemp(prefix=".geologs-", suffix=".dump", dir=BACKUPS)
+    try:
+        with os.fdopen(fd, "wb") as out:
+            run(*BASE, "exec", "-T", "db", "pg_dump", "-U", "geologs", "-d", "geologs", "-Fc", output_file=out)
+            out.flush()
+            os.fsync(out.fileno())
+        listing = run(*BASE, "exec", "-T", "db", "pg_restore", "--list", input_file=partial)
+        if "TABLE DATA" not in listing or pathlib.Path(partial).stat().st_size < 1024:
+            raise RuntimeError("database dump is incomplete")
+        os.replace(partial, target)
+        env_copy = target.with_suffix(".env")
+        shutil.copy2(ROOT / ".env", env_copy)
+        env_copy.chmod(0o600)
+        return target
+    finally:
+        if os.path.exists(partial):
+            os.unlink(partial)
+
+
+def ready(token):
+    deadline = time.monotonic() + 600
+    port = env_value("GEOLOGS_PUBLISHED_PORT") or "8765"
+    while time.monotonic() < deadline:
+        try:
+            health = json.loads(run("docker", "inspect", "geologs", "--format", "{{json .State.Health}}"))
+            if health and health.get("Status") == "unhealthy":
+                raise RuntimeError("app container is unhealthy")
+            if health and health.get("Status") == "healthy":
+                request = urllib.request.Request(f"http://127.0.0.1:{port}/api/status",
+                                                 headers={"Authorization": "Bearer " + token})
+                with urllib.request.urlopen(request, timeout=8) as reply:
+                    if json.load(reply).get("ok") is True:
+                        return
+        except (OSError, ValueError, urllib.error.URLError, subprocess.CalledProcessError):
+            pass
+        time.sleep(5)
+    raise RuntimeError("app did not become healthy and pass the authenticated smoke test")
+
+
+def prune_backups(keep):
+    dumps = sorted(BACKUPS.glob("geologs-*.dump"), reverse=True)
+    for old in dumps[keep:]:
+        old.unlink()
+        old.with_suffix(".env").unlink(missing_ok=True)
+
+
+def main():
+    if not (ROOT / ".env").is_file():
+        raise RuntimeError("create .env before enabling updates")
+    token = env_value("GEOLOGS_TOKEN")
+    if not token:
+        raise RuntimeError("GEOLOGS_TOKEN is required for the smoke test")
+    STATE.mkdir(mode=0o755, exist_ok=True)
+    lock = STATE / "update.lock"
+    with open(lock, "w") as file:
+        fcntl.flock(file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        digest = run("docker", "buildx", "imagetools", "inspect", f"{IMAGE}:stable-auto",
+                     "--format", "{{.Manifest.Digest}}")
+        if not re.fullmatch(r"sha256:[a-f0-9]{64}", digest):
+            raise RuntimeError("registry returned an invalid image digest")
+        reference = f"{IMAGE}@{digest}"
+        run("cosign", "verify", reference, "--certificate-identity-regexp", CERT_IDENTITY,
+            "--certificate-oidc-issuer", "https://token.actions.githubusercontent.com")
+        run("docker", "pull", reference)
+        version = run("docker", "image", "inspect", reference, "--format",
+                      "{{index .Config.Labels \"org.opencontainers.image.version\"}}")
+        if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", version):
+            raise RuntimeError("release image has no valid version label")
+        now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+        previous = ACTIVE.read_text() if ACTIVE.exists() else None
+        if previous and reference in previous:
+            status(available=None, checked_at=now, last_result=f"Already running {version}")
+            return
+        status(available=version, checked_at=now)
+        # Save the existing local app image for a first transition to release images.
+        if previous is None:
+            image_id = run("docker", "inspect", "geologs", "--format", "{{.Image}}")
+            run("docker", "tag", image_id, "geologs:local")
+        saved = backup()
+        write_atomic(ACTIVE, "GEOLOGS_AUTO_IMAGE=" + reference + "\n")
+        try:
+            compose(True, "up", "--no-build", "--no-deps", "-d", "--force-recreate", "app")
+            ready(token)
+        except Exception:
+            if previous is None:
+                ACTIVE.unlink(missing_ok=True)
+                compose(False, "up", "--no-build", "--no-deps", "-d", "--force-recreate", "app")
+            else:
+                write_atomic(ACTIVE, previous)
+                compose(True, "up", "--no-build", "--no-deps", "-d", "--force-recreate", "app")
+            status(last_result=f"Failed {version}; restored previous image. Backup: {saved.name}")
+            raise
+        status(available=None, last_result=f"Installed {version}; backup: {saved.name}")
+        prune_backups(max(1, int(os.environ.get("GEOLOGS_BACKUP_RETENTION", "8"))))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:
+        print(f"GeoLogs auto-update: {exc}", file=sys.stderr)
+        sys.exit(1)

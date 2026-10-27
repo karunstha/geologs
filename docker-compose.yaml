@@ -24,6 +24,7 @@ services:
 
   app:
     build: .
+    image: geologs:local
     container_name: geologs
     depends_on:
       db:
