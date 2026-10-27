@@ -1,6 +1,7 @@
 """Small dependency-free MCP JSON-RPC dispatcher for Streamable HTTP."""
 import json
 
+from .. import config
 from ..services.corrections import save_mode_override
 from ..services.day import day_summary
 from ..services.fuel import fuel_costs
@@ -163,7 +164,7 @@ def dispatch(db, request):
         if method == "initialize":
             offered = params.get("protocolVersion", "2025-11-25")
             version = offered if offered in SUPPORTED_VERSIONS else SUPPORTED_VERSIONS[0]
-            result = {"protocolVersion": version, "capabilities": {"tools": {}}, "serverInfo": {"name": "geologs", "version": "0.1.0"}}
+            result = {"protocolVersion": version, "capabilities": {"tools": {}}, "serverInfo": {"name": "geologs", "version": config.app_version()}}
         elif method == "ping":
             result = {}
         elif method == "tools/list":

@@ -11,6 +11,7 @@ import tempfile
 import unittest
 
 import psycopg
+from geologs import config
 from datetime import datetime, timedelta, timezone
 from email.message import Message
 from pathlib import Path
@@ -3478,7 +3479,7 @@ class LiveServerCase(unittest.TestCase):
         status, body, _ = self.send("GET", "/healthz")
         self.assertEqual(status, 200)
         self.assertEqual(body["ok"], True)
-        self.assertEqual(body["version"], "0.1.0")
+        self.assertEqual(body["version"], config.app_version())
         with patch.object(self.server.pool, "open", side_effect=RuntimeError("database down")):
             status, body, _ = self.send("GET", "/healthz")
         self.assertEqual((status, body), (503, {"ok": False}))
