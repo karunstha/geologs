@@ -1,6 +1,6 @@
 [project]
 name = "geologs"
-version = "0.1.0"
+version = "0.1.1"
 description = "A self-hosted, multi-user location archive: stays, trips, places, reminders and MCP tools, on PostgreSQL and PostGIS"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
