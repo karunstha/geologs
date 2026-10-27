@@ -75,6 +75,7 @@ def env_value(name):
 
 def backup():
     BACKUPS.mkdir(mode=0o700, exist_ok=True)
+    BACKUPS.chmod(0o700)
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     target = BACKUPS / f"geologs-{stamp}.dump"
     fd, partial = tempfile.mkstemp(prefix=".geologs-", suffix=".dump", dir=BACKUPS)
@@ -148,8 +149,10 @@ def main():
         now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
         previous = ACTIVE.read_text() if ACTIVE.exists() else None
         if previous and reference in previous:
-            status(available=None, checked_at=now, last_result=f"Already running {version}")
-            return
+            running = run("docker", "inspect", "geologs", "--format", "{{.State.Running}}")
+            if running == "true":
+                status(available=None, checked_at=now, last_result=f"Already running {version}")
+                return
         status(available=version, checked_at=now)
         # Save the existing local app image for a first transition to release images.
         if previous is None:

@@ -6,6 +6,7 @@ The domain never reads configuration; every other layer may.
 """
 import os
 from pathlib import Path
+from . import __version__
 
 
 def _env(name, default=""):
@@ -94,6 +95,14 @@ def env_file():
 
 def update_status_file():
     return Path(_env("GEOLOGS_UPDATE_STATUS_FILE", "/update-status/status.json"))
+
+
+def app_version():
+    return __version__
+
+
+def revision():
+    return _env("GEOLOGS_REVISION", "unknown")
 
 
 # Outside services

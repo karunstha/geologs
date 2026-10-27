@@ -5,10 +5,8 @@ counts are written by the background worker while it works as that user (refresh
 Every change an admin makes is logged.
 """
 import json
-import os
 from datetime import datetime, timedelta, timezone
 
-from .. import __version__
 from .. import config
 from ..data import OWNER_ID
 from ..domain.accounts import check_role
@@ -188,7 +186,7 @@ def health(db):
     except (OSError, ValueError):
         update = {}
     return {
-        "update": {"version": __version__, "revision": os.environ.get("GEOLOGS_REVISION", "unknown"),
+        "update": {"version": config.app_version(), "revision": config.revision(),
                    "available": update.get("available"), "checked_at": update.get("checked_at"),
                    "last_result": update.get("last_result")},
         "signup": signup_mode(db),

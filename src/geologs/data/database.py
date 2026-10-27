@@ -154,6 +154,10 @@ class Database:
     def close(self):
         self.conn.close()
 
+    def ping(self):
+        """A database-backed readiness check without exposing archive data."""
+        self.conn.execute("SELECT 1")
+
     def commit(self):
         self.conn.commit()
         self.pending_writes = False
