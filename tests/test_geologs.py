@@ -3474,6 +3474,15 @@ class LiveServerCase(unittest.TestCase):
         except ValueError:
             return response.status, data, response
 
+    def test_healthz_checks_database_without_authentication(self):
+        status, body, _ = self.send("GET", "/healthz")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["ok"], True)
+        self.assertEqual(body["version"], "0.1.0")
+        with patch.object(self.server.pool, "open", side_effect=RuntimeError("database down")):
+            status, body, _ = self.send("GET", "/healthz")
+        self.assertEqual((status, body), (503, {"ok": False}))
+
     def points(self):
         db = open_database(self.db)
         try:

@@ -19,6 +19,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
 
+from .. import __version__
 from .. import config
 from ..domain.access import token_allows_source
 from ..domain.accounts import SESSION_PREFIX
@@ -75,7 +76,7 @@ APP_FILES = ("/manifest.webmanifest", "/sw.js")
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "GeoLogs/0.1"
+    server_version = f"GeoLogs/{__version__}"
     protocol_version = "HTTP/1.1"
     # A client that stops sending (a stalled phone, or a slow-loris) frees its
     # thread after this long instead of holding it.
@@ -558,6 +559,19 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         url = urlparse(self.path)
+        if url.path == "/healthz":
+            try:
+                db = self.server.pool.open(None)
+                try:
+                    db.conn.execute("SELECT 1")
+                finally:
+                    db.close()
+            except Exception:
+                self.send_json(503, {"ok": False})
+                return
+            self.send_json(200, {"ok": True, "version": __version__,
+                                 "revision": os.environ.get("GEOLOGS_REVISION", "unknown")})
+            return
         if url.path == "/" or url.path in APP_FILES or url.path.startswith(("/css/", "/js/", "/ha/", "/icons/")):
             self.send_web_file(url.path)
             return

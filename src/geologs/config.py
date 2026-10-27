@@ -92,6 +92,10 @@ def env_file():
     return Path(_env("GEOLOGS_ENV_FILE", ".env"))
 
 
+def update_status_file():
+    return Path(_env("GEOLOGS_UPDATE_STATUS_FILE", "/update-status/status.json"))
+
+
 # Outside services
 
 def geoapify_key():

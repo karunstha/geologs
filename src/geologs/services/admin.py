@@ -4,8 +4,11 @@ Admins see each user's counts (how much was recorded, and when last), never thei
 counts are written by the background worker while it works as that user (refresh_user_stats).
 Every change an admin makes is logged.
 """
+import json
+import os
 from datetime import datetime, timedelta, timezone
 
+from .. import __version__
 from .. import config
 from ..data import OWNER_ID
 from ..domain.accounts import check_role
@@ -178,7 +181,16 @@ def clear_failures(db, actor, client=None):
 def health(db):
     """The server at a glance: email, failed tracker requests, background jobs, the database,
     and how often outside services were asked."""
+    try:
+        update = json.loads(config.update_status_file().read_text(encoding="utf-8"))
+        if not isinstance(update, dict):
+            update = {}
+    except (OSError, ValueError):
+        update = {}
     return {
+        "update": {"version": __version__, "revision": os.environ.get("GEOLOGS_REVISION", "unknown"),
+                   "available": update.get("available"), "checked_at": update.get("checked_at"),
+                   "last_result": update.get("last_result")},
         "signup": signup_mode(db),
         "email": {"can_send": mail.can_send(), "mail_server": config.smtp() is not None,
                   "public_url": config.public_url(), "recent": db.outbox.recent(25)},

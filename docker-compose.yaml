@@ -66,6 +66,13 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - ./.env:/config/.env:ro
+      - ./update-status:/update-status:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/healthz', timeout=5).close()"]
+      interval: 20s
+      timeout: 8s
+      retries: 3
+      start_period: 180s
     read_only: true
     tmpfs:
       - /tmp

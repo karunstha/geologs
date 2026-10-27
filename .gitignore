@@ -6,6 +6,7 @@ __pycache__/
 *.pyc
 .venv/
 /data/
+/update-status/
 *.egg-info/
 
 # Screenshots of real data stay out of the repository; the README's are made from demo data in docs/images/.

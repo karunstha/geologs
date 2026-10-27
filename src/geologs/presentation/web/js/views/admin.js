@@ -184,11 +184,16 @@ function renderAudit(entries) {
 }
 
 function renderServer(health) {
+  const update = health.update || {};
   const email = health.email;
   const jobs = Object.entries(health.jobs);
   const outside = Object.entries(health.outside_services.today).sort((a, b) => b[1] - a[1]);
   const failures = health.failed_attempts;
   $("admin-server").innerHTML = `
+    <section class="admin-section"><h3>Software</h3>
+      <p class="help">Running GeoLogs ${safe(update.version || "unknown")} · commit ${safe(update.revision || "unknown")}</p>
+      <p class="help">${update.available ? `Update available: ${safe(update.available)}.` : "No newer approved update reported."} ${update.checked_at ? `Checked ${safe(ago(update.checked_at))}.` : "The updater has not checked yet."}</p>
+      ${update.last_result ? `<p class="help">Last update: ${safe(update.last_result)}</p>` : ""}</section>
     <section class="admin-section"><h3>Sign-up</h3>
       <form id="admin-signup-form" class="segmented-choice">
         <label><input type="radio" name="signup" value="invite" ${health.signup === "invite" ? "checked" : ""}><span><strong>Invite only</strong><small>New accounts come from an admin's invite.</small></span></label>
