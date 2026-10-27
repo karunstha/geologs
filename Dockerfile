@@ -1,8 +1,15 @@
 # syntax=docker/dockerfile:1
 FROM python:3.12-slim
 
+ARG GEOLOGS_VERSION=0.1.0
+ARG VCS_REF=unknown
+LABEL org.opencontainers.image.source="https://github.com/karunstha/geologs" \
+      org.opencontainers.image.version="${GEOLOGS_VERSION}" \
+      org.opencontainers.image.revision="${VCS_REF}"
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
+    GEOLOGS_REVISION=${VCS_REF} \
     GEOLOGS_HOST=0.0.0.0 \
     GEOLOGS_PORT=8765
 
