@@ -3443,7 +3443,7 @@ class LiveServerCase(unittest.TestCase):
         self.env = patch.dict(os.environ, {"GEOLOGS_DATABASE_URL": self.db, "GEOLOGS_TOKEN": "main-token",
                                            "GEOLOGS_INGEST_TOKEN": "phone-token"})
         self.env.start()
-        for name in ("GEOLOGS_TOKEN_FILE", "GEOLOGS_WEBHOOK_URL"):
+        for name in ("GEOLOGS_TOKEN_FILE", "GEOLOGS_WEBHOOK_URL", "GEOLOGS_TRUSTED_PROXIES"):
             os.environ.pop(name, None)
         self.pool = open_pool(self.db, size=4)
         self.server = Server(("127.0.0.1", 0), self.pool)
@@ -3504,6 +3504,8 @@ class ShareServerTests(LiveServerCase):
         self.assertIn(b"js/share.js", page)
         self.assertEqual((response.getheader("Referrer-Policy"), response.getheader("X-Robots-Tag")),
                          ("no-referrer", "noindex, nofollow"))
+        # Embedded in other sites' pages by design, unlike the app.
+        self.assertEqual((response.getheader("X-Frame-Options"), response.getheader("Content-Security-Policy")), (None, None))
         status, shared, response = self.send("GET", "/api/shared/" + made["token"])
         self.assertEqual((status, response.getheader("Referrer-Policy")), (200, "no-referrer"))
         self.assertEqual(len(shared["moves"]), 3)
@@ -3849,8 +3851,28 @@ class DeploymentTests(unittest.TestCase):
         app = compose[compose.index("\n  app:"):]
         passed = set(re.findall(r"^\s+([A-Z_]+):", app[app.index("environment:"):app.index("ports:")], re.M))
         # Set by the image (host, port), read from the mounted token file, or only for the command line.
-        elsewhere = {"GEOLOGS_HOST", "GEOLOGS_PORT", "GEOLOGS_INGEST_TOKEN", "GEOLOGS_ENV_FILE"}
+        elsewhere = {"GEOLOGS_HOST", "GEOLOGS_PORT", "GEOLOGS_INGEST_TOKEN", "GEOLOGS_TRUSTED_PROXIES", "GEOLOGS_ENV_FILE"}
         self.assertEqual(read - passed - elsewhere, set())
+
+    def test_trusted_proxies_are_local_networks_unless_named(self):
+        import ipaddress
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {"GEOLOGS_TRUSTED_PROXIES": ""}):
+            os.environ.pop("GEOLOGS_TOKEN_FILE", None)
+            local = config.trusted_proxies()
+            self.assertTrue(any(ipaddress.ip_address("172.18.0.1") in network for network in local))  # Docker's gateway
+            self.assertFalse(any(ipaddress.ip_address("203.0.113.5") in network for network in local))
+            os.environ["GEOLOGS_TRUSTED_PROXIES"] = "none"
+            self.assertEqual(config.trusted_proxies(), ())
+            os.environ["GEOLOGS_TRUSTED_PROXIES"] = "192.0.2.1, 2001:db8::/32"
+            self.assertEqual([str(network) for network in config.trusted_proxies()], ["192.0.2.1/32", "2001:db8::/32"])
+            os.environ["GEOLOGS_TRUSTED_PROXIES"] = "my-proxy"
+            with self.assertRaisesRegex(ValueError, "GEOLOGS_TRUSTED_PROXIES"):
+                config.trusted_proxies()
+            # Compose passes it in the mounted .env, like the ingest token.
+            env = Path(folder) / ".env"
+            env.write_text("GEOLOGS_TOKEN=t\nGEOLOGS_TRUSTED_PROXIES=198.51.100.0/24\n")
+            os.environ["GEOLOGS_TOKEN_FILE"] = str(env)
+            self.assertEqual([str(network) for network in config.trusted_proxies()], ["198.51.100.0/24"])
 
 
 class ServerCapacityTests(LiveServerCase):
@@ -3955,6 +3977,29 @@ class AccountTests(LiveServerCase):
         legacy = "geologs_session=" + Handler.session_value("main-token")
         self.assertEqual(self.send("GET", "/api/me", headers={"Cookie": legacy})[1]["user"]["id"], 1)
         self.assertEqual(self.send("POST", "/api/session", {"token": "wrong"})[0], 401)
+
+    def test_the_server_token_sign_in_waits_after_too_many_tries(self):
+        for _ in range(12):  # only wrong tokens count
+            self.assertEqual(self.send("POST", "/api/session", {"token": "main-token"})[0], 200)
+        for _ in range(10):
+            self.assertEqual(self.send("POST", "/api/session", {"token": "guess"})[0], 401)
+        self.assertEqual(self.send("POST", "/api/session", {"token": "main-token"})[0], 429)
+
+    def test_behind_a_proxy_each_client_waits_on_its_own(self):
+        def sign_in(client, password="guess guess guess"):
+            return self.send("POST", "/api/session", {"email": "bob@example.com", "password": password},
+                             {"X-Forwarded-For": client + ", 10.0.0.2"})[0]
+        for _ in range(10):
+            self.assertEqual(sign_in("203.0.113.5"), 401)
+        self.assertEqual(sign_in("203.0.113.5", "correct horse battery"), 429)
+        # Someone else, through the same proxy, is not locked out of Bob's account.
+        self.assertEqual(sign_in("203.0.113.6", "correct horse battery"), 200)
+        # A forwarded address is believed only from a trusted proxy: from elsewhere, it is the connection's.
+        with patch.dict(os.environ, {"GEOLOGS_TRUSTED_PROXIES": "192.0.2.1"}):
+            self.assertEqual(sign_in("203.0.113.7"), 401)
+            for _ in range(9):
+                sign_in("198.51.100.%d" % _)
+            self.assertEqual(sign_in("203.0.113.8", "correct horse battery"), 429)
 
     def test_a_personal_token_reads_and_writes_as_its_user(self):
         bob = {"Authorization": "Bearer " + self.bob_token}
@@ -4507,6 +4552,8 @@ class WebAppTests(LiveServerCase):
     def test_every_file_the_page_loads_is_served_with_its_type(self):
         status, _, response = self.send("GET", "/")
         self.assertEqual((status, response.getheader("Content-Type")), (200, "text/html; charset=utf-8"))
+        self.assertEqual((response.getheader("X-Frame-Options"), response.getheader("Content-Security-Policy")),
+                         ("DENY", "frame-ancestors 'none'"))
         html = (WEB / "index.html").read_text()
         local = re.findall(r'(?:href|src)="(/(?:css|js)/[^"]+)"', html)
         self.assertIn("/js/main.js", local)

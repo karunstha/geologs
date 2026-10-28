@@ -1,5 +1,6 @@
 """Accounts: adding users, signing in and out, and the tokens that stand for a user."""
 import json
+import secrets
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -75,6 +76,15 @@ def _count_attempt(key, limit=SIGN_IN_ATTEMPTS, window=SIGN_IN_WINDOW):
                 del _attempts[stale]
 
 
+def _check_attempts(key, limit=SIGN_IN_ATTEMPTS, window=SIGN_IN_WINDOW):
+    """TooManyAttempts while `key` already had `limit` attempts within `window` seconds, without
+    counting this one (for limits that count only failures)."""
+    now = time.monotonic()
+    with _attempts_lock:
+        if sum(now - at < window for at in _attempts.get(key, [])) >= limit:
+            raise TooManyAttempts("too many attempts; try again in a few minutes")
+
+
 @use_case
 def sign_in(db, email, password, client="", code=None):
     """The user an email and password belong to, or ValueError; a wrong email and a wrong password
@@ -94,6 +104,19 @@ def sign_in(db, email, password, client="", code=None):
 
 
 _DUMMY_HASH = hash_password("geologs-no-such-user")
+
+
+@use_case
+def token_sign_in(db, supplied, configured, client=""):
+    """The owner, for the server's own token (GEOLOGS_TOKEN), or ValueError. Wrong tokens from one
+    client count towards sign_in's limit, and past it even the right one waits; the owner signing
+    in often never does."""
+    key = ("token", client)
+    _check_attempts(key)
+    if not secrets.compare_digest(str(supplied or ""), configured):
+        _count_attempt(key)
+        raise ValueError("Access token rejected. Restart the server if its configured token changed.")
+    return owner(db)
 
 
 @use_case

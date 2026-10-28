@@ -4,6 +4,7 @@ import binascii
 import hashlib
 import hmac
 import html
+import ipaddress
 import json
 import os
 import secrets
@@ -27,7 +28,8 @@ from ..services.accounts import (SESSION_DAYS, CodeNeeded, TooManyAttempts, acce
                                  begin_two_factor, change_email, change_password, confirm_two_factor, create_api_token,
                                  end_session, end_sessions, forget_expired_sessions, invite_details, owner, public_user,
                                  rename, request_password_reset, reset_password, revoke_api_token, send_verification,
-                                 session_user, sign_in, sign_up, start_session, stop_two_factor, verify_email)
+                                 session_user, sign_in, sign_up, start_session, stop_two_factor, token_sign_in,
+                                 verify_email)
 from ..services.admin import (audit as admin_audit, clear_failures as admin_clear_failures, delete_locations as admin_delete_locations,
                              delete_user as admin_delete_user,
                              health as admin_health, invite as admin_invite, note_failed_attempt, refresh_user_stats,
@@ -72,6 +74,9 @@ WEB_TYPES = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf
 # What installs the app on a phone: its manifest and icons, and the service worker that opens it offline
 # (served from the root, so it may look after every page).
 APP_FILES = ("/manifest.webmanifest", "/sw.js")
+# The app may not be shown inside another site's page, where it could be dressed up to trick a click
+# (a shared replay may: send_shared leaves these off).
+NO_FRAMING = {"Content-Security-Policy": "frame-ancestors 'none'", "X-Frame-Options": "DENY"}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -212,6 +217,30 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(origin)
         return parsed.netloc == self.headers.get("Host") and parsed.scheme in ("http", "https")
 
+    def client_ip(self):
+        """Who sent the request, for the limits on sign-in attempts and the admin's records. Behind
+        a trusted proxy (config.trusted_proxies) that is the nearest X-Forwarded-For address the
+        proxies did not add themselves, else the connection's own address: without this, everyone
+        behind a proxy is one client and shares its limits."""
+        peer = self.client_address[0]
+        trusted = config.trusted_proxies()
+        try:
+            if not any(ipaddress.ip_address(peer) in network for network in trusted):
+                return peer
+        except ValueError:
+            return peer
+        hops = [hop.strip() for value in self.headers.get_all("X-Forwarded-For") or () for hop in value.split(",")]
+        client = peer
+        for hop in reversed(hops):
+            try:
+                address = ipaddress.ip_address(hop)
+            except ValueError:
+                break  # what lies beyond a malformed hop cannot be told apart from a forgery
+            client = str(address)
+            if not any(address in network for network in trusted):
+                break
+        return client
+
     def ingest_authorized(self, query):
         """Tracking apps authenticate however they can: a bearer header, the password
         of HTTP Basic auth (OwnTracks), or ?token= in the URL (Overland, Traccar Client,
@@ -280,7 +309,8 @@ class Handler(BaseHTTPRequestHandler):
         body = resource.read_bytes()
         tag = '"' + hashlib.sha256(body).hexdigest()[:20] + '"'
         # Revalidate every time: unchanged files cost a 304, and an upgrade is never stale.
-        headers = {"Cache-Control": "no-cache", "ETag": tag, "X-Content-Type-Options": "nosniff", **(extra_headers or {})}
+        headers = {"Cache-Control": "no-cache", "ETag": tag, "X-Content-Type-Options": "nosniff", **NO_FRAMING,
+                   **(extra_headers or {})}
         unchanged = self.headers.get("If-None-Match") == tag
         self.send_response(304 if unchanged else 200)
         self.send_header("Content-Type", kind)
@@ -364,7 +394,7 @@ class Handler(BaseHTTPRequestHandler):
                 db = self.open_store()
                 if db is not None:
                     try:
-                        note_failed_attempt(db, kind, device, status, message, self.client_address[0])
+                        note_failed_attempt(db, kind, device, status, message, self.client_ip())
                     finally:
                         db.close()
             except Exception:
@@ -466,7 +496,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if "email" in payload:
                 try:
-                    user = sign_in(db, payload.get("email"), payload.get("password"), self.client_address[0],
+                    user = sign_in(db, payload.get("email"), payload.get("password"), self.client_ip(),
                                    payload.get("code"))
                 except TooManyAttempts as exc:
                     self.error_json(429, str(exc)); return
@@ -474,10 +504,13 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json(401, {"error": str(exc), "needs_code": True}); return
                 except ValueError as exc:
                     self.error_json(401, str(exc)); return
-            elif secrets.compare_digest(payload.get("token", ""), configured):
-                user = owner(db)
             else:
-                self.error_json(401, "Access token rejected. Restart the server if its configured token changed."); return
+                try:
+                    user = token_sign_in(db, payload.get("token"), configured, self.client_ip())
+                except TooManyAttempts as exc:
+                    self.error_json(429, str(exc)); return
+                except ValueError as exc:
+                    self.error_json(401, str(exc)); return
             token = start_session(db, user["id"], self.headers.get("User-Agent"))
         except Exception:
             self.error_json(500, internal_failure("POST /api/session")); return
@@ -509,14 +542,14 @@ class Handler(BaseHTTPRequestHandler):
         cookie = None
         try:
             if path == "/api/password/forgot":
-                result = request_password_reset(db, payload.get("email"), self.client_address[0])
+                result = request_password_reset(db, payload.get("email"), self.client_ip())
             elif path == "/api/password/reset":
                 result = {"user": reset_password(db, payload.get("token"), payload.get("password"))}
             elif path in ("/api/invites/accept", "/api/signup"):
                 user = (accept_invite(db, payload.get("token"), payload.get("password"), payload.get("name"))
                         if path == "/api/invites/accept" else
                         public_user(sign_up(db, payload.get("email"), payload.get("password"), payload.get("name"),
-                                            self.client_address[0])))
+                                            self.client_ip())))
                 cookie = self.session_cookie(start_session(db, user["id"], self.headers.get("User-Agent")), SESSION_DAYS * 86400)
                 result = {"user": user}
             else:  # /api/email/verify
@@ -821,10 +854,10 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/shares/preview": result = save_preview(db, payload)
             elif path == "/api/invites":
                 require_admin(self.user)
-                result = admin_invite(db, self.user, payload.get("email"), payload.get("role") or "user", self.client_address[0])
+                result = admin_invite(db, self.user, payload.get("email"), payload.get("role") or "user", self.client_ip())
             elif path.startswith("/api/admin/"):
                 require_admin(self.user)
-                actor, client = self.user, self.client_address[0]
+                actor, client = self.user, self.client_ip()
                 if path == "/api/admin/users/role": result = admin_set_role(db, actor, payload["id"], payload.get("role"), client)
                 elif path == "/api/admin/users/disable":
                     result = admin_set_disabled(db, actor, payload["id"], payload.get("disabled") is not False, client)
@@ -1044,6 +1077,7 @@ class Server(ThreadingHTTPServer):
 def serve(host="127.0.0.1", port=8765):
     if host not in ("127.0.0.1", "localhost", "::1") and not config.api_token():
         raise ValueError("GEOLOGS_TOKEN is required when binding beyond loopback")
+    config.trusted_proxies()  # a mistyped address stops the server now, not each sign-in later
     pool = open_pool()
     server = Server((host, int(port)), pool)
     summary_stop = threading.Event()

@@ -23,7 +23,8 @@ Generate each with `openssl rand -base64 32 | tr -d '/+='`.
 | `GEOLOGS_HOST`, `GEOLOGS_PORT` | `127.0.0.1`, `8765` | Where `geologs serve` listens. Beyond loopback, `GEOLOGS_TOKEN` is required. |
 | `GEOLOGS_DB_POOL_SIZE` | `10` | Database connections kept for requests (2–100). A request waits up to 10 seconds for one, then gets a 503. |
 | `GEOLOGS_PUBLIC_URL` | | Where people open GeoLogs (`https://geologs.example.com`). Links in emails point here. |
-| `GEOLOGS_TOKEN_FILE` | | A file holding `GEOLOGS_TOKEN` (and `GEOLOGS_INGEST_TOKEN`), read on every request. Compose mounts `.env` this way. |
+| `GEOLOGS_TOKEN_FILE` | | A file holding `GEOLOGS_TOKEN` (and `GEOLOGS_INGEST_TOKEN` and `GEOLOGS_TRUSTED_PROXIES`), read on every request. Compose mounts `.env` this way. |
+| `GEOLOGS_TRUSTED_PROXIES` | loopback and private networks | The proxies and tunnels whose `X-Forwarded-For` names the client, so each person behind them has their own limit on sign-in attempts: addresses or networks, comma-separated (`192.0.2.10, 172.18.0.0/16`), or `none` to use only the connection's address. On a network where untrusted devices can reach the app's port directly, name your proxy instead of keeping the default. |
 | `GEOLOGS_ENV_FILE` | `.env` | Which file the command line reads. |
 
 ## Trackers

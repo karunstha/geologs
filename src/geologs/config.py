@@ -4,6 +4,7 @@ Values are read when asked for, not once at start: a token file you edit
 takes effect without a restart, and tests can set the environment per case.
 The domain never reads configuration; every other layer may.
 """
+import ipaddress
 import os
 from pathlib import Path
 from . import __version__
@@ -76,6 +77,26 @@ def ingest_token():
     path = _env("GEOLOGS_TOKEN_FILE")
     value = _token_file_value(path, "GEOLOGS_INGEST_TOKEN") if path else None
     return value if value is not None else _env("GEOLOGS_INGEST_TOKEN")
+
+
+# Where a proxy or tunnel on this machine, in a container beside it, or elsewhere on a home network connects from.
+LOCAL_NETWORKS = ("127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7")
+
+
+def trusted_proxies():
+    """GEOLOGS_TRUSTED_PROXIES: the addresses or networks (comma-separated) of the reverse proxies and
+    tunnels in front of GeoLogs, whose X-Forwarded-For names the client; loopback and private networks
+    by default, or none at all for "none". Read from the token file too, like GEOLOGS_INGEST_TOKEN."""
+    path = _env("GEOLOGS_TOKEN_FILE")
+    value = _token_file_value(path, "GEOLOGS_TRUSTED_PROXIES") if path else None
+    value = (value if value is not None else _env("GEOLOGS_TRUSTED_PROXIES")).strip()
+    if value.lower() == "none":
+        return ()
+    entries = [part.strip() for part in value.split(",") if part.strip()] or LOCAL_NETWORKS
+    try:
+        return tuple(ipaddress.ip_network(entry, strict=False) for entry in entries)
+    except ValueError as exc:
+        raise ValueError(f"GEOLOGS_TRUSTED_PROXIES: {exc}") from None
 
 
 # Server and command line

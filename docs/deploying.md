@@ -53,6 +53,7 @@ Phones, other devices and other people need an address that works from outside y
     Put the database on `internal` only.
 -   Do not put a login wall (Cloudflare Access and the like) in front of the whole site: phones and MCP clients cannot pass a browser login. Protect `/admin`-related paths only, if at all.
 -   GeoLogs sets the session cookie `Secure` when the proxy sends `X-Forwarded-Proto: https`.
+-   GeoLogs limits sign-in attempts per client. Behind a proxy it reads the client's address from `X-Forwarded-For`, believing it only from a proxy on this machine or a private network (`GEOLOGS_TRUSTED_PROXIES`). A proxy or tunnel elsewhere, at a public address, needs that address in `GEOLOGS_TRUSTED_PROXIES`; otherwise everyone it forwards counts as one client.
 
 ## Backups
 
