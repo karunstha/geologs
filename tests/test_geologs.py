@@ -4054,6 +4054,29 @@ class AccountTests(LiveServerCase):
         self.assertEqual(self.send("POST", "/api/account/tokens/delete", {"id": made["id"]}, {"Cookie": cookie})[0], 200)
         self.assertEqual(self.send("GET", "/api/me", headers={"Authorization": "Bearer " + made["token"]})[0], 401)
 
+    def test_a_companion_app_links_with_an_email_and_password(self):
+        status, body, _ = self.send("POST", "/api/app-link",
+                                    {"email": "bob@example.com", "password": "correct horse battery", "device": "Pixel 8"})
+        self.assertEqual((status, body["user"]["email"], body["token_name"]), (200, "Bob@example.com", "Logs app · Pixel 8"))
+        self.assertTrue(body["token"].startswith("gla_"))
+        bearer = {"Authorization": "Bearer " + body["token"]}
+        self.assertEqual(self.send("GET", "/api/me", headers=bearer)[1]["user"]["name"], "Bob")
+        listed = self.send("GET", "/api/account", headers=bearer)[1]["api_tokens"]
+        self.assertIn("Logs app · Pixel 8", [item["name"] for item in listed])
+        # Unlinking from the app revokes its own token.
+        self.assertEqual(self.send("POST", "/api/account/tokens/delete", {"id": body["token_id"]}, bearer)[0], 200)
+        self.assertEqual(self.send("GET", "/api/me", headers=bearer)[0], 401)
+
+    def test_a_companion_app_is_refused_like_a_browser(self):
+        wrong = self.send("POST", "/api/app-link", {"email": "bob@example.com", "password": "nope nope nope"})
+        self.assertEqual(wrong[:2], (401, {"error": "wrong email or password"}))
+        self.assertEqual(self.send("POST", "/api/app-link", {"email": "bob@example.com", "password": 5})[0], 400)
+        self.assertEqual(self.send("POST", "/api/app-link", {"email": "bob@example.com", "password": "correct horse battery"},
+                                   {"Origin": "https://evil.example"})[0], 403)
+        for _ in range(9):
+            self.send("POST", "/api/app-link", {"email": "bob@example.com", "password": "guess guess guess"})
+        self.assertEqual(self.send("POST", "/api/app-link", {"email": "bob@example.com", "password": "correct horse battery"})[0], 429)
+
     def test_the_sign_in_screen_learns_what_it_can_offer(self):
         self.assertEqual(self.send("GET", "/api/sign-in-options")[1], {"email": False, "token": True, "signup": False})
 
@@ -4428,6 +4451,15 @@ class TwoFactorTests(LiveServerCase):
         self.assertEqual(self.send("POST", "/api/account/2fa/stop", {"current": "nope"}, self.cookie)[0], 400)
         self.assertEqual(self.send("POST", "/api/account/2fa/stop", {"current": "correct horse battery"}, self.cookie)[0], 200)
         self.assertEqual(self.sign_in()[0], 200)
+
+    def test_a_companion_app_asks_for_the_code_too(self):
+        self.turn_on()
+        body = {"email": "bob@example.com", "password": "correct horse battery", "device": "phone"}
+        self.assertEqual(self.send("POST", "/api/app-link", body)[:2],
+                         (401, {"error": "enter the code from your authenticator app", "needs_code": True}))
+        status, linked, _ = self.send("POST", "/api/app-link", {**body, "code": self.code(1)})
+        self.assertEqual(status, 200)
+        self.assertEqual(self.send("GET", "/api/me", headers={"Authorization": "Bearer " + linked["token"]})[0], 200)
 
     def test_a_wrong_code_does_not_turn_it_on(self):
         self.secret = self.send("POST", "/api/account/2fa/begin", {}, self.cookie)[1]["secret"]

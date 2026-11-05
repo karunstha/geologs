@@ -519,6 +519,46 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(200, {"ok": True, "user": public_user(user)},
                        {"Set-Cookie": self.session_cookie(token, SESSION_DAYS * 86400)})
 
+    def link_app(self):
+        """POST /api/app-link: a companion app (such as the Logs app) signs in with an email,
+        password and, with two-factor sign-in, a code, and gets a personal API token named after
+        the device. The token is listed and revocable under Account like any other."""
+        if not self.safe_origin():
+            self.error_json(403, "cross-origin request denied"); return
+        length = self.request_length()
+        if not 0 <= length <= 4096:
+            self.close_connection = True
+            self.error_json(413 if length > 4096 else 400, "invalid request size"); return
+        try:
+            payload = json.loads(self.rfile.read(length))
+            if not isinstance(payload, dict) or not all(isinstance(payload.get(key, ""), str)
+                                                        for key in ("email", "password", "code", "device")):
+                raise ValueError("sign-in fields must be strings")
+        except (ValueError, TypeError):
+            self.error_json(400, "invalid sign-in request"); return
+        device = " ".join(str(payload.get("device") or "").split())[:40] or "device"
+        self.user = None
+        db = self.open_store()
+        if db is None:
+            return
+        try:
+            try:
+                user = sign_in(db, payload.get("email"), payload.get("password"), self.client_ip(),
+                               payload.get("code") or None)
+            except TooManyAttempts as exc:
+                self.error_json(429, str(exc)); return
+            except CodeNeeded as exc:
+                self.send_json(401, {"error": str(exc), "needs_code": True}); return
+            except ValueError as exc:
+                self.error_json(401, str(exc)); return
+            made = create_api_token(db, user["id"], f"Logs app · {device}")
+        except Exception:
+            self.error_json(500, internal_failure("POST /api/app-link")); return
+        finally:
+            db.close()
+        self.send_json(200, {"token": made["token"], "token_id": made["id"], "token_name": made["name"],
+                             "user": public_user(user)})
+
     def public_post(self, path):
         """The account links people open before they can sign in: asking for a password reset,
         setting the new password, accepting an invite (which signs the new user in), and
@@ -781,6 +821,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/session":
             self.start_session()
+            return
+        if path == "/api/app-link":
+            self.link_app()
             return
         if path in PUBLIC_POSTS:
             self.public_post(path)
