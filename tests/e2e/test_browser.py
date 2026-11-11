@@ -167,7 +167,7 @@ class BrowserTest(unittest.TestCase):
             self.page.locator('[data-auth-go="signin"]:visible').first.click()
         self.page.fill("#auth-email", email)
         self.page.fill("#auth-password", password)
-        self.page.click("#auth-signin button.primary")
+        self.page.click("#auth-signin .auth-actions button.primary")
         self.page.wait_for_selector("#auth-panel", state="hidden")
 
     def add_user(self, email, name, password):

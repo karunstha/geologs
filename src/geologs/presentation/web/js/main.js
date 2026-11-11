@@ -9,6 +9,7 @@ import { initAccount } from "./views/account.js";
 import { initAdmin } from "./views/admin.js";
 import { initAuth } from "./views/auth.js";
 import { initData } from "./views/data.js";
+import { initDemo } from "./views/demo.js";
 import { initHistory, refreshCurrent, refreshExplore } from "./views/history.js";
 import { initHome } from "./views/home.js";
 import { initReplay } from "./views/replay.js";
@@ -25,6 +26,7 @@ initTheme();
 initShell();
 initAccount();
 initAdmin();
+initDemo();
 // Before loading anything: a link from an email (a reset, an invite) opens its own page.
 await initAuth();
 initHistory();

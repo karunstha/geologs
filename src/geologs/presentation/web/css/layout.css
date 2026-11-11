@@ -286,3 +286,34 @@ main {
 :root[data-theme="dark"] #theme-toggle .theme-sun {
   display: block;
 }
+/* Demo mode: a strip above the bar saying this archive is a fictional, read-only demo (js/views/demo.js). */
+.demo-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 4px 14px;
+  padding: 8px 16px;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 20%, var(--border));
+  background: var(--accent-soft);
+  color: var(--text-2);
+  font-size: 13px;
+  line-height: 1.45;
+  text-align: center;
+}
+.demo-bar[hidden] {
+  display: none;
+}
+.demo-bar p {
+  margin: 0;
+}
+.demo-bar strong {
+  margin-right: 8px;
+  color: var(--accent-text);
+}
+body.demo [data-demo-hidden] {
+  display: none !important;
+}
+body:not(.demo) [data-demo-only] {
+  display: none !important;
+}

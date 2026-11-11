@@ -42,6 +42,7 @@ from ..services.ambient import ambient
 from ..services.backup import export_backup
 from ..services.corrections import delete_stay_edit, save_mode_override, save_stay_edit
 from ..services.day import day_summary
+from ..services.demo import DemoUnavailable, demo_due, erase_abandoned_demos, fill_demo, is_demo, open_demo
 from ..services.devices import create_ingest_token, delete_ingest_device, delete_ingest_token, ingest_token_for, record_ingest, source_activity
 from ..services.fuel import fuel_cost_windows, fuel_status, refresh_prices, update_fuel
 from ..services.ingest import record_locations
@@ -176,6 +177,7 @@ class Handler(BaseHTTPRequestHandler):
         return morsel.value if morsel else None
 
     session_token = None  # the session cookie a request signed in with, if it did
+    demo = False  # whether the request's user is the demo, which may only read (see guarded)
 
     def request_user(self, db):
         """Who sent the request, or None: a personal API token or GEOLOGS_TOKEN (the owner) as a
@@ -269,6 +271,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if main:
                 self.user = self.request_user(db)
+                if self.user and config.demo_enabled() and is_demo(db, self.user["id"]):
+                    self.user = None  # the demo is read-only: it sends nothing
+                    return False
                 if self.user:
                     return True
             if any(secrets.compare_digest(value, token) for value in supplied for token in (main, ingest) if token):
@@ -519,6 +524,37 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(200, {"ok": True, "user": public_user(user)},
                        {"Set-Cookie": self.session_cookie(token, SESSION_DAYS * 86400)})
 
+    def start_demo(self):
+        """POST /api/demo: sign a visitor in to the read-only demo (GEOLOGS_DEMO); see services.demo."""
+        if not config.demo_enabled():
+            self.error_json(404, "not found"); return
+        if not self.safe_origin():
+            self.error_json(403, "cross-origin request denied"); return
+        length = self.request_length()
+        if not 0 <= length <= 4096:
+            self.close_connection = True
+            self.error_json(413 if length > 4096 else 400, "invalid request size"); return
+        self.rfile.read(length)  # nothing to read in it, but the next request on this connection follows it
+        self.user = None
+        db = self.open_store()
+        if db is None:
+            return
+        try:
+            try:
+                user = open_demo(db, self.client_ip())
+            except TooManyAttempts as exc:
+                self.error_json(429, str(exc)); return
+            except DemoUnavailable as exc:
+                self.send_json(503, {"error": str(exc)}, {"Retry-After": "20"}); return
+            # The demo's sessions record no browser: every visitor shares the account.
+            token = start_session(db, user["id"])
+        except Exception:
+            self.error_json(500, internal_failure("POST /api/demo")); return
+        finally:
+            db.close()
+        self.send_json(200, {"ok": True, "user": public_user(user), "demo": True},
+                       {"Set-Cookie": self.session_cookie(token, SESSION_DAYS * 86400)})
+
     def link_app(self):
         """POST /api/app-link: a companion app (such as the Logs app) signs in with an email,
         password and, with two-factor sign-in, a code, and gets a personal API token named after
@@ -609,12 +645,14 @@ class Handler(BaseHTTPRequestHandler):
     def guarded(self):
         """Whether the request may go on, as its user (self.user, for open_store); else a 401,
         403 or 503 is sent."""
-        self.user, self.session_token = None, None
+        self.user, self.session_token, self.demo = None, None, False
         db = self.open_store()
         if db is None:
             return False
         try:
             self.user = self.request_user(db)
+            if self.user and config.demo_enabled():
+                self.demo = is_demo(db, self.user["id"])
         finally:
             db.close()
         if not self.user:
@@ -626,6 +664,11 @@ class Handler(BaseHTTPRequestHandler):
             if self.command == "POST":
                 self.close_connection = True
             self.error_json(403, "cross-origin request denied")
+            return False
+        if self.demo and self.command != "GET":
+            # Every visitor shares the demo, so none may change it (signing out isn't guarded).
+            self.close_connection = True
+            self.error_json(403, "The demo is read-only")
             return False
         return True
 
@@ -667,7 +710,8 @@ class Handler(BaseHTTPRequestHandler):
                 mode = signup_mode(db)
             finally:
                 db.close()
-            self.send_json(200, {"email": can_send(), "token": bool(config.api_token()), "signup": mode == "open"})
+            self.send_json(200, {"email": can_send(), "token": bool(config.api_token()), "signup": mode == "open",
+                                 "demo": config.demo_enabled()})
             return
         if url.path == "/api/invite":
             self.user = None
@@ -690,8 +734,11 @@ class Handler(BaseHTTPRequestHandler):
         if db is None:
             return
         try:
-            if url.path == "/api/me": value = {"user": public_user(self.user), "can_email": can_send()}
-            elif url.path == "/api/account": value = account(db, self.user["id"], self.session_token)
+            if url.path == "/api/me": value = {"user": public_user(self.user), "can_email": can_send(), "demo": self.demo}
+            elif url.path == "/api/account":
+                value = account(db, self.user["id"], self.session_token)
+                if self.demo:  # every visitor shares the demo: none sees the others' browsers
+                    value["sessions"] = [session for session in value["sessions"] if session["current"]]
             elif url.path == "/api/invites":
                 require_admin(self.user)
                 value = db.users.invites(datetime.now(timezone.utc).isoformat(timespec="seconds"))
@@ -824,6 +871,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/app-link":
             self.link_app()
+            return
+        if path == "/api/demo":
+            self.start_demo()
             return
         if path in PUBLIC_POSTS:
             self.public_post(path)
@@ -1106,6 +1156,28 @@ def _mail_worker(pool, stop):
                 db.close()
 
 
+def _demo_worker(pool, stop):
+    """Demo mode (GEOLOGS_DEMO): fill the demo archive at start-up and again each day (about a
+    minute each time), and erase any left half filled."""
+    while not stop.is_set():
+        db, started, filled = None, time.perf_counter(), False
+        try:
+            db = pool.open()
+            erase_abandoned_demos(db)
+            if demo_due(db):
+                fill_demo(db)
+                filled = True
+            jobs.record("demo", started)
+        except Exception as exc:
+            print("GeoLogs demo: " + str(exc), flush=True)
+            jobs.record("demo", started, exc)
+        finally:
+            if db is not None:
+                db.close()
+        if not filled:
+            stop.wait(60)
+
+
 class Server(ThreadingHTTPServer):
     """The HTTP server, with the database pool its requests borrow connections from."""
     # Python's default backlog of 5 refuses connections when a few dozen clients arrive at once.
@@ -1128,6 +1200,9 @@ def serve(host="127.0.0.1", port=8765):
     summary_thread.start()
     mail_thread = threading.Thread(target=_mail_worker, args=(pool, summary_stop), daemon=True)
     mail_thread.start()
+    if config.demo_enabled():
+        threading.Thread(target=_demo_worker, args=(pool, summary_stop), daemon=True).start()
+        print("GeoLogs demo mode: a read-only demo, filled again each day", flush=True)
     print(f"GeoLogs browser: http://{host}:{port}", flush=True)
     try:
         server.serve_forever()

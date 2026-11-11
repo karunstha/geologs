@@ -7,7 +7,9 @@ import { clearAccount, refreshAccount, SIGNED_OUT_KEY, showAccount } from "./acc
 
 let mode = "signin";
 let linkToken = null; // a reset or invite token, kept only in memory once read from the address bar
-let options = { email: false, token: true, signup: false };
+let options = { email: false, token: true, signup: false, demo: false };
+// Open the demo as soon as the sign-in screen opens: the page was opened at #demo.
+let wantsDemo = false;
 
 async function send(path, body) {
   const response = await fetch(path, {
@@ -23,6 +25,7 @@ async function send(path, body) {
   if (!response.ok) {
     const failure = Error(value.error || `HTTP ${response.status}`);
     failure.needsCode = !!value.needs_code;
+    failure.status = response.status;
     throw failure;
   }
   return value;
@@ -43,9 +46,38 @@ function show(name, message = "") {
   document.querySelectorAll("[data-needs-email]").forEach((el) => (el.hidden = !options.email));
   document.querySelectorAll("[data-needs-token]").forEach((el) => (el.hidden = !options.token));
   document.querySelectorAll("[data-needs-signup]").forEach((el) => (el.hidden = !options.signup));
+  document.querySelectorAll("[data-needs-demo]").forEach((el) => (el.hidden = !options.demo));
+  document.querySelectorAll("[data-hide-for-demo]").forEach((el) => (el.hidden = options.demo));
   // Only a signed-out browser that may still look around (none of the link pages) can be dismissed.
   document.querySelectorAll("[data-auth-cancel]").forEach((el) => (el.hidden = !state.user));
-  form(name)?.querySelector("input:not([type=hidden])")?.focus();
+  if (!(name === "signin" && options.demo)) form(name)?.querySelector("input:not([type=hidden])")?.focus();
+}
+
+// The read-only demo (services/demo.py). A server that has just started is still filling it (about a
+// minute): keep asking for a while rather than send the visitor away.
+async function startDemo() {
+  const button = $("auth-demo-start");
+  button.disabled = true;
+  button.textContent = "Opening the demo…";
+  $("auth-demo-error").textContent = "";
+  try {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        const result = await send("/api/demo", {});
+        await signedIn(result.user);
+        return;
+      } catch (failure) {
+        if (failure.status !== 503 || attempt >= 9) throw failure;
+        button.textContent = "Preparing the demo…";
+        await new Promise((resolve) => setTimeout(resolve, 10000));
+      }
+    }
+  } catch (failure) {
+    $("auth-demo-error").textContent = failure.message;
+  } finally {
+    button.disabled = false;
+    button.textContent = "Try the demo";
+  }
 }
 
 function hide() {
@@ -127,7 +159,14 @@ export async function initAuth() {
       sessionStorage.removeItem(SIGNED_OUT_KEY);
     } catch (_error) {}
     show(preferred, message);
+    if (wantsDemo && options.demo) {
+      wantsDemo = false;
+      startDemo();
+    }
   });
+  $("auth-demo-start").onclick = startDemo;
+  wantsDemo = location.hash === "#demo";
+  if (wantsDemo) history.replaceState(null, "", location.pathname + location.search);
   document.querySelectorAll("[data-auth-go]").forEach((button) => {
     button.onclick = () => {
       const target = button.dataset.authGo;

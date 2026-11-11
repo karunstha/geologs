@@ -55,6 +55,19 @@ Phones, other devices and other people need an address that works from outside y
 -   GeoLogs sets the session cookie `Secure` when the proxy sends `X-Forwarded-Proto: https`.
 -   GeoLogs limits sign-in attempts per client. Behind a proxy it reads the client's address from `X-Forwarded-For`, believing it only from a proxy on this machine or a private network (`GEOLOGS_TRUSTED_PROXIES`). A proxy or tunnel elsewhere, at a public address, needs that address in `GEOLOGS_TRUSTED_PROXIES`; otherwise everyone it forwards counts as one client.
 
+## A public demo
+
+`GEOLOGS_DEMO=1` turns a server into a demo anyone can try without an account. The sign-in screen offers **Try the demo**, which signs the visitor in to a fictional person's archive: about two months of their days in Portland, Oregon. Every visitor sees the same archive, and it is read-only: visitors can look through everything, but anything that would change it is refused. A strip at the top says so, with a link to leave. Link straight to it with `https://your-demo.example.com/#demo`.
+
+The archive is filled through the same ingest and stay detection as real data, which takes about a minute. The server fills it when it starts, and again each day, so its latest days are always recent. Visitors looking at the old one move to the new one without noticing. One address can open the demo 20 times an hour.
+
+The demo is best run on a server and database of its own. On a server with real archives, every visitor is signed in to the same server as your data, with only the account separation between them. Either way:
+
+-   Leave `GEOAPIFY_API_KEY`, `MAPBOX_ACCESS_TOKEN` and `EIA_API_KEY` unset unless you're happy for visitors to spend them: looking things up is reading too. The demo names its own places, so it reads well without a geocoder.
+-   Leave the webhook and SMTP settings unset.
+-   Keep sign-up closed.
+-   Keep `GEOLOGS_TOKEN` secret as usual. Demos don't appear among Admin's accounts.
+
 ## Backups
 
 ```bash

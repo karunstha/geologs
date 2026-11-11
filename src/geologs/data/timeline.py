@@ -19,22 +19,26 @@ class TimelineRepository(Repository):
         `rebuild`, the whole timeline is made again, and with `from_time`, the
         part from that moment on (after stays were found again from there).
         """
+        # Each delete here names its fixes as one list, worked out once (= ANY(ARRAY(…))). As `IN (…)`
+        # the planner may join instead, and rows this transaction just wrote (a new account's first
+        # import) are invisible to its statistics: taking the user's timeline for one row, it ran the
+        # whole ranking once per fix, minutes instead of a fraction of a second.
         if rebuild:
             self.execute("DELETE FROM timeline_fixes WHERE source=?", (source,))
         if from_time is not None:
-            self.execute("""DELETE FROM timeline_fixes WHERE observation_id IN (
-                SELECT id FROM point_observations WHERE source=? AND timestamp>=?)""", (source, from_time))
+            self.execute("""DELETE FROM timeline_fixes WHERE observation_id = ANY(ARRAY(
+                SELECT id FROM point_observations WHERE source=? AND timestamp>=?))""", (source, from_time))
             fresh, fresh_args = "timestamp>=?", (source, from_time)
         else:
             fresh, fresh_args = "id>?", (source, since_id)
         self.execute(f"""INSERT INTO timeline_fixes(observation_id,source,role,stay_id)
             SELECT id,source,'movement',NULL FROM point_observations
             WHERE source=? AND {fresh} ON CONFLICT(observation_id) DO NOTHING""", fresh_args)
-        self.execute(f"""DELETE FROM timeline_fixes WHERE observation_id IN (
+        self.execute(f"""DELETE FROM timeline_fixes WHERE observation_id = ANY(ARRAY(
             SELECT id FROM (SELECT id,ROW_NUMBER() OVER (
                 PARTITION BY source,timestamp ORDER BY COALESCE(accuracy_m,1000000000),id DESC) AS rank
                 FROM point_observations WHERE source=? AND timestamp IN (
-                    SELECT timestamp FROM point_observations WHERE source=? AND {fresh})) ranked WHERE rank>1)""",
+                    SELECT timestamp FROM point_observations WHERE source=? AND {fresh})) ranked WHERE rank>1))""",
             (source,) + fresh_args)
         # Closing a stay changes no observation ID, so it would not be selected
         # by the incremental end_observation_id query below. Promote its former
@@ -53,9 +57,9 @@ class TimelineRepository(Repository):
             stay_args.append(since_id)
         stay_query += " ORDER BY started_at,id"
         for stay in self.rows(stay_query, stay_args):
-            self.execute("""DELETE FROM timeline_fixes WHERE observation_id IN (
+            self.execute("""DELETE FROM timeline_fixes WHERE observation_id = ANY(ARRAY(
                 SELECT id FROM point_observations WHERE source=? AND timestamp>=? AND timestamp<=?
-                AND id<>? AND id<>?)""",
+                AND id<>? AND id<>?))""",
                 (source, stay["started_at"], stay["ended_at"], stay["start_observation_id"], stay["end_observation_id"]))
             self.execute("""INSERT INTO timeline_fixes(observation_id,source,role,stay_id)
                 VALUES (?,?,?,?) ON CONFLICT(observation_id) DO UPDATE SET role=excluded.role,stay_id=excluded.stay_id""",
@@ -64,9 +68,9 @@ class TimelineRepository(Repository):
                 VALUES (?,?,?,?) ON CONFLICT(observation_id) DO UPDATE SET role=excluded.role,stay_id=excluded.stay_id""",
                 (stay["end_observation_id"], source, "latest" if stay["ongoing"] else "departure", stay["id"]))
         if open_stop:
-            self.execute("""DELETE FROM timeline_fixes WHERE observation_id IN (
+            self.execute("""DELETE FROM timeline_fixes WHERE observation_id = ANY(ARRAY(
                 SELECT id FROM point_observations WHERE source=? AND timestamp>=? AND timestamp<=?
-                AND id<>? AND id<>?)""",
+                AND id<>? AND id<>?))""",
                 (source, open_stop["start"], open_stop["end"], open_stop["start_id"], open_stop["end_id"]))
             self.execute("""INSERT INTO timeline_fixes(observation_id,source,role,stay_id)
                 VALUES (?,?,?,NULL) ON CONFLICT(observation_id) DO UPDATE SET role=excluded.role""",

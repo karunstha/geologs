@@ -189,6 +189,29 @@
 .auth-alt:not(:has(> :not([hidden]))) {
   display: none;
 }
+/* Demo mode (GEOLOGS_DEMO): trying GeoLogs without an account comes first, signing in after. */
+.auth-demo > p.muted {
+  margin: 6px 0 16px;
+  color: var(--text-2);
+  font-size: 13.5px;
+}
+.auth-demo > .button {
+  width: 100%;
+}
+.auth-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 6px 0 14px;
+  color: var(--text-3);
+  font-size: 12.5px;
+}
+.auth-divider::before,
+.auth-divider::after {
+  content: "";
+  flex: 1;
+  border-top: 1px solid var(--border);
+}
 .auth-sent {
   margin-top: 4px;
 }

@@ -126,6 +126,14 @@ def revision():
     return _env("GEOLOGS_REVISION", "unknown")
 
 
+# Demo mode: a public server where anyone may look around a fictional archive, read-only
+
+def demo_enabled():
+    """GEOLOGS_DEMO: offer "Try the demo" on the sign-in screen (off by default): a fictional
+    person's months that any visitor may look through but not change."""
+    return _env("GEOLOGS_DEMO").strip().lower() in ("1", "true", "yes", "on")
+
+
 # Outside services
 
 def geoapify_key():

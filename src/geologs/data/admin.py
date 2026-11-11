@@ -48,14 +48,15 @@ class AdminRepository(Repository):
         return self.one("SELECT fixes,last_fix,updated_at FROM user_stats WHERE user_id=?", (int(user_id),))
 
     def users_with_stats(self, now):
-        """Every account, its sessions and tokens counted, and the counts the worker last wrote."""
+        """Every account but demo sandboxes, its sessions and tokens counted, and the counts the worker last wrote."""
         return self.rows("""SELECT u.id,u.email,u.name,u.role,u.created_at,u.email_verified_at,u.last_login_at,
                 u.disabled_at,u.password_hash IS NOT NULL AS has_password,u.totp_enabled_at IS NOT NULL AS two_factor,
                 s.fixes,s.sources,s.first_fix,s.last_fix,s.stays,s.places,s.bytes,s.updated_at AS counted_at,
                 (SELECT COUNT(*) FROM sessions x WHERE x.user_id=u.id AND x.expires_at>?) AS sessions,
                 (SELECT COUNT(*) FROM ingest_tokens t WHERE t.user_id=u.id) AS device_tokens,
                 (SELECT COUNT(*) FROM api_tokens a WHERE a.user_id=u.id) AS api_tokens
-            FROM users u LEFT JOIN user_stats s ON s.user_id=u.id ORDER BY u.id""", (now,))
+            FROM users u LEFT JOIN user_stats s ON s.user_id=u.id
+            WHERE NOT EXISTS (SELECT 1 FROM demo_archives d WHERE d.user_id=u.id) ORDER BY u.id""", (now,))
 
     def archive_bytes(self):
         """About how much of the database the current user's rows take: each user table's size on

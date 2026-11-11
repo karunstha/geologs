@@ -62,6 +62,8 @@ services:
       GEOLOGS_SMTP_USERNAME: ${GEOLOGS_SMTP_USERNAME:-}
       GEOLOGS_SMTP_PASSWORD: ${GEOLOGS_SMTP_PASSWORD:-}
       GEOLOGS_SMTP_FROM: ${GEOLOGS_SMTP_FROM:-}
+      # A public demo: "Try the demo" shows anyone a fictional archive, read-only (see docs/deploying.md).
+      GEOLOGS_DEMO: ${GEOLOGS_DEMO:-}
     ports:
       # Only this machine by default; a proxy or tunnel on it reaches the app, other devices do not.
       # GEOLOGS_BIND=0.0.0.0 in .env makes it reachable from the network (over plain HTTP: see docs/deploying.md).

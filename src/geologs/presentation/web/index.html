@@ -52,6 +52,10 @@
 <body>
   <div id="backdrop" class="backdrop" aria-hidden="true"></div>
   <a class="skip-link" href="#main">Skip to content</a>
+  <div id="demo-bar" class="demo-bar" hidden>
+    <p><strong>Demo</strong><span>Alex is fictional, and the demo is read-only: look around as much as you like.</span></p>
+    <button id="demo-leave" class="link-button" type="button">Leave the demo</button>
+  </div>
   <header class="topbar">
     <div class="topbar-inner">
       <div class="brand"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 64 64"><defs><linearGradient id="brand-g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#2cc9b4"/><stop offset="1" stop-color="#0b5d56"/></linearGradient></defs><rect width="64" height="64" rx="15" fill="url(#brand-g)"/><path d="M22.5 46.6c3.5-1.2 4-8.5 10-9.5 4.8-.8 6.8 2.8 10 2.2" fill="none" stroke="#fff" stroke-opacity=".75" stroke-width="3.4" stroke-linecap="round" stroke-dasharray="0.1 6.2"/><circle cx="15" cy="49" r="4.6" fill="none" stroke="#fff" stroke-width="3"/><path d="M44 8.5c-6.6 0-12 5.1-12 11.4 0 8.5 12 18.1 12 18.1s12-9.6 12-18.1c0-6.3-5.4-11.4-12-11.4Z" fill="#fff"/><circle cx="44" cy="19.9" r="4.4" fill="#0f766e"/></svg></span><strong>GeoLogs</strong></div>
@@ -472,7 +476,10 @@
         <div class="page-actions"><button id="account-sign-out" class="button secondary" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-4M10 16l-4-4 4-4M6 12h10"/></svg><span>Sign out</span></button></div>
       </div>
       <div class="account-layout">
-        <section class="card" aria-labelledby="account-profile-title">
+        <section class="card" aria-labelledby="account-demo-title" data-demo-only>
+          <div class="card-head"><div><h3 id="account-demo-title">You're looking at the demo</h3><p>Alex's archive is shared by everyone trying GeoLogs, so it can't be changed, and it has no sign-in of its own. Sign out to leave it.</p></div></div>
+        </section>
+        <section class="card" aria-labelledby="account-profile-title" data-demo-hidden>
           <div class="card-head"><div><h3 id="account-profile-title">Profile</h3><p>Your name shows to admins; your email is how you sign in.</p></div></div>
           <form id="account-name-form" class="setting-row"><label class="setting-label" for="account-name"><strong>Name</strong><small>Optional</small></label><span class="inline-form"><input id="account-name" class="input" maxlength="80" autocomplete="name"><button class="button secondary small">Save</button></span></form>
           <div class="setting-row static"><span class="setting-label"><strong>Email</strong><small id="account-email">—</small></span><span class="inline-form"><span id="account-email-state"></span><button id="account-verify" class="button secondary small" type="button" hidden>Send confirmation link</button></span></div>
@@ -485,7 +492,7 @@
             </form>
           </details>
         </section>
-        <section class="card" aria-labelledby="account-password-title">
+        <section class="card" aria-labelledby="account-password-title" data-demo-hidden>
           <div class="card-head"><div><h3 id="account-password-title">Password</h3><p id="account-password-note">At least 10 characters. Changing it signs out your other browsers.</p></div></div>
           <form id="account-password-form" class="account-form">
             <label class="field" data-needs-password><span>Current password</span><input id="account-current-password" class="input" type="password" autocomplete="current-password"></label>
@@ -493,7 +500,7 @@
             <div class="account-form-actions"><button class="button primary small" id="account-password-save">Change password</button></div>
           </form>
         </section>
-        <section class="card" aria-labelledby="account-2fa-title">
+        <section class="card" aria-labelledby="account-2fa-title" data-demo-hidden>
           <div class="card-head"><div><h3 id="account-2fa-title">Two-factor sign-in</h3><p id="account-2fa-note">After your password, ask for a code from an authenticator app on your phone.</p></div><span id="account-2fa-state"></span></div>
           <div id="account-2fa-off"><button id="account-2fa-begin" class="button secondary small" type="button">Turn on</button></div>
           <form id="account-2fa-setup" class="account-form" hidden>
@@ -508,15 +515,15 @@
             <div class="account-form-actions"><button class="button secondary small danger-text">Turn off</button></div>
           </form>
         </section>
-        <section class="card" aria-labelledby="account-sessions-title">
+        <section class="card" aria-labelledby="account-sessions-title" data-demo-hidden>
           <div class="card-head"><div><h3 id="account-sessions-title">Signed-in browsers</h3><p>Each stays signed in for 30 days after you last used it.</p></div><button id="account-end-others" class="button secondary small" type="button" hidden>Sign out all others</button></div>
           <ul id="account-sessions" class="list rows token-list"></ul>
         </section>
-        <section class="card" aria-labelledby="account-shares-title">
+        <section class="card" aria-labelledby="account-shares-title" data-demo-hidden>
           <div class="card-head"><div><h3 id="account-shares-title">Shared links</h3><p>Replays anyone with the link can watch. Make one with Replay → Share on a day.</p></div></div>
           <ul id="account-shares" class="list rows token-list"></ul>
         </section>
-        <section class="card" aria-labelledby="account-tokens-title">
+        <section class="card" aria-labelledby="account-tokens-title" data-demo-hidden>
           <div class="card-head"><div><h3 id="account-tokens-title">API tokens</h3><p>For your own tools, such as an MCP client. It acts as you, so keep it private.</p></div></div>
           <div id="account-token-reveal" class="callout success token-reveal" role="status" hidden></div>
           <ul id="account-tokens" class="list rows token-list"></ul>
@@ -603,7 +610,14 @@
     <div class="auth-card">
       <span class="brand-mark large" aria-hidden="true"><svg viewBox="0 0 64 64"><defs><linearGradient id="brand-g-large" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#2cc9b4"/><stop offset="1" stop-color="#0b5d56"/></linearGradient></defs><rect width="64" height="64" rx="15" fill="url(#brand-g-large)"/><path d="M22.5 46.6c3.5-1.2 4-8.5 10-9.5 4.8-.8 6.8 2.8 10 2.2" fill="none" stroke="#fff" stroke-opacity=".75" stroke-width="3.4" stroke-linecap="round" stroke-dasharray="0.1 6.2"/><circle cx="15" cy="49" r="4.6" fill="none" stroke="#fff" stroke-width="3"/><path d="M44 8.5c-6.6 0-12 5.1-12 11.4 0 8.5 12 18.1 12 18.1s12-9.6 12-18.1c0-6.3-5.4-11.4-12-11.4Z" fill="#fff"/><circle cx="44" cy="19.9" r="4.4" fill="#0f766e"/></svg></span>
       <form id="auth-signin" class="auth-mode" data-auth-mode="signin">
-        <h2>Sign in to GeoLogs</h2>
+        <div class="auth-demo" data-needs-demo hidden>
+          <h2>Try GeoLogs</h2>
+          <p class="muted">Look through two months of a fictional person's days, trips and places. No account needed.</p>
+          <button id="auth-demo-start" type="button" class="button primary">Try the demo</button>
+          <p id="auth-demo-error" class="auth-error" role="alert"></p>
+          <p class="auth-divider"><span>or sign in</span></p>
+        </div>
+        <h2 data-hide-for-demo>Sign in to GeoLogs</h2>
         <p class="muted">Use the email and password of your account.</p>
         <div class="form-stack">
           <label class="field"><span>Email</span><input id="auth-email" class="input" type="email" autocomplete="username" required></label>

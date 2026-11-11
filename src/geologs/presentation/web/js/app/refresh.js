@@ -4,6 +4,7 @@ import { $, toast } from "../core/dom.js";
 import { localDateKey } from "../core/format.js";
 import { state } from "../core/state.js";
 import { drawMap } from "../map/map.js";
+import { renderDemo } from "../views/demo.js";
 import { refreshExplore, renderCurrent } from "../views/history.js";
 import { refreshInsights } from "../views/patterns.js";
 import { renderPlaces } from "../views/places.js";
@@ -57,6 +58,7 @@ export async function refreshAll() {
     ]);
     state.user = me.user;
     showUser();
+    renderDemo(me.demo);
     state.status = status;
     state.current = current;
     setSunPosition(current);

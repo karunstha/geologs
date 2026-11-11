@@ -14,6 +14,7 @@ from .admin import AdminRepository
 from .backup import BackupRepository
 from .caches import CachesRepository
 from .corrections import CorrectionsRepository
+from .demo import DemoRepository
 from .devices import DevicesRepository
 from .fuel import FuelRepository
 from .mail import OutboxRepository
@@ -100,6 +101,7 @@ class Database:
         self.admin = AdminRepository(self)
         self.backup = BackupRepository(self)
         self.shares = SharesRepository(self)
+        self.demo = DemoRepository(self)
         self.as_user(user_id)
 
     def as_user(self, user_id):

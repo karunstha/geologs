@@ -4078,7 +4078,7 @@ class AccountTests(LiveServerCase):
         self.assertEqual(self.send("POST", "/api/app-link", {"email": "bob@example.com", "password": "correct horse battery"})[0], 429)
 
     def test_the_sign_in_screen_learns_what_it_can_offer(self):
-        self.assertEqual(self.send("GET", "/api/sign-in-options")[1], {"email": False, "token": True, "signup": False})
+        self.assertEqual(self.send("GET", "/api/sign-in-options")[1], {"email": False, "token": True, "signup": False, "demo": False})
 
     def test_passwords_and_tokens_are_kept_only_as_hashes(self):
         with psycopg.connect(self.db) as raw:
@@ -4965,6 +4965,141 @@ class TrackerAlertTests(unittest.TestCase):
             to, subject, body = raw.execute("SELECT to_address,subject,body FROM outbox").fetchone()
         self.assertEqual((to, subject), ("alex@example.com", "alex/phone (owntracks) has gone quiet"))
         self.assertIn("over 6 hours", body)
+
+
+class DemoTests(LiveServerCase):
+    """Demo mode: anyone may look around a fictional archive, which nobody can change."""
+
+    def setUp(self):
+        super().setUp()
+        from geologs.services import accounts
+        accounts._attempts.clear()
+        os.environ["GEOLOGS_DEMO"] = "1"
+
+    def fill(self, now=None):
+        """Fill the demo, with two days rather than two months, so the tests run quickly."""
+        from geologs.services.demo import fill_demo
+        db = open_database(self.db)
+        try:
+            return fill_demo(db, now=now, days=2)
+        finally:
+            db.close()
+
+    def start(self):
+        status, body, response = self.send("POST", "/api/demo")
+        cookie = (response.getheader("Set-Cookie") or "").split(";", 1)[0]
+        return status, body, {"Cookie": cookie}
+
+    def test_the_sign_in_screen_offers_the_demo_only_in_demo_mode(self):
+        self.assertTrue(self.send("GET", "/api/sign-in-options")[1]["demo"])
+        os.environ.pop("GEOLOGS_DEMO")
+        self.assertFalse(self.send("GET", "/api/sign-in-options")[1]["demo"])
+        self.assertEqual(self.send("POST", "/api/demo")[0], 404)
+
+    def test_a_visitor_waits_until_the_demo_is_filled(self):
+        status, body, response = self.send("POST", "/api/demo")
+        self.assertEqual((status, response.getheader("Retry-After")), (503, "20"))
+        self.assertIn("being prepared", body["error"])
+
+    def test_every_visitor_looks_at_alexs_archive(self):
+        user_id = self.fill()
+        status, body, visitor = self.start()
+        self.assertEqual((status, body["user"]["id"], body["user"]["name"], body["demo"]), (200, user_id, "Alex", True))
+        self.assertTrue(self.send("GET", "/api/me", headers=visitor)[1]["demo"])
+        self.assertGreater(len(self.send("GET", "/api/stays", headers=visitor)[1]), 3)
+        self.assertEqual({place["name"] for place in self.send("GET", "/api/places", headers=visitor)[1]},
+                         {"Home", "Mount Tabor Park", "Pearl District Studio"})
+        self.assertEqual(self.send("GET", "/api/settings", headers=visitor)[1]["timezone"], "America/Los_Angeles")
+        # A second visitor sees the same archive; the owner's is untouched, and a real account isn't the demo.
+        self.assertEqual(self.start()[1]["user"]["id"], user_id)
+        self.assertEqual(self.points(), [])
+        self.assertFalse(self.send("GET", "/api/me", headers={"Authorization": "Bearer main-token"})[1]["demo"])
+
+    def test_the_demo_is_read_only(self):
+        self.fill()
+        visitor = self.start()[2]
+        before = self.send("GET", "/api/places", headers=visitor)[1]
+        for path, body in (("/api/places", {"name": "Somewhere new", "lat": 45.52, "lon": -122.66}),
+                           ("/api/settings", {"timezone": "UTC"}), ("/api/account", {"name": "Mallory"}),
+                           ("/api/points", {"lat": 45.5, "lon": -122.6, "source": "x"}),
+                           ("/api/account/tokens", {"name": "mine"}), ("/api/account/password", {"password": "x" * 12}),
+                           ("/api/shares", {"date": "2026-10-01"}), ("/api/import", None),
+                           ("/api/account/sessions/end", {}), ("/mcp", {"jsonrpc": "2.0", "id": 1, "method": "ping"})):
+            with self.subTest(path=path):
+                self.assertEqual(self.send("POST", path, body, visitor)[:2], (403, {"error": "The demo is read-only"}))
+        # Nor through a tracking app's address, which also takes a signed-in browser.
+        self.assertEqual(self.send("POST", "/api/ingest/owntracks", {"_type": "location", "lat": 45.5, "lon": -122.6,
+                                                                     "tst": 1_790_000_000}, visitor)[0], 401)
+        self.assertEqual(self.send("GET", "/api/places", headers=visitor)[1], before)
+        self.assertEqual(self.points(), [])
+        # Signing out still works, and leaves the demo for everyone else.
+        self.assertEqual(self.send("DELETE", "/api/session", headers=visitor)[0], 200)
+        self.assertEqual(self.send("GET", "/api/me", headers=visitor)[0], 401)
+        self.assertEqual(self.start()[0], 200)
+
+    def test_visitors_never_see_each_others_browsers(self):
+        self.fill()
+        first = self.start()[2]
+        self.start()
+        sessions = self.send("GET", "/api/account", headers=first)[1]["sessions"]
+        self.assertEqual([session["current"] for session in sessions], [True])
+        self.assertIsNone(sessions[0]["user_agent"])
+
+    def test_the_demo_is_filled_again_each_day_and_visitors_move_to_it(self):
+        from geologs.services.demo import demo_due
+        old = self.fill(datetime.now(timezone.utc) - timedelta(days=1))
+        visitor = self.start()[2]
+        db = open_database(self.db)
+        try:
+            self.assertFalse(demo_due(db))  # filled just now, whatever day it shows
+            self.assertTrue(demo_due(db, datetime.now(timezone.utc) + timedelta(days=1)))
+        finally:
+            db.close()
+        new = self.fill()
+        self.assertNotEqual(new, old)
+        db = open_database(self.db)
+        try:
+            self.assertIsNone(db.users.get(old))  # erased with everything in it
+        finally:
+            db.close()
+        # Still signed in, now looking at the new archive.
+        self.assertEqual(self.send("GET", "/api/me", headers=visitor)[1]["user"]["id"], new)
+        self.assertEqual(self.start()[1]["user"]["id"], new)
+
+    def test_a_demo_being_filled_is_left_alone_and_one_left_behind_is_erased(self):
+        from geologs.services.demo import erase_abandoned_demos
+        db = open_database(self.db)
+        try:
+            with db.transaction():
+                user_id = db.demo.add("Alex", datetime.now(timezone.utc).isoformat(timespec="seconds"))
+            self.assertNotIn(user_id, db.users.active_ids())  # background work skips it
+            self.assertEqual(erase_abandoned_demos(db), [])
+            self.assertEqual(erase_abandoned_demos(db, datetime.now(timezone.utc) + timedelta(hours=1)), [user_id])
+        finally:
+            db.close()
+        self.assertEqual(self.start()[0], 503)
+
+    def test_one_client_opening_the_demo_too_often_waits(self):
+        self.fill()
+        with patch("geologs.services.demo.OPENS_PER_CLIENT", 1):
+            self.assertEqual(self.start()[0], 200)
+            self.assertEqual(self.start()[0], 429)
+
+    def test_admins_do_not_see_the_demo_among_the_accounts(self):
+        self.fill()
+        users = self.send("GET", "/api/admin/users", headers={"Authorization": "Bearer main-token"})[1]
+        self.assertEqual([user["id"] for user in users], [1])
+
+    def test_the_demo_archive_is_alexs_months_ending_a_few_minutes_ago(self):
+        from geologs.domain import demo
+        now = datetime(2026, 11, 11, 18, 0, tzinfo=timezone.utc)
+        fixes = demo.fixes(14, now)
+        last = datetime.fromisoformat(fixes[-1]["timestamp"])
+        self.assertTrue(timedelta(minutes=8) <= now - last <= timedelta(minutes=15))
+        self.assertEqual(fixes[0]["timestamp"][:10], "2026-10-28")  # 14 days back, local midnight is 07:00Z
+        self.assertEqual(demo.first_day(14, now), "2026-10-28")
+        self.assertEqual({fix["source"] for fix in fixes}, {demo.SOURCE})
+        self.assertEqual(fixes, demo.fixes(14, now))  # the same every time
 
 
 if __name__ == "__main__":
