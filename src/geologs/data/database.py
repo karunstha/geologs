@@ -29,6 +29,7 @@ from .shares import SharesRepository
 from .stays import StaysRepository
 from .summaries import SummariesRepository
 from .timeline import TimelineRepository
+from .trips import TripsRepository
 from .users import UsersRepository
 
 # Stay algorithm versions: 5 and 8 changed stationary stays; 12 adds area stays (moving around one
@@ -87,6 +88,7 @@ class Database:
         self.points = PointsRepository(self)
         self.timeline = TimelineRepository(self)
         self.stays = StaysRepository(self)
+        self.trips = TripsRepository(self)
         self.places = PlacesRepository(self)
         self.reminders = RemindersRepository(self)
         self.corrections = CorrectionsRepository(self)

@@ -9,7 +9,7 @@ from ..domain.trips import stats_from_points
 from .overview import daily_overview
 from .paths import learn_path_history
 from .place_routes import rebuild_routes, regroup
-from .stays import process_stays
+from .stays import process_stays, refuse_frozen
 from .use_case import use_case
 
 
@@ -29,6 +29,7 @@ def delete_samples(db, ids, confirm=False):
     affected days refreshed, so history never refers to a deleted sample.
     """
     plan = deletion_plan(db, ids)
+    refuse_frozen(db, *plan["timestamps"])
     timezone_name = db.settings.get()["timezone"]
     zone = ZoneInfo(timezone_name)
     dates = sorted({datetime.fromisoformat(value).astimezone(zone).date().isoformat() for value in plan["timestamps"]})
@@ -127,7 +128,8 @@ def remove_source(db, source):
     """
     # In this order: timelines and stays refer to samples, events to points.
     db.timeline.delete_sources([source])
-    db.stays.delete_source(source)
+    db.trips.delete_source(source)
+    db.stays.delete_source(source, keep_frozen=False)
     db.corrections.delete_source(source)
     db.places.delete_visit_labels(source)
     db.reminders.delete_events_of_source(source)

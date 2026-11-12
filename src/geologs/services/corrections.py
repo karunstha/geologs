@@ -4,6 +4,7 @@ from datetime import datetime
 from ..domain.corrections import mode_override_for, windows_overlap
 from ..domain.motion import MOVEMENT_MODES
 from ..domain.timing import parse_time
+from .stays import refuse_frozen
 from .use_case import use_case
 
 
@@ -27,6 +28,7 @@ def save_mode_override(db, raw):
     started_at, ended_at = parse_time(raw["started_at"]), parse_time(raw["ended_at"])
     if ended_at <= started_at:
         raise ValueError("ended_at must be after started_at")
+    refuse_frozen(db, started_at)
     existing = mode_override_for(db.corrections.mode_overrides(), source, target, started_at, ended_at)
     if mode == "auto":
         if existing:
@@ -59,6 +61,7 @@ def save_stay_edit(db, raw):
     seconds = (datetime.fromisoformat(ended_at) - datetime.fromisoformat(started_at)).total_seconds()
     if not 0 < seconds <= 86400:
         raise ValueError("a stop must end after it starts, within a day")
+    refuse_frozen(db, started_at)
     lat = lon = None
     if action == "add":
         fixes = db.points.accurate_positions(source, started_at, ended_at)
@@ -77,6 +80,9 @@ def save_stay_edit(db, raw):
 @use_case
 def delete_stay_edit(db, edit_id):
     """Undo an added or removed stop."""
+    edit = next((item for item in db.corrections.stay_edits() if item["id"] == int(edit_id)), None)
+    if edit:
+        refuse_frozen(db, edit["started_at"])
     if not db.corrections.delete_stay_edit(edit_id):
         raise ValueError("that change was already undone")
     db.caches.clear_analysis()

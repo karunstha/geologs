@@ -17,7 +17,8 @@ from .fuel import fuel_context, fuel_signature
 from .paths import fill_trip
 from .patterns import place_patterns, resolve_place_patterns
 from .places import place_in_zone, places_provider_identity
-from .stays import anchored_trips, stays
+from ..domain.retention import is_frozen
+from .stays import anchored_trips, frozen_before, stays
 from .use_case import use_case
 
 
@@ -58,7 +59,7 @@ def day_summary(db, date, timezone_name="UTC", source=None):
 
     def day_cache_key():
         # Filled routes come from paths learned on other days too.
-        cache_identity = json.dumps(["day-v22", date, timezone_name, source, provider, db.settings.get()["source_priority"],
+        cache_identity = json.dumps(["day-v23", date, timezone_name, source, provider, db.settings.get()["source_priority"],
                                      fuel_signature(db), db.paths.signature(),
                                      db.place_routes.signature()], separators=(",", ":"))
         return "day:" + hashlib.sha256(cache_identity.encode()).hexdigest()
@@ -212,6 +213,8 @@ def day_summary(db, date, timezone_name="UTC", source=None):
     stats["unique_points"] = len(chronological)
     stats["timeline_points"] = len(chronological)
     result = {"date": date, "timezone": timezone_name, "source": source, "start": start, "end": end,
+            # A frozen day (data retention) shows what was found for it and takes no edits.
+            "frozen": is_frozen(frozen_before(db), start),
             "points": len(points), "stays": day_stays,
             "unique_points": len(chronological), "timeline_points": len(chronological), "stats": stats, "trips": trips, "route_segments": route_segments,
             "loose_segments": loose_segments,

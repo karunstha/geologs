@@ -3,7 +3,8 @@
 The file is gzipped JSON lines: a header, then for each table a line naming it and its columns,
 followed by its rows as arrays. Fixes, places, corrections, reminders, learned routes, daily
 summaries, settings and the tokens devices and apps sign in with go in; the account itself
-(password, two-step codes, sessions) does not, nor stays, which are found again from the fixes.
+(password, two-step codes, sessions) does not, nor stays, which are found again from the fixes;
+frozen stays and trips (data retention) go in, as their fixes were thinned.
 """
 import collections
 import gzip

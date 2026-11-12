@@ -1,6 +1,10 @@
 """Detected stays (observed_stays_v2), each source's open stay candidate (stay_observation_state),
 and copies of that candidate saved along the way (stay_checkpoints), to resume from when a late fix
-arrives instead of finding every stay again."""
+arrives instead of finding every stay again.
+
+A frozen stay (one before the freeze line of data retention) is never changed or removed by
+stay detection: its raw samples are thinned, so it could not be found again.
+"""
 from __future__ import annotations
 
 import json
@@ -44,17 +48,20 @@ class StaysRepository(Repository):
             VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(start_observation_id) DO UPDATE SET
             end_observation_id=excluded.end_observation_id,ended_at=excluded.ended_at,
             lat=excluded.lat,lon=excluded.lon,point_count=excluded.point_count,ongoing=excluded.ongoing,
-            kind=excluded.kind,activity=NULL,distance_m=NULL,radius_m=NULL""",
+            kind=excluded.kind,activity=NULL,distance_m=NULL,radius_m=NULL
+            WHERE NOT observed_stays_v2.frozen""",
             (source, start_id, end_id, started_at, ended_at, lat, lon, count, int(ongoing), kind))
 
     def withdraw(self, start_id):
         """Drop the stay a sample starts (a quick stop that turned out to be traffic)."""
-        self.execute("DELETE FROM observed_stays_v2 WHERE start_observation_id=?", (start_id,))
+        self.execute("DELETE FROM observed_stays_v2 WHERE start_observation_id=? AND NOT frozen", (start_id,))
 
-    def delete_source(self, source):
-        """Forget a source's stays, its open candidate and its checkpoints, to find them again."""
+    def delete_source(self, source, keep_frozen=True):
+        """Forget a source's stays, its open candidate and its checkpoints, to find them again.
+
+        Frozen stays stay unless `keep_frozen` is False (the tracker itself is removed)."""
         self.execute("DELETE FROM stay_checkpoints WHERE source=?", (source,))
-        self.execute("DELETE FROM observed_stays_v2 WHERE source=?", (source,))
+        self.execute("DELETE FROM observed_stays_v2 WHERE source=?" + (" AND NOT frozen" if keep_frozen else ""), (source,))
         self.execute("DELETE FROM stay_observation_state WHERE source=?", (source,))
 
     def last_end(self, source, kind, before=None, closed=False):
@@ -67,13 +74,25 @@ class StaysRepository(Repository):
             query += " AND ongoing=0"
         return self.execute(query, args).fetchone()["ended_at"]
 
+    # Freezing (see services.retention).
+
+    def freeze_before(self, before):
+        """Mark every stay that starts before `before` frozen; returns how many were newly frozen."""
+        return self.execute("UPDATE observed_stays_v2 SET frozen=TRUE WHERE started_at<? AND NOT frozen",
+                            (before,)).rowcount
+
+    def forget_checkpoints_before(self, before):
+        """Checkpoints before the freeze line name samples thinned away; detection never resumes there."""
+        self.execute("DELETE FROM stay_checkpoints WHERE last_timestamp<?", (before,))
+
     # Area stays (see services.stays).
 
     def delete_areas(self, source, since=None):
         if since is None:
-            self.execute("DELETE FROM observed_stays_v2 WHERE source=? AND kind='area'", (source,))
+            self.execute("DELETE FROM observed_stays_v2 WHERE source=? AND kind='area' AND NOT frozen", (source,))
         else:
-            self.execute("DELETE FROM observed_stays_v2 WHERE source=? AND kind='area' AND started_at>=?", (source, since))
+            self.execute("DELETE FROM observed_stays_v2 WHERE source=? AND kind='area' AND started_at>=? AND NOT frozen",
+                         (source, since))
 
     def stationary(self, source, since=None):
         """A source's stationary stays (ending at or after `since`), oldest first."""
@@ -92,7 +111,7 @@ class StaysRepository(Repository):
 
     def delete_quick_stops_within(self, source, started_at, ended_at):
         self.execute("""DELETE FROM observed_stays_v2 WHERE source=? AND kind IN ('stop','pause')
-            AND started_at<=? AND ended_at>=?""", (source, ended_at, started_at))
+            AND started_at<=? AND ended_at>=? AND NOT frozen""", (source, ended_at, started_at))
 
     def add_area(self, source, window, went_elsewhere):
         self.execute("""INSERT INTO observed_stays_v2
@@ -104,7 +123,7 @@ class StaysRepository(Repository):
              round(window["distance_m"], 1), round(window["radius_m"], 1), went_elsewhere))
 
     def set_went_elsewhere(self, stay_id, went_elsewhere):
-        self.execute("UPDATE observed_stays_v2 SET went_elsewhere=? WHERE id=?", (went_elsewhere, stay_id))
+        self.execute("UPDATE observed_stays_v2 SET went_elsewhere=? WHERE id=? AND NOT frozen", (went_elsewhere, stay_id))
 
     # The open candidate: where each source's stay detection left off.
 
@@ -155,7 +174,7 @@ class StaysRepository(Repository):
     def rewind(self, source, after):
         """Forget what was found after `after`: the stays that start later and the checkpoints taken later."""
         self.execute("""DELETE FROM observed_stays_v2 s USING point_observations o
-            WHERE s.start_observation_id=o.id AND s.source=? AND o.timestamp>?""", (source, after))
+            WHERE s.start_observation_id=o.id AND s.source=? AND o.timestamp>? AND NOT s.frozen""", (source, after))
         self.execute("DELETE FROM stay_checkpoints WHERE source=? AND last_timestamp>?", (source, after))
 
     def nearby_names(self, source, start_id):

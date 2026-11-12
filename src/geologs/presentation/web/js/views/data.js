@@ -1,10 +1,10 @@
 // Settings → Import & export: download your history as CSV, GPX or GeoJSON, or the whole archive as a
 // backup, and import a file from another app or server. An import runs on the server after the
-// upload; this page follows it until it ends.
+// upload; this page follows it until it ends. Data retention (how long raw locations are kept) is here too.
 import { refreshAll } from "../app/refresh.js";
-import { api } from "../core/api.js";
+import { api, post } from "../core/api.js";
 import { $, safe, toast } from "../core/dom.js";
-import { localDateKey, shiftDateKey, zonedMidnight } from "../core/format.js";
+import { localDateKey, longDate, shiftDateKey, zonedMidnight } from "../core/format.js";
 
 let polling = 0;
 
@@ -103,9 +103,43 @@ async function follow() {
   }
 }
 
+const yearsText = (years) => (years ? `${years} year${years === 1 ? "" : "s"}` : "Forever");
+let retention = null;
+
+function retentionNote(status, years) {
+  const preview = status.preview;
+  if (!years) return status.frozen_before_date ? "Keep every raw location from now on." : "Forever: nothing is frozen.";
+  if (!preview.moves) return `Days before ${longDate(preview.freeze_date || status.frozen_before_date)} are frozen; nothing older is left to thin.`;
+  return `Days before ${longDate(preview.freeze_date)} freeze; about ${Number(preview.samples_removed).toLocaleString()} raw samples are removed.`;
+}
+
+function renderRetention(status) {
+  retention = status;
+  const select = $("retention-years");
+  if (!select.options.length)
+    select.innerHTML = status.choices.map((years) => `<option value="${years}">${yearsText(years)}</option>`).join("");
+  select.value = String(status.years);
+  $("retention-note").textContent = retentionNote(status, status.years);
+  $("retention-go").disabled = true;
+  const box = $("retention-status");
+  box.hidden = !status.frozen_before_date;
+  box.innerHTML = status.frozen_before_date
+    ? `<strong>Days before ${safe(longDate(status.frozen_before_date))} are frozen</strong><span>They show what was found for them, and cannot be edited.</span>`
+    : "";
+}
+
+async function showRetention() {
+  try {
+    renderRetention(await api("/api/retention"));
+  } catch (_error) {
+    /* signed out, or offline: the page says so elsewhere */
+  }
+}
+
 // Called when the page is opened: an import started earlier (or in another tab) may still be running.
 export function showData() {
   follow();
+  showRetention();
 }
 
 export function initData() {
@@ -129,6 +163,40 @@ export function initData() {
       toast(error.message);
     } finally {
       $("backup-go").disabled = false;
+    }
+  };
+  $("retention-years").onchange = async () => {
+    const years = Number($("retention-years").value);
+    $("retention-go").disabled = years === retention?.years;
+    try {
+      const preview = await api("/api/retention?" + new URLSearchParams({ years }));
+      $("retention-note").textContent = retentionNote(preview, years);
+    } catch (error) {
+      toast(error.message);
+    }
+  };
+  $("retention-form").onsubmit = async (event) => {
+    event.preventDefault();
+    const years = Number($("retention-years").value);
+    $("retention-go").disabled = true;
+    try {
+      let result = await post("/api/retention", { years });
+      if (!result.saved) {
+        const preview = result.preview;
+        const question = preview.moves
+          ? `Freeze the days before ${longDate(preview.freeze_date)} and remove about ${Number(preview.samples_removed).toLocaleString()} raw samples? They cannot be brought back, and frozen days cannot be edited.`
+          : `Keep raw locations for ${yearsText(years).toLowerCase()}? Days older than that will freeze as they age, and their raw samples will be removed.`;
+        if (!confirm(question)) {
+          renderRetention(retention);
+          return;
+        }
+        result = await post("/api/retention", { years, confirm: true });
+      }
+      renderRetention(result);
+      toast(years ? `Raw locations are kept for ${yearsText(years).toLowerCase()}` : "Raw locations are kept forever");
+    } catch (error) {
+      toast(error.message);
+      $("retention-go").disabled = false;
     }
   };
   $("import-form").onsubmit = async (event) => {

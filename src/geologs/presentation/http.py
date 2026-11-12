@@ -59,6 +59,7 @@ from ..services.shares import create_share, delete_share, list_shares, open_shar
 from ..services.imports import import_file, last_import, note_import
 from ..services.samples import delete_samples, delete_source, export_csv, export_geojson, export_gpx, near, stats
 from ..services.saved_places import delete_label, delete_place, enrich_saved_places, place_visits, save_place, save_place_label
+from ..services.retention import retention_status, run_retention, set_retention
 from ..services.settings import place_providers, save_settings
 from ..services.stays import anchored_trips, stays
 from ..services.tracker_alerts import check_quiet_trackers, quiet_alerts, set_quiet_alert, tracker_notices
@@ -758,6 +759,7 @@ class Handler(BaseHTTPRequestHandler):
             elif url.path == "/api/observations": value = db.points.observations(q.get("start"), q.get("end"), q.get("source"), q.get("limit", 5000), q.get("offset", 0))
             elif url.path == "/api/timeline": value = db.points.timeline(q.get("start"), q.get("end"), q.get("source"), q.get("limit", 5000))
             elif url.path == "/api/settings": value = db.settings.get()
+            elif url.path == "/api/retention": value = retention_status(db, q.get("years"))
             elif url.path == "/api/stats": value = stats(db, q.get("start"), q.get("end"), q.get("source"))
             elif url.path == "/api/trips": value = anchored_trips(db, q.get("start"), q.get("end"), q.get("source"))
             elif url.path == "/api/coverage": value = db.points.coverage(gaps=q.get("gaps") != "false")
@@ -990,6 +992,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/observations/delete":
                 result = delete_samples(db, payload.get("ids") or [], payload.get("confirm") is True)
             elif path == "/api/settings": result = save_settings(db, payload)
+            elif path == "/api/retention": result = set_retention(db, payload)
             elif path == "/api/paths/learn": result = {**learn_path_history(db), **list_paths(db)}
             elif path == "/api/paths/exclude": result = exclude_path(db, payload["source"], payload["started_at"])
             elif path == "/api/paths/include": result = include_path(db, payload["source"], payload["started_at"])
@@ -1109,7 +1112,8 @@ def _daily_summary_worker(pool, stop):
     details, stored daily summaries, and fuel prices; then expired sessions. Each job fails on its own."""
     work = (("paths", learn_recent_paths), ("place details", enrich_saved_places),
             ("daily summary", save_scheduled_summaries), ("fuel prices", refresh_prices),  # prices at most every 12 hours
-            ("user counts", refresh_user_stats), ("quiet trackers", check_quiet_trackers))
+            ("user counts", refresh_user_stats), ("quiet trackers", check_quiet_trackers),
+            ("data retention", run_retention))  # one batch of days at a time
     while not stop.is_set():
         db = None
         try:

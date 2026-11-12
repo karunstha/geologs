@@ -47,6 +47,13 @@ export function renderModePicker() {
     .querySelector(`#day-timeline [data-item="${state.selected.type}:${state.selected.key}"]`)
     ?.closest("li");
   if (!row) return;
+  if (state.day?.frozen) {
+    row.insertAdjacentHTML(
+      "afterend",
+      '<li class="tl-mode-picker tl-edit-actions"><span class="mode-note">This day is frozen by data retention, so it cannot be edited.</span></li>',
+    );
+    return;
+  }
   let html = "";
   if (item.type === "trip") {
     const trip = item.trip;
@@ -169,6 +176,7 @@ export function renderTimeline(day) {
   if ((day.timeline_sources || []).length > 1) counts.push(`${day.timeline_sources.length} sources`);
   $("timeline-count").textContent = day.stays.length || day.trips.length ? counts.join(" · ") : "";
   $("timeline-count").hidden = !(day.stays.length || day.trips.length);
+  $("add-stay").hidden = Boolean(day.frozen); // a frozen day (data retention) takes no edits
   $("timeline-count").title =
     (day.timeline_sources || []).length > 1
       ? `Combined from ${day.timeline_sources.join(", ")}.`

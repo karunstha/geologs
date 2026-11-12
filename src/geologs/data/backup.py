@@ -1,5 +1,6 @@
 """One user's whole archive as rows to write out and read back in: a backup that clones an archive
-onto another server. Stays and the timeline are not kept; they are found again from the fixes."""
+onto another server. Stays and the timeline are not kept; they are found again from the fixes,
+except frozen stays and trips (data retention), whose fixes were thinned."""
 from __future__ import annotations
 
 from .repository import Repository
@@ -28,13 +29,18 @@ TABLES = {
     "ingest_devices": "kind device last_attempt_at last_status last_message last_success_at received",
     "ingest_tokens": "name token_hash hint source created_at last_used_at last_source",
     "api_tokens": "name token_hash hint created_at last_used_at",
+    "trips": "source started_at ended_at mode distance_m trip analysis_version frozen_at",
+    # Frozen stays only, with their first and last fix found again by time on restore.
+    "frozen_stays": "source started_at ended_at lat lon point_count ongoing kind activity distance_m radius_m went_elsewhere",
 }
+# Backup sections read from a table of another name, and which of its rows.
+STORED_IN = {"frozen_stays": ("observed_stays_v2", "frozen")}
 # Account tables without row-level security: their rows are filtered by owner here.
 OWNED = ("ingest_tokens", "api_tokens")
 # Tables restored by key: a row whose key is already here is kept as it is (settings take the
 # backup's value). The rest have no key; a row identical to one already here is skipped.
 KEYED = ("known_paths", "trip_tracks", "place_routes", "path_exclusions", "daily_summaries", "ingest_devices",
-         "ingest_tokens", "api_tokens")
+         "ingest_tokens", "api_tokens", "trips")
 
 
 def columns(table):
@@ -45,7 +51,8 @@ class BackupRepository(Repository):
     def table_rows(self, table):
         """Every row of one of TABLES, as lists in its column order, read a few thousand at a time."""
         names = columns(table)
-        query, args = f"SELECT {','.join(names)} FROM {table}", ()
+        stored, where = STORED_IN.get(table, (table, None))
+        query, args = f"SELECT {','.join(names)} FROM {stored}" + (f" WHERE {where}" if where else ""), ()
         if table in OWNED:
             query, args = query + " WHERE user_id=%s", (self.db.user_id,)
         elif table == "app_settings":
@@ -63,7 +70,7 @@ class BackupRepository(Repository):
         positions = [names.index(name) for name in known]
         self.db.pending_writes = True
         self.db.conn.execute(f"""CREATE TEMP TABLE IF NOT EXISTS restore_{table} ON COMMIT DROP AS
-            SELECT {','.join(columns(table))} FROM {table} WITH NO DATA""")
+            SELECT {','.join(columns(table))} FROM {STORED_IN.get(table, (table,))[0]} WITH NO DATA""")
         count = 0
         with self.db.conn.connection.cursor() as cursor:
             with cursor.copy(f"COPY restore_{table} ({','.join(known)}) FROM STDIN") as copy:
@@ -77,7 +84,7 @@ class BackupRepository(Repository):
         were new. What is already here stays: restoring the same backup twice adds nothing."""
         for table in TABLES:
             self.db.conn.execute(f"""CREATE TEMP TABLE IF NOT EXISTS restore_{table} ON COMMIT DROP AS
-                SELECT {','.join(columns(table))} FROM {table} WITH NO DATA""")
+                SELECT {','.join(columns(table))} FROM {STORED_IN.get(table, (table,))[0]} WITH NO DATA""")
         added = {}
         added["points"] = self.execute("""INSERT INTO points(source,external_id,timestamp,lat,lon,accuracy_m,speed_mps,speed_origin,mode)
             SELECT source,external_id,timestamp,lat,lon,accuracy_m,speed_mps,speed_origin,mode FROM restore_points
@@ -122,6 +129,17 @@ class BackupRepository(Repository):
             JOIN restore_reminder_ids rm ON rm.old_id=r.reminder_id JOIN restore_point_ids pm ON pm.old_id=r.point_id
             WHERE NOT EXISTS (SELECT 1 FROM events e WHERE e.reminder_id=rm.id AND e.point_id=pm.id
                 AND e.triggered_at=r.triggered_at)""").rowcount
+        # A frozen stay starts and ends at fixes the thinning kept; they came back above.
+        added["frozen_stays"] = self.execute("""INSERT INTO observed_stays_v2
+            (source,start_observation_id,end_observation_id,started_at,ended_at,lat,lon,point_count,ongoing,kind,
+             activity,distance_m,radius_m,went_elsewhere,frozen)
+            SELECT r.source,f.id,l.id,r.started_at,r.ended_at,r.lat,r.lon,r.point_count,r.ongoing,r.kind,
+                r.activity,r.distance_m,r.radius_m,r.went_elsewhere,TRUE FROM restore_frozen_stays r
+            CROSS JOIN LATERAL (SELECT id FROM point_observations o WHERE o.source=r.source AND o.timestamp=r.started_at
+                ORDER BY COALESCE(o.accuracy_m,1e9),o.id LIMIT 1) f
+            CROSS JOIN LATERAL (SELECT id FROM point_observations o WHERE o.source=r.source AND o.timestamp=r.ended_at
+                ORDER BY COALESCE(o.accuracy_m,1e9),o.id LIMIT 1) l
+            ON CONFLICT DO NOTHING""").rowcount
         added["app_settings"] = self.execute("""INSERT INTO app_settings(key,value)
             SELECT key,value FROM restore_app_settings WHERE key<>? ON CONFLICT(user_id,key) DO UPDATE SET value=excluded.value
             WHERE app_settings.value IS DISTINCT FROM excluded.value""", (IMPORT_STATUS_KEY,)).rowcount

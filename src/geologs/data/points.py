@@ -222,7 +222,7 @@ class PointsRepository(Repository):
             (list(sources), list(sources)))}
 
     # Everything made of the fixes, which goes with them, in an order no row outlives what it points at.
-    LOCATION_TABLES = ("timeline_fixes", "observed_stays_v2", "observed_stays", "stay_checkpoints", "stay_observation_state",
+    LOCATION_TABLES = ("trips", "timeline_fixes", "observed_stays_v2", "observed_stays", "stay_checkpoints", "stay_observation_state",
                        "stay_processing_state", "events", "source_state", "point_observations", "points", "known_paths",
                        "trip_tracks", "place_routes", "path_exclusions", "mode_overrides", "stay_edits",
                        "daily_summaries", "analysis_cache", "shares")
@@ -237,11 +237,14 @@ class PointsRepository(Repository):
             self.execute(f"DELETE FROM {table} WHERE user_id=?", (self.db.user_id,))
         return fixes
 
-    def first_new(self, source, after_id):
-        """The earliest timestamp among a source's samples newer than after_id."""
+    def first_new(self, source, after_id, not_before=None):
+        """The earliest timestamp among a source's samples newer than after_id (at or after `not_before`)."""
         # MIN over the id range reads only the new samples (point_observations_source_id).
-        return self.execute("""SELECT MIN(timestamp) AS timestamp FROM point_observations
-            WHERE source=? AND id>?""", (source, after_id)).fetchone()["timestamp"]
+        query, args = "SELECT MIN(timestamp) AS timestamp FROM point_observations WHERE source=? AND id>?", [source, after_id]
+        if not_before is not None:
+            query += " AND timestamp>=?"
+            args.append(not_before)
+        return self.execute(query, args).fetchone()["timestamp"]
 
     def max_id(self, source, default):
         return self.execute("SELECT COALESCE(MAX(id),?) AS id FROM point_observations WHERE source=?",
@@ -314,6 +317,29 @@ class PointsRepository(Repository):
         self.execute("DELETE FROM point_observations WHERE source=?", (source,))
         self.execute("DELETE FROM source_state WHERE source=?", (source,))
         self.execute("DELETE FROM points WHERE source=?", (source,))
+
+    # Thinning for data retention: what the compact timeline keeps of a stretch is all that stays.
+    THINNABLE = """FROM point_observations o WHERE o.timestamp>=? AND o.timestamp<?
+        AND NOT EXISTS (SELECT 1 FROM timeline_fixes t WHERE t.observation_id=o.id)
+        AND NOT EXISTS (SELECT 1 FROM observed_stays_v2 s WHERE s.start_observation_id=o.id)
+        AND NOT EXISTS (SELECT 1 FROM observed_stays_v2 s WHERE s.end_observation_id=o.id)"""
+
+    def thinnable(self, after, before):
+        """How many raw samples from `after` to before `before` thinning would remove."""
+        return self.execute("SELECT COUNT(*) AS n " + self.THINNABLE, (after, before)).fetchone()["n"]
+
+    def thin(self, after, before):
+        """Remove the raw samples from `after` to before `before` that neither the compact timeline
+        nor a stay keeps, then the points no sample, reminder trigger or tracker refers to any more."""
+        removed = self.execute("DELETE " + self.THINNABLE, (after, before)).rowcount
+        self.execute("""DELETE FROM points p WHERE p.timestamp>=? AND p.timestamp<?
+            AND NOT EXISTS (SELECT 1 FROM point_observations o WHERE o.point_id=p.id)
+            AND NOT EXISTS (SELECT 1 FROM point_observations o WHERE o.legacy_point_id=p.id)
+            AND NOT EXISTS (SELECT 1 FROM events e WHERE e.point_id=p.id)
+            AND NOT EXISTS (SELECT 1 FROM source_state s WHERE s.point_id=p.id)
+            AND NOT EXISTS (SELECT 1 FROM observed_stays s WHERE s.start_point_id=p.id OR s.end_point_id=p.id)""",
+            (after, before))
+        return removed
 
     def delete_observations(self, ids):
         self.execute(f"DELETE FROM point_observations WHERE id IN ({','.join('?' * len(ids))})", ids)

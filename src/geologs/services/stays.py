@@ -4,11 +4,28 @@ from datetime import datetime, timedelta
 from . import places as naming
 from ..domain.areas import area_windows, returns_to_origin, went_elsewhere_flag
 from ..domain.corrections import apply_stay_edits, mode_override_for
+from ..domain.retention import is_frozen, without_live_doubles
 from ..domain.places import AIRPORT_REACH_M, is_airport_place, is_home_place, label_at, POSSIBLE_STOP_PLACE_M, zone_at
 from ..domain.stay_detection import accurate_enough, advance, candidate_duration, min_stay_seconds
 from ..domain.timing import parse_time
 from ..domain.trips import trips_between_stays, went_elsewhere_between
 from .use_case import use_case
+
+# Data retention's setting and freeze line (see services.retention), kept beside the settings.
+RETENTION_KEY = "retention"
+FROZEN_MESSAGE = "This day is frozen by data retention, so it cannot be edited"
+
+
+def frozen_before(db):
+    """The freeze line: days before it are frozen (None while nothing is)."""
+    return (db.settings.value(RETENTION_KEY, {}) or {}).get("frozen_before")
+
+
+def refuse_frozen(db, *timestamps):
+    """Raise ValueError when any of these moments lies on a frozen day."""
+    line = frozen_before(db)
+    if any(is_frozen(line, value) for value in timestamps if value):
+        raise ValueError(FROZEN_MESSAGE)
 
 
 def sync_timeline(db, sources=None, rebuild=False, since_ids=None, from_times=None):
@@ -103,7 +120,9 @@ def process_stays(db, sources=None, rebuild=False):
 
     A fix older than ones already read reshapes what came after it. Detection then resumes from
     the newest checkpoint before that fix, the same work as reading every fix in time order, but
-    from there on only. Without such a checkpoint (or with `rebuild`), the source starts over.
+    from there on only. Without such a checkpoint (or with `rebuild`), the source starts over:
+    from the freeze line when days are frozen (see services.retention), as nothing before it is
+    found again, and a late fix before it changes nothing.
     """
     if rebuild:
         db.caches.clear_analysis()
@@ -114,19 +133,33 @@ def process_stays(db, sources=None, rebuild=False):
     processed_sources = set()
     rebuilt_sources = set()
     since_ids, from_times = {}, {}
+    line = frozen_before(db)
     for source in sources:
         state = db.stays.state(source)
         last_id = state["last_observation_id"] if state else 0
         since_ids[source] = 0 if rebuild else last_id
-        first_new = db.points.first_new(source, last_id)
+        first_new = db.points.first_new(source, last_id, line)
+        if line and first_new is None and state and not rebuild:
+            # Only late fixes for frozen days arrived: read past them, as nothing changes.
+            newest = db.points.max_id(source, last_id)
+            if newest != last_id:
+                db.stays.save_state(source, newest, state["last_timestamp"], state["candidate"])
+            continue
         late = bool(state and first_new and first_new <= state["last_timestamp"])
         resume = db.stays.checkpoint_before(source, first_new) if late and not rebuild else None
+        if resume is not None and is_frozen(line, resume["last_timestamp"]):
+            resume = None
         area_since = None
+        restart_at = None
         if rebuild or (late and resume is None):
             rebuilt_sources.add(source)
             db.stays.delete_source(source)
             state = None
             last_id = 0
+            if line:
+                # Just before the line, as fixes are read after a moment.
+                restart_at = (datetime.fromisoformat(line) - timedelta(microseconds=1)).isoformat()
+                area_since = line
         elif resume is not None:
             # Forget what was found after the checkpoint and go on from it. Its open candidate began
             # earlier, so the timeline and area stays are made again from where that began.
@@ -153,15 +186,20 @@ def process_stays(db, sources=None, rebuild=False):
         candidate = state["candidate"] if state else None
         if candidate:
             candidate.pop("nearby_names", None)  # kept beside the candidate since the name lookups moved out
-        max_id, last_time = source_max_id, state["last_timestamp"] if state else None
+        # A source restarted at the line with nothing after it has read up to the line.
+        max_id, last_time = source_max_id, state["last_timestamp"] if state else restart_at
         detected = _DetectedStays(db, source)
         newest_checkpoint = None if state is None else (resume["last_timestamp"] if resume else db.stays.last_checkpoint(source))
         next_checkpoint = _after(newest_checkpoint, CHECKPOINT_EVERY) if newest_checkpoint else None
         wrote_checkpoint = False
-        fixes = db.points.best_fixes_after_time(source, resume["last_timestamp"]) if resume else \
-            db.points.best_fixes_after(source, last_id)
+        if resume or restart_at:
+            fixes = db.points.best_fixes_after_time(source, resume["last_timestamp"] if resume else restart_at)
+        else:
+            fixes = db.points.best_fixes_after(source, last_id)
         for batch in fixes:
             for point in batch:
+                if is_frozen(line, point["timestamp"]):
+                    continue  # a late fix for a frozen day
                 processed += 1
                 last_time = point["timestamp"]
                 # A low-accuracy fix neither confirms nor ends a stay.
@@ -177,6 +215,8 @@ def process_stays(db, sources=None, rebuild=False):
         db.stays.save_state(source, max_id, last_time, candidate)
         if wrote_checkpoint:
             db.stays.thin_checkpoints(source, _after(newest_checkpoint, -CHECKPOINTS_KEPT_HOURLY))
+        if line and (area_since is None or area_since < line):
+            area_since = line
         _refresh_area_stays(db, source, area_since, rules)
     incremental_sources = processed_sources - rebuilt_sources - set(from_times)
     if incremental_sources:
@@ -219,7 +259,7 @@ def stays(db, start=None, end=None, source=None, limit=500, lookup_places=False,
     lookup_places confirms sparse quick stops by asking the place provider
     (else its cache only); stops nothing confirms go to `rejected`.
     """
-    rows = db.stays.between(start, end, source, limit)
+    rows = without_live_doubles(db.stays.between(start, end, source, limit), frozen_before(db))
     places, labels, overrides = db.places.saved(), db.places.labels(), db.corrections.mode_overrides()
     rows = _confirm_possible_stops(db, rows, places, labels, lookup_places, rejected)
     rows = apply_stay_edits(rows, db.corrections.stay_edits(start, end, source))
@@ -269,12 +309,18 @@ def anchored_trips(db, start=None, end=None, source=None, lookup_places=True):
     """Return travel intervals bounded by consecutive stays (of the length set in Settings).
 
     lookup_places=False confirms quick stops from the lookup cache only, for history sweeps.
+    Trips that start before the freeze line are read as they were kept (frozen), not found again.
     """
     context_start = (datetime.fromisoformat(parse_time(start)) - timedelta(days=1)).isoformat() if start else None
     context_end = (datetime.fromisoformat(parse_time(end)) + timedelta(days=1)).isoformat() if end else None
     anchors = stays(db, context_start, context_end, source=source, limit=None, lookup_places=lookup_places)
-    points = list(reversed(db.points.observations(context_start, context_end, source=source, limit=None)))
-    trips = trips_between_stays(points, anchors, start, end, db.settings.get(), _airport_check(db))
+    line = frozen_before(db)
+    trips = []
+    if not (line and end and parse_time(end) < line):
+        points = list(reversed(db.points.observations(max(filter(None, (context_start, line))) if line else context_start,
+                                                      context_end, source=source, limit=None)))
+        trips = [trip for trip in trips_between_stays(points, anchors, start, end, db.settings.get(), _airport_check(db))
+                 if not is_frozen(line, trip["start"])]
     overrides = db.corrections.mode_overrides()
     for trip in trips:
         override = mode_override_for(overrides, trip["source"], "trip", trip["start"], trip["end"])
@@ -282,6 +328,15 @@ def anchored_trips(db, start=None, end=None, source=None, lookup_places=True):
             # Your correction beats the speed-based guess (kept as detected_mode).
             trip.update(detected_mode=trip["mode"], mode=override["mode"], mode_corrected=True,
                         modes={override["mode"]: sum(trip["modes"].values())})
+    if line and not (start and parse_time(start) >= line):
+        # By time, not id: a restored backup gives the same stays new ids.
+        leaving = {(stay["source"], stay["ended_at"]): stay.get("place_name") for stay in anchors}
+        reaching = {(stay["source"], stay["started_at"]): stay.get("place_name") for stay in anchors}
+        kept = [{**trip, "frozen": True, "from_name": leaving.get((trip["source"], trip["start"])),
+                 "to_name": reaching.get((trip["source"], trip["end"]))}
+                for trip in db.trips.between(parse_time(start) if start else None, parse_time(end) if end else None, source)
+                if is_frozen(line, trip["start"])]
+        trips = sorted(trips + kept, key=lambda trip: trip["start"], reverse=True)
     return trips
 
 

@@ -80,6 +80,8 @@ def fill_trip(db, original):
     # Fixes are for matching and learning, not for drawing: a day keeps only the way.
     trip = {key: value for key, value in original.items() if key != "fixes"}
     trip["route"] = [{key: value for key, value in leg.items() if key != "fixes"} for leg in trip.get("route") or []]
+    if trip.get("frozen"):
+        return trip  # kept with its way filled in when its day froze
     if trip.get("mode") == "flying":
         return with_flight_way(trip)
     fixes = original.get("fixes")

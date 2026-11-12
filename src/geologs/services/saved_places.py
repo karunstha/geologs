@@ -5,7 +5,7 @@ from . import places as naming
 from ..domain.geo import metres
 from ..domain.timing import parse_time
 from ..domain.visits import merge_split_visits
-from .stays import stays
+from .stays import refuse_frozen, stays
 from .use_case import use_case
 
 
@@ -99,6 +99,8 @@ def save_label(db, raw):
     if started_at and ended_at < started_at:
         raise ValueError("ended_at must not be before started_at")
     source = str(raw.get("source") or "").strip()[:80] or None if started_at else None
+    # A name for one visit is an edit of that day; a name for every visit is not.
+    refuse_frozen(db, started_at)
     values = (name, lat, lon, radius, str(raw.get("address") or "")[:300], str(raw.get("category") or "")[:160],
               str(raw.get("provider_place_id") or "")[:300], source, started_at, ended_at, parse_time(None))
 
@@ -119,6 +121,9 @@ def save_label(db, raw):
 
 @use_case
 def delete_label(db, label_id):
+    label = db.places.label(int(label_id))
+    if label:
+        refuse_frozen(db, label.get("started_at"))
     if not db.places.delete_label(label_id):
         raise ValueError("label not found")
     db.caches.clear_analysis()

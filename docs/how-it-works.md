@@ -41,6 +41,17 @@ The server learns from the last two days in the background whenever new samples 
 what it has learned. Run `geologs learn-paths` once to learn from your whole history; it reports how many trips
 were recorded well enough. Deleting samples or a tracker deletes the routes learned from them.
 
+## Data retention
+
+**Settings → Import & export → Data retention** keeps raw locations for 1, 2, 3, 5 or 10 years, or forever (the default). Each user sets their own. Days older than that are **frozen**, a month at a time, by the background job:
+
+-   The day's trips are kept as they were found, filled-in routes included, in `trips`. Its stays are marked frozen.
+-   Its raw samples are thinned to the compact timeline: every movement fix, and the arrival and departure of each stay. A stay's other samples are removed. The removed samples cannot be brought back.
+-   A frozen day is read from what was kept, so it looks as it did. It is never analysed again: changed settings, a rebuild of stays and new algorithms apply after the freeze line only, and a late fix for a frozen day changes nothing. A name you give a spot for every visit still names its frozen visits.
+-   A frozen day takes no edits: no travel-mode corrections, added or removed stops, names for one visit, or deleted samples.
+
+Keeping more years, or turning retention off, stops the line moving; it never moves back. Shortening it asks first, with how many samples it would remove. A full backup holds the frozen stays and trips, so a restored archive keeps its frozen days. Restoring one into an archive with its own older history freezes the same days there too.
+
 ## Reminders and notifications
 
 Create a reminder at a saved place, search for another place near the latest fix, or enter destination coordinates and a 20–5,000 m radius. An unsaved reminder destination remains attached to that reminder and does not appear under Saved Places. A reminder can also name a kind of place instead of one location: **Any place named “Starbucks”** fires the first time you have been still for about three minutes within 150 m of a place whose name matches, anywhere. Every named place in that radius is checked, not just the nearest, and each query word must start a word of the name or be a close spelling of one (“starbuks” matches “Starbucks Coffee”). The places around a stop are looked up once per stop, so this costs one cached nearby-place lookup per stop of three minutes or more, and only while a name reminder is active. The number of provider requests behind that lookup depends on the selected provider. A new point inside after an outside or stale previous fix creates an event and completes the reminder. Active reminders can be cancelled; triggered and cancelled reminders remain as history and cannot be re-enabled. You can delete one from history, or clear it all; a deleted reminder takes its arrival events and its unsaved destination with it. Low accuracy readings larger than the geofence radius or 150 m are ignored for triggering.

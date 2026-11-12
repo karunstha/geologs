@@ -422,6 +422,14 @@
               <div class="data-actions"><button id="backup-go" type="button" class="button secondary">Download backup</button></div>
             </div>
             <div class="card">
+              <div class="card-head"><div><h3>Data retention</h3><p>Keep raw locations for a set number of years. Older days are frozen: their stays, trips and routes stay as they were found, but the raw samples inside each stay are removed. Frozen days cannot be edited, and new settings and improvements apply only to later days. Removed samples cannot be brought back; backups made earlier still hold them.</p></div></div>
+              <form id="retention-form" class="data-form">
+                <label class="setting-row"><span class="setting-label"><strong>Keep raw locations</strong><small id="retention-note">Forever: nothing is frozen.</small></span><select id="retention-years" class="input"></select></label>
+                <div class="data-actions"><button id="retention-go" class="button primary" disabled>Save</button></div>
+              </form>
+              <div id="retention-status" class="callout" role="status" hidden></div>
+            </div>
+            <div class="card">
               <div class="card-head"><div><h3>Import</h3><p>A CSV with timestamp, lat and lon columns; a GeoJSON file of timed points; Google Takeout's Records.json or Semantic Location History; the Timeline file your phone exports (its Timeline settings → Export Timeline data); or a GeoLogs full backup, which keeps its own tracker names. Locations already here are recognised, so importing a file twice is safe.</p></div></div>
               <form id="import-form" class="data-form">
                 <div class="form-pair"><label class="field"><span>File</span><input id="import-file" class="input" type="file" accept=".csv,.json,.geojson,.gz,text/csv,application/json,application/geo+json,application/gzip" required></label><label class="field"><span>File it under</span><input id="import-source" class="input" maxlength="80" placeholder="Automatic" autocomplete="off"></label></div>
