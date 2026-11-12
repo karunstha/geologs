@@ -35,6 +35,7 @@ from geologs.services.places import place_details, geocode, nearby_places, place
 from geologs.services.location import current_location
 from geologs.services.reminders import deliver_webhook
 from geologs.integrations.places import reverse_cache_radius
+from geologs.domain.geo import metres
 from geologs.domain.motion import classify_motion, mode_for
 from geologs.domain.places import name_matches, street_key
 from geologs.domain.routes import route_segments_from_points, smooth_route_segment
@@ -2025,6 +2026,25 @@ class StoreTests(unittest.TestCase):
             daily_briefs(self.db, "2026-09-27", "2026-09-26")
         with self.assertRaisesRegex(ValueError, "end_date must be on or up to 30 days after date"):
             daily_briefs(self.db, "2026-09-01", "2026-10-02")
+
+    def test_a_short_flight_from_an_airport_you_named_is_a_flight(self):
+        start = datetime(2026, 9, 27, 13, tzinfo=timezone.utc)
+        away = shifted(HOME, 0, 300_000)
+        # Phone in airplane mode: 300 km between stays in 1 h 45 m (171 km/h) is no drive.
+        ingest(self.db, minute_fixes([still(HOME, 40)], start=start)
+               + minute_fixes([still(away, 40)], start=start + timedelta(minutes=40 + 105)))
+        window = ("2026-09-27T00:00:00Z", "2026-09-28T00:00:00Z")
+        self.assertEqual([trip["mode"] for trip in anchored_trips(self.db, *window)], [None])
+        save_label(self.db, {"name": "O'Hare International Airport", "lat": HOME[0], "lon": HOME[1], "radius_m": 500})
+        (trip,) = anchored_trips(self.db, *window)
+        self.assertEqual((trip["mode"], trip["recorded"]), ("flying", True))
+        day = day_summary(self.db, "2026-09-27", "UTC")
+        (shown,) = day["trips"]
+        self.assertEqual(shown["mode"], "flying")
+        self.assertTrue(shown["route"][0]["flight"])
+        self.assertEqual(shown["route_fills"], [])
+        self.assertEqual(day["activity_totals"]["flying"]["count"], 1)
+        self.assertAlmostEqual(day["activity_totals"]["flying"]["distance_km"], metres(*HOME, *away) / 1000, delta=.1)
 
     def test_travel_mode_corrections_override_the_speed_guess(self):
         office = shifted(HOME, 2000, 0)

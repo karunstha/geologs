@@ -1,7 +1,7 @@
 """Path geometry: simplifying recorded routes and matching gaps against known ones."""
 import math
 
-from .geo import metres
+from .geo import great_circle, metres
 from .motion import MOVEMENT_MODES
 from .routes import ROUTE_JUMP_M
 from collections import Counter
@@ -107,7 +107,7 @@ def learnable(trip):
     return (watched
             and all(leg["kind"] == "recorded" or leg.get("sparse") or path_length(leg["coordinates"]) <= LEARN_MAX_GAP_M
                     for leg in legs)
-            and trip.get("mode") in MOVEMENT_MODES
+            and trip.get("mode") in MOVEMENT_MODES and trip.get("mode") != "flying"
             and distance_m >= LEARN_MIN_DISTANCE_M and points >= LEARN_MIN_FIXES
             and trip.get("max_fix_gap_m", float("inf")) <= LEARN_MAX_GAP_M)
 
@@ -264,6 +264,16 @@ def place_route(a, b, fixes, known):
     # One travelled this way round (one-way streets, ramps), then the closest fit, then the most travelled, then the latest.
     return _fill(a, b, max(_group_routes(fitting), key=lambda item: (
         not item["reverse"], -item["offset"], len(item["route"]), item["started_at"])))
+
+
+def with_flight_way(trip):
+    """A copy of a flight drawn as one great-circle leg between its stays: nobody flies the roads,
+    and whatever was recorded on the ground at either end says nothing about the way."""
+    way = great_circle([trip["from_lon"], trip["from_lat"]], [trip["to_lon"], trip["to_lat"]])
+    legs = [{"kind": "gap", "coordinates": way, "flight": True}]
+    # A trip you marked a flight measured its legs on the ground; a flight is as long as its arc.
+    return {**trip, "route": legs, "route_fills": [], "route_segments": [], "route_gaps": [way], "coordinates": [],
+            "distance_km": round(path_length(way) / 1000, 2)}
 
 
 def with_fills(trip, filled):

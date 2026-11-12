@@ -51,9 +51,10 @@ def observed_pieces(legs):
 def track_from_trip(trip):
     """What a trip between two places recorded of its way, or None when it says nothing about one.
 
-    A round trip goes nowhere to learn; a trip with no fix on the way has nothing to tell.
+    A round trip goes nowhere to learn; a trip with no fix on the way has nothing to tell, nor
+    has a flight about any way on the ground.
     """
-    if trip.get("loop") or not trip.get("route"):
+    if trip.get("loop") or not trip.get("route") or trip.get("mode") == "flying":
         return None
     pieces = observed_pieces(trip["route"])
     # A sparse step was watched, if too sparsely to show the road: it counts towards starting a route.
@@ -72,7 +73,9 @@ def track_from_trip(trip):
 
 
 def same_kind(a, b):
-    """Whether two modes travel the same ways (an unknown mode goes with any)."""
+    """Whether two modes travel the same ways (an unknown mode goes with any but a flight)."""
+    if "flying" in (a, b):
+        return a == b
     return a is None or b is None or (a in ON_FOOT) == (b in ON_FOOT)
 
 

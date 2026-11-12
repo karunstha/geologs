@@ -17,7 +17,7 @@ const LEAST_MOVE_SECONDS = 1.6;
 const STOP_SECONDS = 1.1;
 const SPEEDS = [0.5, 1, 2, 4];
 // How close the camera follows each mode: slower ways are seen closer.
-const FOLLOW_ZOOM = { driving: 13.2, passenger: 13.2, transit: 12.8, cycling: 14.6, running: 15.2, walking: 15.4 };
+const FOLLOW_ZOOM = { driving: 13.2, passenger: 13.2, transit: 12.8, flying: 5, cycling: 14.6, running: 15.2, walking: 15.4 };
 const NO_MODE_COLOR = "#176d69";
 // A place nothing named shows as its coordinates; on the map that says nothing.
 const COORDINATES = /^-?\d+\.\d+, -?\d+\.\d+$/;

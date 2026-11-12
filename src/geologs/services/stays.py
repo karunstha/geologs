@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from . import places as naming
 from ..domain.areas import area_windows, returns_to_origin, went_elsewhere_flag
 from ..domain.corrections import apply_stay_edits, mode_override_for
-from ..domain.places import is_home_place, label_at, POSSIBLE_STOP_PLACE_M, zone_at
+from ..domain.places import AIRPORT_REACH_M, is_airport_place, is_home_place, label_at, POSSIBLE_STOP_PLACE_M, zone_at
 from ..domain.stay_detection import accurate_enough, advance, candidate_duration, min_stay_seconds
 from ..domain.timing import parse_time
 from ..domain.trips import trips_between_stays, went_elsewhere_between
@@ -244,6 +244,26 @@ def stays(db, start=None, end=None, source=None, limit=500, lookup_places=False,
     return rows
 
 
+def _airport_check(db):
+    """Whether a stay was at an airport: what you named it or saved there, else a cached lookup nearby.
+
+    Only the lookup cache is read, so checking spends no provider quota; it is
+    asked only of trips that could be flights (see is_flight).
+    """
+    loaded = {}
+
+    def near_airport(stay):
+        if "labels" not in loaded:
+            loaded.update(labels=db.places.labels(), places=db.places.saved())
+        lat, lon = stay["lat"], stay["lon"]
+        label = label_at(loaded["labels"], lat, lon, stay["source"], stay["started_at"], stay["ended_at"])
+        if label:
+            return is_airport_place(label)
+        return (is_airport_place(zone_at(loaded["places"], lat, lon))
+                or is_airport_place(naming.named_place_near(db, lat, lon, AIRPORT_REACH_M, lookup=False)))
+    return near_airport
+
+
 @use_case
 def anchored_trips(db, start=None, end=None, source=None, lookup_places=True):
     """Return travel intervals bounded by consecutive stays (of the length set in Settings).
@@ -254,7 +274,7 @@ def anchored_trips(db, start=None, end=None, source=None, lookup_places=True):
     context_end = (datetime.fromisoformat(parse_time(end)) + timedelta(days=1)).isoformat() if end else None
     anchors = stays(db, context_start, context_end, source=source, limit=None, lookup_places=lookup_places)
     points = list(reversed(db.points.observations(context_start, context_end, source=source, limit=None)))
-    trips = trips_between_stays(points, anchors, start, end, db.settings.get())
+    trips = trips_between_stays(points, anchors, start, end, db.settings.get(), _airport_check(db))
     overrides = db.corrections.mode_overrides()
     for trip in trips:
         override = mode_override_for(overrides, trip["source"], "trip", trip["start"], trip["end"])

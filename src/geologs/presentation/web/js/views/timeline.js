@@ -16,7 +16,7 @@ export function stayActivityText(stay) {
     : "Moving around";
 }
 
-export const TRIP_MODES = ["walking", "running", "cycling", "driving", "passenger", "transit"],
+export const TRIP_MODES = ["walking", "running", "cycling", "driving", "passenger", "transit", "flying"],
   AREA_MODES = ["walking", "running", "cycling"];
 
 export function modeStrip(subject, options, current, corrected, detected, caption, basis = "Detected from speed") {

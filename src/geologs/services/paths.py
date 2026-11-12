@@ -4,7 +4,7 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 
 from ..domain.paths import best_route, learnable, MAX_CANDIDATES, path_bounds, path_length, search_box, simplify, with_fills
-from ..domain.paths import place_route, with_place_fill, with_place_legs
+from ..domain.paths import place_route, with_flight_way, with_place_fill, with_place_legs
 from ..domain.place_routes import best_place_route, route_stretch, same_kind
 from ..domain.routes import ROUTE_JUMP_M
 from .place_routes import learn_tracks, regroup, routes_between
@@ -74,11 +74,14 @@ def fill_trip(db, original):
     that its fixes follow most closely (see place_route). Otherwise, or failing
     that, each unrecorded leg is filled on its own (see with_fills): the first
     starts at the stay the trip left and the last ends at the stay it reached,
-    and a route may pass farther from a stay than from a fix.
+    and a route may pass farther from a stay than from a fix. A flight is no
+    road's: it is drawn over the globe (see with_flight_way).
     """
     # Fixes are for matching and learning, not for drawing: a day keeps only the way.
     trip = {key: value for key, value in original.items() if key != "fixes"}
     trip["route"] = [{key: value for key, value in leg.items() if key != "fixes"} for leg in trip.get("route") or []]
+    if trip.get("mode") == "flying":
+        return with_flight_way(trip)
     fixes = original.get("fixes")
     if fixes is not None:  # only a trip mostly nobody recorded has them (see trips_between_stays)
         a, b = [trip["from_lon"], trip["from_lat"]], [trip["to_lon"], trip["to_lat"]]

@@ -33,6 +33,12 @@ export const modeInfo = {
     color: "#a83f78",
     icon: '<svg viewBox="0 0 24 24"><rect x="5" y="3.5" width="14" height="14" rx="2.5"/><path d="M5 11h14M8 17.5v2.5M16 17.5v2.5"/><circle cx="8.5" cy="14.2" r=".7"/><circle cx="15.5" cy="14.2" r=".7"/></svg>',
   },
+  flying: {
+    label: "Flight",
+    noun: "Flying",
+    color: "#b5761b",
+    icon: '<svg viewBox="0 0 24 24"><path d="M10.5 4.5c0-1.1.7-2 1.5-2s1.5.9 1.5 2V10l7 4.5V17l-7-2.2v4.1l2 1.6v1.8l-3.5-1-3.5 1v-1.8l2-1.6v-4.1L3.5 17v-2.5l7-4.5z"/></svg>',
+  },
   walking: {
     label: "Walk",
     noun: "Walking",

@@ -9,9 +9,32 @@ MAX_CONNECTED_GAP_SECONDS = 900
 MAX_PLAUSIBLE_SPEED_MPS = 55.6
 # Transit (bus, train) is never guessed from speed; it only comes from a correction.
 # Being driven (passenger: no fuel is yours) is never guessed either; you mark the drive.
-MOVEMENT_MODES = ("driving", "passenger", "transit", "cycling", "running", "walking")
+# Flying is guessed from door to door, not from fixes: see is_flight.
+MOVEMENT_MODES = ("driving", "passenger", "transit", "flying", "cycling", "running", "walking")
 # Short moves cannot be told from driving by speed alone; a drive needs this much distance.
 DRIVING_MIN_DISTANCE_M = 500
+# A flight goes at least this far, stay to stay, in a straight line.
+FLIGHT_MIN_DISTANCE_M = 100_000
+# Stay to stay, nothing on the ground averages this: a 300 km/h train, with the way to its station, does not.
+FLIGHT_MIN_KMH = 250
+# From or to an airport, a flight padded by the drives to and from it averages at least this.
+FLIGHT_FROM_AIRPORT_MIN_KMH = 150
+
+
+def is_flight(distance_m, seconds, at_airport):
+    """Whether a move between two stays was a flight, from its straight-line distance and time.
+
+    A phone in airplane mode records nothing on the way, and fixes from the air
+    are too fast to trust (MAX_PLAUSIBLE_SPEED_MPS), so the stays at either end
+    decide: far apart, reached faster than anything on the ground goes. A stay
+    at an airport at either end lowers the bar for short flights; one end is
+    enough, as you rarely stay put on landing. `at_airport` is called only for
+    a move that could be a flight (it may look places up).
+    """
+    if seconds <= 0 or distance_m < FLIGHT_MIN_DISTANCE_M:
+        return False
+    kmh = distance_m / seconds * 3.6
+    return kmh >= FLIGHT_MIN_KMH or (kmh >= FLIGHT_FROM_AIRPORT_MIN_KMH and bool(at_airport and at_airport()))
 
 
 def mode_for(speed_mps, accuracy_m=None, speeds=None):

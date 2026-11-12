@@ -3,7 +3,7 @@ import math
 from datetime import datetime
 
 from .geo import metres
-from .motion import classify_motion, connected_elapsed, move_uncertainty, reported_speed, same_source_state, select_best_timed_fixes
+from .motion import classify_motion, connected_elapsed, is_flight, move_uncertainty, reported_speed, same_source_state, select_best_timed_fixes
 from .routes import (connected_runs, guessed_stretch_m, legs_length_m, mostly_unrecorded, route_legs, smooth_route_segment,
                      split_at_jumps, split_at_steps)
 from .timing import parse_time
@@ -115,7 +115,7 @@ def stats_from_points(points):
             "first": points[0]["timestamp"] if points else None, "last": points[-1]["timestamp"] if points else None}
 
 
-def trips_between_stays(points, stay_rows, start=None, end=None, speeds=None):
+def trips_between_stays(points, stay_rows, start=None, end=None, speeds=None, near_airport=None):
     """Build one trip between each pair of consecutive confirmed stays.
 
     Every move from one place to the next is a trip, even when the tracker
@@ -124,6 +124,11 @@ def trips_between_stays(points, stay_rows, start=None, end=None, speeds=None):
     `recorded: False`: its way is straight legs (or known routes, filled in
     later), and it has no mode until a known route or your correction gives
     it one; its times are estimates, so a speed from them would be made up.
+
+    A move far between stays and faster than the ground allows is a flight
+    (see is_flight), however little was recorded: its times are the stays',
+    and its distance is the straight line between them. `near_airport(stay)`,
+    when given, says whether a stay was at an airport.
     """
     points_by_source, stays_by_source = {}, {}
     for point in select_best_timed_fixes(points):
@@ -180,7 +185,14 @@ def trips_between_stays(points, stay_rows, start=None, end=None, speeds=None):
                             default=0) - origin_reach
             loop = (metres(origin["lat"], origin["lon"], destination["lat"], destination["lon"])
                     <= max(100, origin_reach + 50, destination_reach + 50))
-            if motion is not None:
+            direct_m = metres(origin["lat"], origin["lon"], destination["lat"], destination["lon"])
+            flight = is_flight(direct_m, (arrival - departure).total_seconds(),
+                               near_airport and (lambda: near_airport(origin) or near_airport(destination)))
+            if flight:
+                reading = {"distance_km": round(direct_m / 1000, 2),
+                           "moving_minutes": round((arrival - departure).total_seconds() / 60, 1), "median_kmh": None,
+                           "speed_reported": False, "mode": "flying", "modes": {"flying": max(1, len(moves))}}
+            elif motion is not None:
                 reading = {"distance_km": round(motion["distance_m"] / 1000, 2),
                            "moving_minutes": round(motion["moving_seconds"] / 60, 1), "median_kmh": motion["median_kmh"],
                            "speed_reported": motion["speed_reported"], "mode": motion["mode"],
@@ -190,7 +202,7 @@ def trips_between_stays(points, stay_rows, start=None, end=None, speeds=None):
                            "median_kmh": None, "speed_reported": False, "mode": None, "modes": {}}
             trip = {
                 "start": origin["ended_at"], "end": destination["started_at"], "source": source, **reading,
-                "recorded": motion is not None,
+                "recorded": motion is not None or flight,
                 "duration_minutes": round((arrival - departure).total_seconds() / 60, 1),
                 "max_excursion_m": max(0, round(excursion)), "max_fix_gap_m": round(max_fix_gap), "loop": loop,
                 "went_elsewhere": None if left is None else bool(left),
@@ -200,7 +212,7 @@ def trips_between_stays(points, stay_rows, start=None, end=None, speeds=None):
                 "to_lat": destination["lat"], "to_lon": destination["lon"],
                 "recorded_points": len(trip_points),
             }
-            if mostly_unrecorded(legs):
+            if mostly_unrecorded(legs) and not flight:
                 # What a known route between the stays must pass near to stand for the trip (see place_route).
                 trip["fixes"] = [[point["lon"], point["lat"]] for point in accurate]
             # Two stays at one spot joined by drift or a GPS jump are one visit, not a trip.
@@ -213,6 +225,6 @@ def trips_between_stays(points, stay_rows, start=None, end=None, speeds=None):
                          "route_gaps": [leg["coordinates"] for leg in legs if leg["kind"] == "gap"],
                          "coordinates": route_segments[0] if len(route_segments) == 1 else [],
                          # Watched from the first fix to the last, if sparsely in places.
-                         "coverage_complete": motion is not None and len(runs) == 1 and len(runs[0]) > 1 and not jumps})
+                         "coverage_complete": not flight and motion is not None and len(runs) == 1 and len(runs[0]) > 1 and not jumps})
             trips.append(trip)
     return sorted(trips, key=lambda trip: trip["start"], reverse=True)

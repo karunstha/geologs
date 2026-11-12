@@ -78,6 +78,22 @@ def is_home_place(place):
     return str(place.get("name") or place.get("display_name") or "").strip().casefold() in ("home", "my home")
 
 
+# Words naming an airport, in a place's name or its provider category ("airport.international",
+# OpenStreetMap's "aeroway.aerodrome" and "aeroway.terminal").
+AIRPORT_WORDS = ("airport", "aeroway", "aerodrome", "airfield", "aeroport", "aéroport", "aeropuerto", "aeroporto",
+                 "flughafen", "luchthaven", "lufthavn", "flygplats", "lotnisko", "havalimanı", "havalimani")
+# Big airports sprawl: a terminal can be this far from the point that names the airport.
+AIRPORT_REACH_M = 3000
+
+
+def is_airport_place(place):
+    """Whether a place (a label, a saved place, or a lookup result) is an airport, by its name or category."""
+    if not place:
+        return False
+    text = search_text(" ".join(str(place.get(key) or "") for key in ("name", "place_name", "category")))
+    return any(word in AIRPORT_WORDS for word in text.split())
+
+
 def zone_at(places, lat, lon):
     """The saved place whose circle covers a position, nearest centre first."""
     matches = [(metres(lat, lon, place["lat"], place["lon"]), place) for place in places]
