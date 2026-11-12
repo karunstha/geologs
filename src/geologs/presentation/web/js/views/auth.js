@@ -4,6 +4,7 @@ import { refreshAll } from "../app/refresh.js";
 import { $, toast } from "../core/dom.js";
 import { state } from "../core/state.js";
 import { clearAccount, refreshAccount, SIGNED_OUT_KEY, showAccount } from "./account.js";
+import { clearPeople } from "./people.js";
 
 let mode = "signin";
 let linkToken = null; // a reset or invite token, kept only in memory once read from the address bar
@@ -149,6 +150,7 @@ export async function initAuth() {
     if (!$("auth-panel").hidden) return;
     state.user = null;
     clearAccount();
+    clearPeople();
     let preferred = "signin";
     try {
       preferred = localStorage.getItem("geologs-sign-in") === "token" && options.token ? "token" : "signin";

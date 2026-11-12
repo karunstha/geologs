@@ -15,6 +15,12 @@ Passwords are kept as scrypt hashes, and sessions and tokens only as SHA-256 has
 
 Every table that holds someone's data has a `user_id`, and PostgreSQL row-level security lets a connection see and change only the rows of the user it works for; a connection working for no one sees nothing. Shared lookups (place names, reverse geocoding, fuel prices) and the accounts themselves are the only exceptions, and a test fails if a new table is neither. A superuser (as the Compose database role is) skips row-level security, so the app switches its connections to the role `geologs_app`, which cannot, and refuses to run if that role is missing. Compose goes further: requests log in as `geologs_app` itself, with its own password (`GEOLOGS_APP_DB_PASSWORD`, which Compose requires), so no request connection is ever a superuser. The owner login in `GEOLOGS_DATABASE_URL` is used only to create and upgrade the tables when the server starts. Outside Compose, set `GEOLOGS_APP_DB_PASSWORD` the same way.
 
+## Location sharing
+
+**Account → Location sharing** shows another person on this server where you are now. Type the email of their account, and choose what they see (your position, or only your town, rounded to about 1 km) and for how long (1 hour, until the end of today, or until you stop it). They see you on their map, with the place's name and when your phone last reported, and get an email when the server can send one. They never see your history.
+
+The background job keeps one position for each precision you share at, about once a minute, and removes it once nothing is shared. Place names come from your own names, saved places and the lookup cache, never from new lookups; a town comes from OpenStreetMap's Nominatim, cached by the kilometre. The viewer's account can read only that position, at the precision shared and only while the share lasts, enforced by row-level security like the rest of the archive. Either person can end a share: you stop it, or they stop seeing it. Erasing your location data ends your shares.
+
 ## Email
 
 Set `GEOLOGS_PUBLIC_URL` (where people open GeoLogs, such as `https://geologs.example.com`) and your mail server (`GEOLOGS_SMTP_HOST`, `GEOLOGS_SMTP_PORT`, `GEOLOGS_SMTP_SECURITY` of `starttls`, `ssl` or `none`, `GEOLOGS_SMTP_USERNAME`, `GEOLOGS_SMTP_PASSWORD`, and `GEOLOGS_SMTP_FROM`) to email:

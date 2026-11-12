@@ -107,3 +107,21 @@
 :root[data-theme="dark"] .leaflet-tile-pane {
   filter: invert(1) hue-rotate(180deg) brightness(0.92) contrast(0.9) saturate(0.6);
 }
+
+/* People who share their location with you: an initial in a ring, over everything else. */
+.person-pin {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: 3px solid #fff;
+  background: var(--person, #6d4fc2);
+  color: #fff;
+  font: 700 13px/1 var(--font, system-ui, sans-serif);
+  box-shadow: 0 2px 6px rgb(0 0 0 / 0.3);
+}
+.person-pin.stale {
+  filter: grayscale(0.7);
+  opacity: 0.8;
+}

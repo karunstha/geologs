@@ -11,6 +11,7 @@ import { renderPlaces } from "../views/places.js";
 import { renderReminders } from "../views/reminders.js";
 import { renderSettings, showSettingsPage } from "../views/settings.js";
 import { setSunPosition } from "../ui/theme.js";
+import { refreshPeople } from "../views/people.js";
 
 export async function refreshMeta() {
   let overview;
@@ -72,7 +73,7 @@ export async function refreshAll() {
         : "Searches are worldwide until a location is recorded."
       : "Place search needs a geocoding provider.";
     await refreshMeta();
-    await Promise.all([refreshExplore(), refreshInsights()]);
+    await Promise.all([refreshExplore(), refreshInsights(), refreshPeople()]);
   } catch (e) {
     // The sign-in screen already says what is needed.
     if ($("auth-panel").hidden) toast(e.message);

@@ -531,6 +531,18 @@
           <div class="card-head"><div><h3 id="account-shares-title">Shared links</h3><p>Replays anyone with the link can watch. Make one with Replay → Share on a day.</p></div></div>
           <ul id="account-shares" class="list rows token-list"></ul>
         </section>
+        <section class="card" aria-labelledby="account-sharing-title" data-demo-hidden>
+          <div class="card-head"><div><h3 id="account-sharing-title">Location sharing</h3><p>Show people with an account on this server where you are now: the place and when your phone last reported, never your history. They see you on their map.</p></div></div>
+          <form id="sharing-form" class="account-form">
+            <label class="field"><span>Their email</span><input id="sharing-email" class="input" type="email" autocomplete="off" required></label>
+            <div class="form-pair"><label class="field"><span>Show</span><select id="sharing-precision" class="input"><option value="exact">Where I am</option><option value="approximate">Only my town (about 1 km)</option></select></label><label class="field"><span>For</span><select id="sharing-duration" class="input"><option value="hour">1 hour</option><option value="today">Until the end of today</option><option value="always" selected>Until I stop it</option></select></label></div>
+            <div class="account-form-actions"><button id="sharing-go" class="button primary small">Share my location</button></div>
+          </form>
+          <h4 class="panel-subhead">You share with</h4>
+          <ul id="sharing-given" class="list rows token-list"></ul>
+          <h4 class="panel-subhead">Shared with you</h4>
+          <ul id="sharing-received" class="list rows token-list"></ul>
+        </section>
         <section class="card" aria-labelledby="account-tokens-title" data-demo-hidden>
           <div class="card-head"><div><h3 id="account-tokens-title">API tokens</h3><p>For your own tools, such as an MCP client. It acts as you, so keep it private.</p></div></div>
           <div id="account-token-reveal" class="callout success token-reveal" role="status" hidden></div>

@@ -15,6 +15,7 @@ import { initHome } from "./views/home.js";
 import { initReplay } from "./views/replay.js";
 import { refreshInsights } from "./views/patterns.js";
 import { initPlaceDialogs } from "./views/place-dialogs.js";
+import { initPeople, refreshPeople } from "./views/people.js";
 import { initPlaces } from "./views/places.js";
 import { initReminders } from "./views/reminders.js";
 import { initSettings } from "./views/settings.js";
@@ -41,6 +42,7 @@ initMap();
 // After the map: the new Home borrows it, with the classic Home's timeline and details.
 initHome();
 initReplay();
+initPeople();
 
 refreshAll().then(() => {
   state.lastEventId = state.events.reduce((max, e) => Math.max(max, e.id), 0);
@@ -52,6 +54,7 @@ setInterval(() => {
   if (state.followToday && $("day-date").value !== localDateKey()) $("day-date").value = localDateKey();
   refreshCurrent().catch(() => {});
   refreshExplore(false).catch(() => {});
+  refreshPeople();
 }, 60000);
 setInterval(() => refreshInsights().catch(() => {}), 300000);
 

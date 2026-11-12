@@ -222,7 +222,7 @@ class PointsRepository(Repository):
             (list(sources), list(sources)))}
 
     # Everything made of the fixes, which goes with them, in an order no row outlives what it points at.
-    LOCATION_TABLES = ("trips", "timeline_fixes", "observed_stays_v2", "observed_stays", "stay_checkpoints", "stay_observation_state",
+    LOCATION_TABLES = ("live_positions", "location_shares", "trips", "timeline_fixes", "observed_stays_v2", "observed_stays", "stay_checkpoints", "stay_observation_state",
                        "stay_processing_state", "events", "source_state", "point_observations", "points", "known_paths",
                        "trip_tracks", "place_routes", "path_exclusions", "mode_overrides", "stay_edits",
                        "daily_summaries", "analysis_cache", "shares")

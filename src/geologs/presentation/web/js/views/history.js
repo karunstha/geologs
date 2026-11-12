@@ -16,7 +16,7 @@ import {
   zonedMidnight,
 } from "../core/format.js";
 import { state } from "../core/state.js";
-import { centerOn, drawMap, drawSelection, fitDay, map, revealMap, selectedItem } from "../map/map.js";
+import { centerOn, drawMap, drawSelection, fitDay, map, peopleOnMap, revealMap, selectedItem } from "../map/map.js";
 import { modeIcon, modeInfo, placeIcon } from "../ui/icons.js";
 import { initAmbient, refreshAmbient } from "./ambient.js";
 import { initDayDetails, renderDayDetails } from "./day-details.js";
@@ -131,7 +131,7 @@ function renderEmptyDay(day, coverage) {
 
 export function renderExplore(day, coverage) {
   const hasHistory = day.points > 0;
-  const showMap = hasHistory || !!state.focusPlace;
+  const showMap = hasHistory || !!state.focusPlace || peopleOnMap(day);
   $("history-title").textContent = day.date === localDateKey() ? "Today" : dayTitle(day.date);
   $("day-context").textContent = hasHistory
     ? [

@@ -17,7 +17,7 @@ import {
 } from "../core/format.js";
 import { state } from "../core/state.js";
 import { FREE_MAP_CREDIT, freeMapStyle, greyMap } from "../map/free-map.js";
-import { dayBounds, drawSelection, map, selectItem, setCoveredRight, setDayFitter, tripKey } from "../map/map.js";
+import { dayBounds, drawSelection, map, peopleOnMap, selectItem, setCoveredRight, setDayFitter, tripKey } from "../map/map.js";
 import { modeIcon, modeInfo, placeIcon, visitNumbers } from "../ui/icons.js";
 import { moveDay } from "./history.js";
 import { showView } from "./shell.js";
@@ -409,7 +409,7 @@ function renderHome() {
   const day = state.day;
   if (!day) return;
   const hasHistory = day.points > 0,
-    showMap = hasHistory || !!state.focusPlace;
+    showMap = hasHistory || !!state.focusPlace || peopleOnMap(day);
   $("home-hero").hidden = !showMap;
   $("home-hero").classList.toggle("map-only", !hasHistory);
   $("home-glance").hidden = !hasHistory;

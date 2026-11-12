@@ -8,7 +8,7 @@ import { params } from "../views/history.js";
 import { dayVisits, editVisitedPlace } from "../views/place-dialogs.js";
 import { renderModePicker, stayWhen } from "../views/timeline.js";
 
-export let map, pathLayer, placeLayer, highlightLayer, currentMarker, searchLayer;
+export let map, pathLayer, placeLayer, highlightLayer, currentMarker, searchLayer, peopleLayer;
 
 export function initMap() {
   if (!window.L) {
@@ -50,6 +50,8 @@ export function initMap() {
   placeLayer = L.layerGroup().addTo(map);
   highlightLayer = L.layerGroup().addTo(map);
   searchLayer = L.layerGroup().addTo(map);
+  // People who share their location with you (see views/people.js), drawn on their own.
+  peopleLayer = L.layerGroup().addTo(map);
   map.on("click", async (e) => {
     const q = params();
     q.set("lat", e.latlng.lat);
@@ -123,6 +125,9 @@ export function dayBounds() {
   for (const place of day?.places_including_home || []) bounds.push([place.lat, place.lon]);
   if (state.current && (day?.date === localDateKey() || !day?.points))
     bounds.push([state.current.lat, state.current.lon]);
+  // With nothing of your own today, the map is fitted to the people sharing with you.
+  if (!day?.points && peopleOnMap(day))
+    for (const share of state.sharing.received) if (share.position) bounds.push([share.position.lat, share.position.lon]);
   return bounds;
 }
 
@@ -211,6 +216,12 @@ function drawRoute(trip, onClick, dashArray, color = modeInfo[trip.mode]?.color 
     }
     flush();
   }
+}
+
+// Whether people who share their location with you are on today's map: then it shows even on a day
+// with nothing of your own (someone who only follows their family records nothing).
+export function peopleOnMap(day) {
+  return day?.date === localDateKey() && (state.sharing?.received || []).some((share) => share.position);
 }
 
 export function drawMap(fit = false) {
@@ -449,7 +460,9 @@ export function mapNote(day) {
       ? day.timeline_points.toLocaleString() + " key fixes"
       : state.focusPlace
         ? "Location: " + (state.focusPlace.name || state.focusPlace.display_name || "selected fix")
-        : "Recorded route";
+        : peopleOnMap(day)
+          ? "People sharing their location with you"
+          : "Recorded route";
 }
 
 export function revealMap() {
