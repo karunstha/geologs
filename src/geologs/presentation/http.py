@@ -40,7 +40,7 @@ from ..services import jobs
 from ..services.mail import can_send, deliver_due, waiting as mail_waiting
 from ..services.ambient import ambient
 from ..services.backup import export_backup
-from ..services.corrections import delete_stay_edit, save_mode_override, save_stay_edit
+from ..services.corrections import delete_stay_edit, revert_day_edits, save_mode_override, save_stay_edit
 from ..services.day import day_summary
 from ..services.demo import DemoUnavailable, demo_due, erase_abandoned_demos, fill_demo, is_demo, open_demo
 from ..services.devices import create_ingest_token, delete_ingest_device, delete_ingest_token, ingest_token_for, record_ingest, source_activity
@@ -1007,6 +1007,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/mode-overrides": result = save_mode_override(db, payload)
             elif path == "/api/stay-edits": result = save_stay_edit(db, payload)
             elif path == "/api/stay-edits/delete": result = delete_stay_edit(db, payload["id"])
+            elif path == "/api/day/revert-edits": result = revert_day_edits(db, payload)
             elif path == "/api/place-labels/delete": result = delete_label(db, payload["id"])
             elif path == "/api/reminders": result = create_reminder(db, payload)
             elif path == "/api/reminders/cancel": result = cancel_reminder(db, payload["id"])

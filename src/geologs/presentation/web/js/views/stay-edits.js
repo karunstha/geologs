@@ -213,8 +213,30 @@ export function stayEditsSection(day) {
   return `<section><h3>Your changes to stays</h3><div class="list">${rows}</div></section>`;
 }
 
+// Undo every change to the shown day at once: it goes back to what was detected from its samples.
+export async function revertDayEdits() {
+  const day = state.day;
+  if (!day) return;
+  const stays = (day.stay_edits || []).length,
+    modes = (day.mode_overrides || []).length;
+  const parts = [];
+  if (stays) parts.push(`${stays} stay change${stays === 1 ? "" : "s"}`);
+  if (modes) parts.push(`${modes} travel mode${modes === 1 ? "" : "s"} set by you`);
+  if (!parts.length) return;
+  if (!confirm(`Revert ${parts.join(" and ")} on this day? The timeline goes back to what was detected from your samples. This can't be undone.`))
+    return;
+  try {
+    await post("/api/day/revert-edits", { start: day.start, end: day.end, source: day.source || "" });
+    await refreshAfterEdit();
+    toast("Day reverted to what was detected");
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
 export function initStayEdits() {
   $("add-stay").onclick = openDayStayDialog;
+  $("revert-day-edits").onclick = revertDayEdits;
   const close = () => $("stop-dialog").close();
   $("close-stop-dialog").onclick = $("cancel-stop").onclick = close;
   closeOnBackdrop($("stop-dialog"), close);

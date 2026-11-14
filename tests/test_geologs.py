@@ -20,7 +20,7 @@ from unittest.mock import Mock, patch
 
 from geologs.services import open_database, open_pool
 from geologs.data.database import STAY_REBUILDS
-from geologs.services.corrections import delete_stay_edit, save_mode_override, save_stay_edit
+from geologs.services.corrections import delete_stay_edit, revert_day_edits, save_mode_override, save_stay_edit
 from geologs.services.devices import create_ingest_token
 from geologs.services.imports import import_csv
 from geologs.services.ingest import ingest
@@ -2585,6 +2585,29 @@ class StoreTests(unittest.TestCase):
                                        "started_at": "2026-09-28T13:00:00+00:00", "ended_at": "2026-09-28T13:05:00+00:00"})
         with self.assertRaises(ValueError):
             save_settings(self.db, {"quick_stop_minutes": 15})
+
+    def test_reverting_a_days_edits_restores_what_was_detected(self):
+        fuel, work = shifted(HOME, 4000, 0), shifted(HOME, 9000, 0)
+        save_settings(self.db, {"quick_stop_minutes": 0})
+        ingest(self.db, minute_fixes([still(HOME, 30), line(HOME, fuel, 5), still(fuel, 2), line(fuel, work, 6), still(work, 30)]))
+        detected = day_summary(self.db, "2026-09-27", "UTC")
+        save_stay_edit(self.db, {"action": "add", "source": "phone",
+                                 "started_at": "2026-09-27T13:35:00+00:00", "ended_at": "2026-09-27T13:36:00+00:00"})
+        trip = day_summary(self.db, "2026-09-27", "UTC")["trips"][0]
+        save_mode_override(self.db, {"source": "phone", "mode": "cycling", "started_at": trip["start"], "ended_at": trip["end"]})
+        edited = day_summary(self.db, "2026-09-27", "UTC")
+        self.assertEqual((len(edited["stay_edits"]), len(edited["mode_overrides"])), (1, 1))
+        # An edit on another day is left alone.
+        self.db.corrections.add_mode_override("phone", "trip", "2026-09-28T10:00:00+00:00", "2026-09-28T10:30:00+00:00",
+                                              "driving", "2026-09-28T11:00:00+00:00")
+        result = revert_day_edits(self.db, {"start": edited["start"], "end": edited["end"]})
+        self.assertEqual(result, {"stay_edits": 1, "mode_overrides": 1})
+        reverted = day_summary(self.db, "2026-09-27", "UTC")
+        self.assertEqual((reverted["stay_edits"], reverted["mode_overrides"]), ([], []))
+        self.assertEqual([t["mode"] for t in reverted["trips"]], [t["mode"] for t in detected["trips"]])
+        self.assertEqual(len(self.db.corrections.mode_overrides()), 1)
+        self.assertEqual(revert_day_edits(self.db, {"start": edited["start"], "end": edited["end"]}),
+                         {"stay_edits": 0, "mode_overrides": 0})
 
     def fuel_day(self):
         """Home, a 10 km drive (50 km/h), half an hour there, and home again: 20 km driven."""

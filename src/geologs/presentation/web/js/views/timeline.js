@@ -177,6 +177,8 @@ export function renderTimeline(day) {
   $("timeline-count").textContent = day.stays.length || day.trips.length ? counts.join(" · ") : "";
   $("timeline-count").hidden = !(day.stays.length || day.trips.length);
   $("add-stay").hidden = Boolean(day.frozen); // a frozen day (data retention) takes no edits
+  $("revert-day-edits").hidden =
+    Boolean(day.frozen) || !((day.stay_edits || []).length + (day.mode_overrides || []).length);
   $("timeline-count").title =
     (day.timeline_sources || []).length > 1
       ? `Combined from ${day.timeline_sources.join(", ")}.`

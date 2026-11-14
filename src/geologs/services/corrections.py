@@ -3,8 +3,9 @@ from datetime import datetime
 
 from ..domain.corrections import mode_override_for, windows_overlap
 from ..domain.motion import MOVEMENT_MODES
+from ..domain.retention import is_frozen
 from ..domain.timing import parse_time
-from .stays import refuse_frozen
+from .stays import frozen_before, refuse_frozen
 from .use_case import use_case
 
 
@@ -87,3 +88,29 @@ def delete_stay_edit(db, edit_id):
         raise ValueError("that change was already undone")
     db.caches.clear_analysis()
     return {"deleted": int(edit_id)}
+
+
+@use_case
+def revert_day_edits(db, raw):
+    """Undo every correction on a day: stays added or removed, and travel modes set.
+
+    The day goes back to what was detected from its samples. It takes the
+    day's start and end (and the source shown, if one), and clears the same
+    edits the day lists: those whose window overlaps it.
+    """
+    start, end = parse_time(raw.get("start")), parse_time(raw.get("end"))
+    if end <= start:
+        raise ValueError("end must be after start")
+    source = str(raw.get("source") or "").strip()[:80] or None
+    refuse_frozen(db, start)
+    line = frozen_before(db)
+    # An edit spanning midnight into a frozen day stays, as that day takes no edits.
+    stay_edits = [edit for edit in db.corrections.stay_edits(start, end, source) if not is_frozen(line, edit["started_at"])]
+    overrides = [item for item in db.corrections.mode_overrides(start, end, source) if not is_frozen(line, item["started_at"])]
+    for edit in stay_edits:
+        db.corrections.delete_stay_edit(edit["id"])
+    for item in overrides:
+        db.corrections.delete_mode_override(item["id"])
+    if stay_edits or overrides:
+        db.caches.clear_analysis()
+    return {"stay_edits": len(stay_edits), "mode_overrides": len(overrides)}

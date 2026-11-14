@@ -6,9 +6,26 @@ from .repository import Repository
 
 
 class CorrectionsRepository(Repository):
-    def mode_overrides(self):
-        """Travel mode corrections, each for one trip or area stay identified by source and time."""
-        return self.rows("SELECT id,source,target,started_at,ended_at,mode,created_at,updated_at FROM mode_overrides ORDER BY started_at,id")
+    def mode_overrides(self, start=None, end=None, source=None):
+        """Travel mode corrections, each for one trip or area stay identified by source and time.
+
+        With start and end, only those whose window overlaps that span.
+        """
+        clauses, args = self._window(start, end, source)
+        return self.rows("SELECT id,source,target,started_at,ended_at,mode,created_at,updated_at FROM mode_overrides"
+                         + clauses + " ORDER BY started_at,id", args)
+
+    @staticmethod
+    def _window(start, end, source):
+        """A WHERE clause (and its arguments) for corrections overlapping start..end from one source."""
+        clauses, args = [], []
+        if start:
+            clauses.append("ended_at>=?"); args.append(parse_time(start))
+        if end:
+            clauses.append("started_at<=?"); args.append(parse_time(end))
+        if source:
+            clauses.append("source=?"); args.append(source)
+        return (" WHERE " + " AND ".join(clauses) if clauses else ""), args
 
     def add_mode_override(self, source, target, started_at, ended_at, mode, now):
         return self.execute("""INSERT INTO mode_overrides(source,target,started_at,ended_at,mode,created_at,updated_at)
@@ -27,14 +44,7 @@ class CorrectionsRepository(Repository):
         Detected stays are rebuilt from raw samples, so an edit names a window
         rather than a stay id and is applied whenever stays are read.
         """
-        clauses, args = [], []
-        if start:
-            clauses.append("ended_at>=?"); args.append(parse_time(start))
-        if end:
-            clauses.append("started_at<=?"); args.append(parse_time(end))
-        if source:
-            clauses.append("source=?"); args.append(source)
-        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        where, args = self._window(start, end, source)
         return self.rows("SELECT id,source,action,started_at,ended_at,lat,lon,created_at FROM stay_edits"
                          + where + " ORDER BY started_at,id", args)
 
